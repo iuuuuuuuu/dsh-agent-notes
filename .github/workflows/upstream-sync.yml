@@ -1,0 +1,81 @@
+# 定时跟随上游并自动合并。
+#
+# 存在理由：`skills/agent-notes` 是 czm15053/write-notes-like-deepseek 的
+# vendored 副本。上游改规则时，副本不会自己跟进 —— 而合并不该靠人记得。
+#
+# 这里做的是**把原始上游合并进本仓库**，然后由插件在启动时自动拉本仓库
+# （见 lib/self-update.js）。两段链路合起来，上游改规则 -> 用户机器生效，
+# 中间不需要人工介入。
+#
+# 设计取舍：
+#   - 在 GitHub 上跑，不占用户机器网络，也不需要用户的 git 凭据；
+#   - 合并后必须跑完门禁才提交 —— 引进了未经校验的内容比落后更糟；
+#   - 合并失败就让 job 变红，人来判断，绝不静默吞掉。
+name: upstream-sync
+
+on:
+  schedule:
+    # 上游更新不会触发我们的事件，只能主动查。每天一次即可。
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  # 避免两个同步任务同时 push 打架。
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 需要能 push 回去。
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # --auto 会用 git ls-remote 查上游真实 HEAD（不是 GitHub API，
+      # 后者未认证 60 次/小时就 403），与已同步的 ref 相同则直接退出 0。
+      # 有差异才逐个拉文件覆盖，并更新 tools/upstream-manifest.json。
+      - name: 合并上游最新 commit
+        id: sync
+        run: |
+          node tools/sync-upstream.mjs --auto
+          # 判断是否真的改动了文件，决定后续步骤跑不跑。
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "已是最新，无需提交。"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "检测到上游更新："
+            git diff --stat
+          fi
+
+      # 只有真的合并了才需要跑门禁 —— 没改动时跑一遍纯属浪费。
+      - name: 门禁（合并后必须通过才允许提交）
+        if: steps.sync.outputs.changed == 'true'
+        run: |
+          npm run verify
+          npm run notes:gate
+          npm test
+          npm run gate:fault-injection
+
+      - name: 提交并推送
+        if: steps.sync.outputs.changed == 'true'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # 只提交同步会改到的路径。lib/client.js 不在其中：它只引用 vendored
+          # 资产的路径，内容不随 vendored 文件变化（build.mjs 也不打包 board HTML）。
+          git add tools/upstream-manifest.json upstream.json skills/agent-notes
+          git commit -m "chore(sync): 合并上游 skill 副本
+
+          由 .github/workflows/upstream-sync.yml 自动生成。
+          合并后已通过 verify / notes:gate / test / fault-injection。"
+          git push

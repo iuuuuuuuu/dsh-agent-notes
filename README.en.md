@@ -223,7 +223,8 @@ These gates are **proven to actually fail** by fault injection (see below). The 
 Bundled content comes from a pinned upstream commit and can be checked and merged:
 
 ```sh
-npm run sync:latest                     # per-file compare against the upstream default branch (recommended)
+npm run sync:latest                     # per-file compare against the upstream default branch
+node tools/sync-upstream.mjs --auto      # resolve upstream HEAD and merge to it (CI; implies --yes)
 node tools/sync-upstream.mjs --check    # compare against the pinned ref only, zero writes
 node tools/sync-upstream.mjs            # show a per-file diff summary; needs --yes to write
 node tools/sync-upstream.mjs --yes      # actually overwrite the bundled copy and record the manifest
@@ -327,6 +328,35 @@ blocked here. The source constant is `UPDATE_SOURCE`.
 
 To disable it, remove the `scheduleSkillUpdate(...)` call in `lib/index.js` (or gate it
 behind a config flag).
+
+### Upstream merges in automatically (no more manual runs)
+
+`.github/workflows/upstream-sync.yml` runs daily (and on demand):
+
+1. `git ls-remote` to resolve the upstream branch's real HEAD;
+2. compare against the `ref` recorded in `tools/upstream-manifest.json` — **matching
+   is not enough**; it also verifies each local file against its digest (the ref only
+   records the last sync target, and local files may have been edited since). Any
+   discrepancy still goes through the merge;
+3. fetch and overwrite file by file, then update the manifest;
+4. **run verify / notes:gate / test / fault-injection before committing**;
+5. commit and push as `github-actions[bot]`.
+
+So the full chain is:
+
+```
+original upstream --(GitHub Action, daily)--> this repo --(async on plugin startup)--> user machines
+```
+
+Neither hop needs anyone to remember. If either fails the job goes red — nothing is
+skipped silently.
+
+**Why `git ls-remote` instead of the GitHub API**: unauthenticated requests hit 403
+after 60/hour, which a daily job would inevitably trip. The git protocol has no such
+limit.
+
+**Why resolve a commit instead of anchoring the branch name**: jsDelivr's manifest
+cache for branch names lags; anchoring a commit yields that commit's real tree.
 
 ### When does the model see updated rules
 

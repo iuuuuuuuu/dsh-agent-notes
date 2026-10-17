@@ -231,3 +231,53 @@ test('self-update: scheduleSkillUpdate 立即返回（不阻塞启动）', async
     globalThis.fetch = realFetch;
   }
 });
+
+test('sync-upstream: --auto 在 ref 未变但文件被改时也要纠正', async () => {
+  /* 回归测试：--auto 原先只比对「上游 HEAD vs manifest.ref」，
+     ref 相同就直接报「已是最新」放过。实测踩到：手动改坏 manifest 里
+     某个文件的摘要后，--auto 报绿 —— 那是假绿，本地副本与记录已经不符。
+     现在 ref 相同时会再校验本地文件与摘要，有出入仍走合并流程纠正。
+     这条测试用纯净副本 + 打桩，跑真实脚本并核对退出码与结果。 */
+  const { spawnSync } = await import('node:child_process');
+  const { mkdtempSync, cpSync, readFileSync, writeFileSync, rmSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+
+  const dir = mkdtempSync(join(tmpdir(), 'an-auto-'));
+  try {
+    /* 只拷跑脚本所需的最小集合。 */
+    cpSync('tools/sync-upstream.mjs', join(dir, 'tools', 'sync-upstream.mjs'));
+    cpSync('tools/upstream-manifest.json', join(dir, 'tools', 'upstream-manifest.json'));
+    cpSync('skills/agent-notes', join(dir, 'skills', 'agent-notes'), { recursive: true });
+
+    /* 篡改一个摘要，ref 保持不变。 */
+    const manifestFile = join(dir, 'tools', 'upstream-manifest.json');
+    const manifest = JSON.parse(readFileSync(manifestFile, 'utf8'));
+    const victim = 'SKILL.md';
+    const fake = `sha256:${'0'.repeat(64)}`;
+    manifest.files[victim] = fake;
+    writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
+
+    const result = spawnSync(process.execPath, ['tools/sync-upstream.mjs', '--auto'], {
+      cwd: dir,
+      encoding: 'utf8',
+      timeout: 180_000,
+      windowsHide: true
+    });
+
+    /* 网络不可用时明确跳过，不算假绿 —— 这条测试需要真上游。 */
+    if (result.status === 2) {
+      assert.match(String(result.stderr), /查不到上游 HEAD|无法校验/, '退出码 2 必须给出明确原因');
+      return;
+    }
+    assert.equal(result.status, 0, `脚本应成功退出，实际 ${result.status}: ${result.stderr}`);
+    assert.match(String(result.stderr), /与清单不符/, '必须报告本地与清单不符');
+
+    /* 关键断言：假摘要必须被纠正回真实值。 */
+    const after = JSON.parse(readFileSync(manifestFile, 'utf8'));
+    assert.notEqual(after.files[victim], fake, '被篡改的摘要必须被纠正');
+    assert.match(after.files[victim], /^sha256:[0-9a-f]{64}$/, '纠正后必须是合法摘要');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

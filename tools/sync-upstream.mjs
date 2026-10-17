@@ -20,12 +20,42 @@
  *   node tools/sync-upstream.mjs --yes      # 真的覆盖内置副本
  *   node tools/sync-upstream.mjs --ref <commit-or-branch>
  */
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
+
+/**
+ * 用 `git ls-remote` 查上游分支的真实 HEAD。
+ *
+ * 为什么不用 GitHub API：未认证请求 60 次/小时就 403，定时任务天天跑必撞墙。
+ * `git ls-remote` 走 git 协议，无此限制，且给的就是分支当前指向的 commit。
+ *
+ * 拿到 commit 而不是分支名很重要：jsDelivr 对**分支名**的清单缓存会滞后，
+ * 锚 commit 才拿到该次提交的真实树。
+ *
+ * @param {string} branch 分支名。
+ * @returns {string | undefined} commit SHA；失败 undefined。
+ */
+function resolveRemoteHead(branch) {
+  try {
+    const result = spawnSync('git', ['ls-remote', UPSTREAM.repository, branch], {
+      encoding: 'utf8',
+      timeout: 30_000,
+      windowsHide: true
+    });
+    if (result.status !== 0 || typeof result.stdout !== 'string') return undefined;
+    /* 输出形如 `<sha>\trefs/heads/main`；只取第一行的第一列。 */
+    const first = result.stdout.trim().split(/\r?\n/)[0] ?? '';
+    const sha = first.split(/\s+/)[0] ?? '';
+    return /^[0-9a-f]{40}$/.test(sha) ? sha : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** 上游仓库与默认 ref。
  *
@@ -179,12 +209,13 @@ async function collectPaths(ref) {
 
 /** 解析命令行参数。 */
 function parseArgs(argv) {
-  const args = { check: false, yes: false, latest: false, branch: 'main', ref: UPSTREAM.defaultRef };
+  const args = { check: false, yes: false, latest: false, auto: false, branch: 'main', ref: UPSTREAM.defaultRef };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--check') args.check = true;
     else if (arg === '--yes') args.yes = true;
     else if (arg === '--latest') args.latest = true;
+    else if (arg === '--auto') args.auto = true;
     else if (arg === '--branch') {
       const value = argv[index + 1];
       if (value === undefined) throw new Error('--branch 需要一个值');
@@ -196,10 +227,11 @@ function parseArgs(argv) {
       args.ref = value;
       index += 1;
     } else if (arg === '--help' || arg === '-h') {
-      console.log('用法: node tools/sync-upstream.mjs [--check] [--yes] [--latest] [--branch <name>] [--ref <branch|commit>]');
+      console.log('用法: node tools/sync-upstream.mjs [--check] [--yes] [--latest] [--auto] [--branch <name>] [--ref <branch|commit>]');
       console.log('  --check        只报告内置副本与该 ref 的差异，零写入');
       console.log('  --latest       与上游默认分支逐文件比对，判断是否落后（防假绿）');
-      console.log('  --branch <n>   配合 --latest 指定上游分支，默认 main');
+      console.log('  --auto         查上游 HEAD 并合并到它（CI 用；隐含 --yes）');
+      console.log('  --branch <n>   配合 --latest/--auto 指定上游分支，默认 main');
       console.log('  --yes          真的覆盖内置副本并记录清单');
       process.exit(0);
     } else {
@@ -210,11 +242,76 @@ function parseArgs(argv) {
 }
 
 /**
+ * 校验内置副本与清单记录的摘要是否一致（纯本地，不联网）。
+ *
+ * 用途：`--auto` 发现 ref 未变时，不能就此断定「没事」—— ref 只记录
+ * 上次同步的目标 commit，本地文件仍可能被改过或被别的工具覆盖。
+ *
+ * @returns {{ mismatched: string[], missing: string[] } | undefined}
+ *   有出入的文件；清单缺失或不可读时 undefined（调用方据此报错，不当成「无差异」）。
+ */
+function checkLocalAgainstManifest() {
+  const manifest = readManifest();
+  if (manifest === undefined) return undefined;
+  const mismatched = [];
+  const missing = [];
+  for (const [rel, expected] of Object.entries(manifest.files ?? {})) {
+    const local = targetPath(rel);
+    if (!existsSync(local)) {
+      missing.push(rel);
+      continue;
+    }
+    const actual = `sha256:${createHash('sha256').update(readFileSync(local, 'utf8'), 'utf8').digest('hex')}`;
+    if (actual !== expected) mismatched.push(rel);
+  }
+  return { mismatched, missing };
+}
+
+/**
  * 主流程。
  */
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const ref = args.ref;
+  let ref = args.ref;
+
+  /* `--auto`：查上游真实 HEAD 并设为目标 ref，隐含 --yes。
+     这是给 CI 用的 —— 定时任务不知道上游新 commit 是什么，必须自己查。
+     用 git ls-remote 而不是 GitHub API：后者未认证 60 次/小时就 403。
+     先查一次 HEAD：若与已同步的 ref 相同，就能直接说「无事可做」，
+     省掉逐个拉 21 个文件的开销。 */
+  if (args.auto) {
+    const head = resolveRemoteHead(args.branch);
+    if (head === undefined) {
+      console.error('✖ 查不到上游 HEAD（git ls-remote 失败）。');
+      console.error('  这不是「已是最新」—— 本次无法判断，退出码 2。');
+      process.exit(2);
+    }
+    const manifest = readManifest();
+    const synced = manifest?.ref;
+    console.log(`上游 HEAD: ${head}`);
+    console.log(`已同步:   ${typeof synced === 'string' ? synced : '（无记录）'}`);
+    if (synced === head) {
+      /* ref 相同只说明「上次同步的目标」没变，**不代表本地文件没被改过**。
+         实测踩到：手动改坏 manifest 里某个文件的摘要后，--auto 直接报
+         「已是最新」放过 —— 那是假绿。所以再校验一遍本地文件与清单是否一致，
+         有出入就仍然走合并流程把它纠正回来。 */
+      const drift = await checkLocalAgainstManifest();
+      if (drift === undefined) {
+        console.error('✖ 无法校验内置副本与清单是否一致。');
+        process.exit(2);
+      }
+      if (drift.mismatched.length === 0 && drift.missing.length === 0) {
+        console.log('\n✔ 已是最新，且内置副本与清单一致，无需合并。');
+        process.exit(0);
+      }
+      const total = drift.mismatched.length + drift.missing.length;
+      console.error(`\n⚠ ref 未变但本地有 ${total} 个文件与清单不符，重新合并以纠正：`);
+      for (const rel of drift.mismatched) console.error(`  内容不同  ${rel}`);
+      for (const rel of drift.missing) console.error(`  文件缺失  ${rel}`);
+    }
+    ref = head;
+    args.yes = true;
+  }
 
   /* `--latest`：判断内置副本是否落后于上游默认分支。
      与 `--check` 是两件事 —— `--check` 只回答「副本与该 ref 是否逐字相同」，

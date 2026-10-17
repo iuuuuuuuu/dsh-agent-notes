@@ -13,6 +13,14 @@
   - 已接进 `npm run check` 与 `.github/workflows/verify.yml`；`tools/fault-injection.mjs` 新增 `[verify-notes]` 一节，对空树、不存在的树、违规笔记断言变红，并以「合规树必须 exit=0」作反向对照。
   - 文档同步：`README.md` / `README.en.md` 的 CI 片段加了「照抄会恒绿」的警告，`AGENTS.md` 把 `npm run notes:gate` 列为推荐门禁。
 
+- **上游自动合并**（`.github/workflows/upstream-sync.yml`）：每日定时把原始上游合并进本仓库，
+  不再依赖人记得跑 `sync`。链路：原始上游 →(Action) 本仓库 →(插件启动异步) 用户机器，两段都自动。
+  - 用 `git ls-remote` 查上游 HEAD，不用 GitHub API（未认证 60 次/小时即 403）
+  - 拿到 commit 而非锚分支名（jsDelivr 对分支名的清单缓存会滞后）
+  - 新增 `--auto`：ref 相同时**仍校验本地文件与摘要是否一致** —— 只比 ref 会漏掉
+    「记录没变但本地被改过」，那是假绿。实测篡改摘要后旧逻辑直接报「已是最新」
+  - 合并后必须过 verify / notes:gate / test / fault-injection 才允许提交
+
 - **项目内副本的检测与同步**（`/agent-notes sync-skill`）：项目仓库里通常还有一份
   `.agents/skills/agent-notes/`（被项目 git 跟踪，供项目自己的 CI 用）。插件不擅自改它，
   改为「检测 + 提示 + 用户确认」：

@@ -200,7 +200,8 @@ node skills/agent-notes/scripts/verify-archived-agent-notes.ts  # 归档封印�
 内置内容来自上游固定 commit，可主动核对与合并：
 
 ```sh
-npm run sync:latest                     # 与上游默认分支逐文件比对，判断是否落后（推荐）
+npm run sync:latest                     # 与上游默认分支逐文件比对，判断是否落后
+node tools/sync-upstream.mjs --auto      # 查上游 HEAD 并合并到它（CI 用，隐含 --yes）
 node tools/sync-upstream.mjs --check    # 只比对钉死的那个 ref，零写入
 node tools/sync-upstream.mjs            # 展示逐文件 diff 摘要，需要 --yes 才落盘
 node tools/sync-upstream.mjs --yes      # 真的覆盖内置副本并记录清单
@@ -282,6 +283,32 @@ ci.yml → npm run verify-notes → tsx .agents/skills/agent-notes/scripts/*.ts
 ——原始上游改坏了可以在这里挡掉。来源常量在 `UPDATE_SOURCE`。
 
 关掉它：把 `lib/index.js` 里的 `scheduleSkillUpdate(...)` 调用删掉即可（或按需加配置项）。
+
+### 上游会自动合并进来（不再需要手动跑）
+
+`.github/workflows/upstream-sync.yml` 每天定时（也可手动触发）执行：
+
+1. `git ls-remote` 查上游分支的真实 HEAD；
+2. 与 `tools/upstream-manifest.json` 记录的 `ref` 比较 —— **相同还不够**，
+   还会逐文件校验本地内容与摘要是否一致（ref 只记录上次同步的目标，
+   本地文件仍可能被改过）；有出入一样走合并；
+3. 逐文件拉取并覆盖，更新清单；
+4. **跑完 verify / notes:gate / test / fault-injection 才允许提交**；
+5. 用 `github-actions[bot]` 身份提交并 push。
+
+所以完整链路是：
+
+```
+原始上游 --(GitHub Action，每日)--> 本仓库 --(插件启动时异步)--> 用户机器
+```
+
+两段都不再需要人记得。任何一段失败都会让 job 变红，不会静默跳过。
+
+**为什么用 `git ls-remote` 而不是 GitHub API**：未认证请求 60 次/小时就 403，
+定时任务天天跑必撞墙。git 协议没这个限制。
+
+**为什么拿到 commit 而不直接锚分支名**：jsDelivr 对分支名的清单缓存会滞后，
+锚 commit 才能拿到该次提交的真实树。
 
 ### 副本更新后，模型什么时候看到新规则
 
