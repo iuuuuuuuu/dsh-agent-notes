@@ -256,11 +256,39 @@ After merging, always re-run:
 node --test tools/*.test.mjs && node tools/fault-injection.mjs
 ```
 
+### The bundled copy updates itself (async, never blocks startup)
+
+`skills/agent-notes` is a vendored copy. So that an installed plugin does not need a
+manual sync, it pulls this repository's skill directory **in the background** on
+`apply` (`lib/self-update.js`):
+
+- **Never blocks startup**: `scheduleSkillUpdate()` is fire-and-forget; slow network
+  cannot delay `apply`. The tradeoff is that the copy may still be stale for the
+  instant right after startup.
+- **Fails silently**: offline, CDN unreachable, or any single file missing → the whole
+  batch is abandoned and **the existing copy is kept**. A slightly old skill is
+  acceptable; an unusable one is not.
+- **Atomic writes**: each file goes to `.tmp` then `rename`, so a mid-flight failure
+  never leaves half a tree.
+- **No rewrite when identical**: avoids touching mtime and firing a pointless hot swap
+  on every startup.
+- **Hot swap**: after actually writing new content it calls the host's
+  `SkillProviderControl.invalidate()`, which drops cached catalogs and notifies
+  consumers — the model sees the new text on its next load.
+
+Why pull from **this** repository rather than the original upstream: this repo merges
+from upstream, which adds a human review layer — if upstream breaks a rule, it can be
+blocked here. The source constant is `UPDATE_SOURCE`.
+
+To disable it, remove the `scheduleSkillUpdate(...)` call in `lib/index.js` (or gate it
+behind a config flag).
+
 ### When does the model see updated rules
 
 `get()` in `lib/skill.js` **reads the disk on every call** — there is no cache. So
-after `sync --yes`, the model gets the new content on its next skill load and **DSH
-does not need a restart**.
+after the self-update writes new content and calls `invalidate()`, the host drops its
+cached catalog and the model gets the new content on its next skill load — **DSH does
+not need a restart**.
 
 Caveat: skill content is not injected every turn — it loads on demand
 (`SkillDefinition` semantics), so a session that already loaded it may still hold the
