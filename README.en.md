@@ -65,20 +65,17 @@ dsh plugin add --profile <your-profile> github:iuuuuuuuu/dsh-agent-notes
 /agent-notes gate            Run the real gates (also: gate tree / gate format / gate archived)
 ```
 
-### Two status indicators in the UI
+### Status indicator in the UI
 
-You don't have to type a command to see whether the policy is on for the current session:
+You don't have to type a command to see whether the policy is on for the current
+session: a green chip "● Agent notes" sits **left of the composer tool row**, next
+to the permission selector ("Full access" / "Workspace write"), and **clicking it
+toggles**. It greys out while off.
 
-| Location | Form |
-|---|---|
-| **Above the input box** | A full-width green tag "● Agent notes this session"; hidden while off |
-| **Left of the composer tool row** | A green chip "● Agent notes" next to the permission selector ("Full access" / "Workspace write"); click to toggle |
-
-Both read the **same session projection** (`agentNotes`), so they can never
-disagree — across reloads, reconnects, and session switches.
-
-Clicking the switch submits the official slash command (`/agent-notes on|off`),
-so it is exactly equivalent to typing it, and costs zero tokens.
+It reads the **session projection** (`agentNotes`), so it stays correct across
+reloads, reconnects, and session switches. Clicking submits the official slash
+command (`/agent-notes on|off`), so it is exactly equivalent to typing it, and
+costs zero tokens.
 
 > Design note: the projection only folds the host's own `command/run` events —
 > **this plugin never writes to the session log**. It cannot: it has zero

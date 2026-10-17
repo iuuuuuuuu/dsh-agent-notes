@@ -131,18 +131,26 @@ test('客户端 bundle：信封契约（id 必须等于包名）', () => {
   assert.ok(bundle.trimEnd().endsWith('}});'), 'bundle 必须闭合 load 调用');
 });
 
-test('客户端 bundle：注册进 composer 工具行与输入框上方 dock', () => {
+test('客户端 bundle：只在 composer 工具行注册一个开关', () => {
   const bundle = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8');
   assert.ok(bundle.includes('conversation.input.left'), '必须注册 composer 工具行左侧（截图里「完全权限」那排）');
-  assert.ok(bundle.includes('conversation.input.dock'), '生效 tag 必须注册进输入框上方 dock');
-  // 不用 header.utilities：它被 DSH 包在 `!hideChrome` 里，空会话（新会话）
-  // 时整个工具区不渲染 —— 而新会话恰恰最需要看到是否生效。实测踩过。
-  // 只匹配**实际的注册调用**：注释里会提到这个名字来解释为何不用它。
+  // 只有一个 UI 入口。曾经还注册过输入框上方的 dock tag，按 Owner 要求已移除：
+  // 工具行那一枚胶囊已足够表达启用状态，上方再来一条是冗余视觉噪声。
+  assert.ok(!/inject\(\s*['"]conversation\.input\.dock['"]/.test(bundle),
+    '不应注册 input.dock（上方冗余 tag 已按 Owner 要求移除）');
   assert.ok(!/inject\(\s*['"]conversation\.session\.header\.utilities['"]/.test(bundle),
     '不应注册 header.utilities（空会话下被 hideChrome 隐藏）');
-  // input.dock 是 list 类型，IG5 也注册在那里；list 允许多条目共存，
-  // 因此共用是安全的（IG5 order 31，本插件 order 40）。
-  assert.ok(bundle.includes('order: 40'), '应以 order 40 排在 IG5 徽标之后');
+  // 只该有一个 slots 注册调用：多一个就意味着又冒出了第二个 UI 入口。
+  const registrations = bundle.match(/slots\.inject\(/g) ?? [];
+  assert.equal(registrations.length, 1, `应只注册一个槽位，实际 ${registrations.length} 个`);
+});
+
+test('客户端 bundle：移除 tag 后不得留下孤儿引用', () => {
+  const bundle = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8');
+  // 样式、文案、组件都该清干净。留着就是死代码，将来会误导维护者。
+  for (const orphan of ['an-tag', 'tagSession', 'tagGlobal', 'AgentNotesTag']) {
+    assert.ok(!bundle.includes(orphan), `残留孤儿引用: ${orphan}`);
+  }
 });
 
 test('客户端 bundle：用官方命令通道写状态，不自己写日志', () => {
