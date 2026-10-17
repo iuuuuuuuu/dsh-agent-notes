@@ -189,6 +189,12 @@ node skills/agent-notes/scripts/verify-archived-agent-notes.ts  # 归档封印�
 - run: node skills/agent-notes/scripts/verify-agent-note-*.ts
 ```
 
+> ⚠️ **照抄上面两行会得到一条恒绿门禁。** 三个脚本在**空集合**上都 `exit 0` 并打印
+> `ok: 0 note(s) verified` —— 笔记树不存在时 CI 照样绿。它们只回答「已有的笔记合不合规」，
+> 不回答「有没有笔记」。要么先在自己的 CI 里补一步「至少一篇」的前置判断，
+> 要么直接复用本仓库的 `tools/verify-notes.mjs`（它调的 `lib/notes.js` 会把空树判成
+> `NO_NOTES_TREE` / `NO_NOTES_YET`，并且这条行为有回归测试与故障注入守着）。
+
 ## 上游合并
 
 内置内容来自上游固定 commit，可主动核对与合并：
@@ -225,6 +231,38 @@ PR 和每日定时任务里跑它。
 ```sh
 node --test tools/*.test.mjs && node tools/fault-injection.mjs
 ```
+
+### 项目内副本：只提示，不擅自改（`/agent-notes sync-skill`）
+
+除了插件自带那份，**项目仓库里通常还有一份** `.agents/skills/agent-notes/`
+（被项目 git 跟踪，供项目自己的 CI 门禁使用）。插件自更新**只管自己那份**。
+
+为什么不去自动改项目那份：它属于项目仓库的正式内容。插件擅自改写会
+
+- 让用户的 `git status` 突然变脏；
+- 让本地与 CI 跑不同版本的校验脚本；
+- 往项目仓库里注入意料之外的改动。
+
+所以这里是**检测 + 提示 + 用户确认**：
+
+1. 开关打开时，插件比对项目副本与内置版本；落后就在注入的规范末尾追加一段提示，
+   明确要求模型**先问用户**，而不是自己动手；
+2. 用户同意后跑 `/agent-notes sync-skill` —— 默认只打印差异（预览），
+   加 `--yes` 才真的落盘；
+3. 项目里多出来的文件（内置版本没有的）**不会被删除**，那是项目自己的东西。
+
+#### CI 不用单独同步
+
+项目 CI 的调用链是：
+
+```
+ci.yml → npm run verify-notes → tsx .agents/skills/agent-notes/scripts/*.ts
+```
+
+`ci.yml` 里只写 `npm run verify-notes`，**不含版本号或文件清单**。所以同步脚本目录
+就等于更新了 CI 实际执行的校验逻辑，`ci.yml`、`package.json`、`.github/` 都不需要改。
+
+这些脚本**零外部依赖**，只用 `node:` 内置模块和互相引用，换版本不会引入新的 npm 包。
 
 ### 技能副本会自己更新（异步，不阻塞启动）
 

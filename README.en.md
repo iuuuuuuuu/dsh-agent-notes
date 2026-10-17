@@ -210,6 +210,14 @@ These gates are **proven to actually fail** by fault injection (see below). The 
 - run: node skills/agent-notes/scripts/verify-agent-note-*.ts
 ```
 
+> ⚠️ **Copying those two lines gives you a permanently green gate.** All three scripts `exit 0`
+> on an **empty set** and print `ok: 0 note(s) verified` — CI stays green when the notes tree
+> does not exist at all. They answer "are the existing notes compliant?", never "are there any
+> notes?". Either add your own "at least one note" precondition to CI, or reuse this repo's
+> `tools/verify-notes.mjs`: the `lib/notes.js` it calls classifies an empty tree as
+> `NO_NOTES_TREE` / `NO_NOTES_YET`, and that behaviour is held by regression tests and fault
+> injection.
+
 ## Upstream merging
 
 Bundled content comes from a pinned upstream commit and can be checked and merged:
@@ -255,6 +263,43 @@ After merging, always re-run:
 ```sh
 node --test tools/*.test.mjs && node tools/fault-injection.mjs
 ```
+
+### The in-project copy: hint only, never modified behind your back (`/agent-notes sync-skill`)
+
+Besides the bundled one, **a project repo usually carries its own copy** at
+`.agents/skills/agent-notes/` (git-tracked, used by that project's own CI gate). The
+self-update above **only manages the bundled copy**.
+
+Why it does not touch the project copy automatically: that copy is part of the project
+repository. Rewriting it would
+
+- dirty the user's `git status` out of nowhere;
+- make local and CI run different versions of the verification scripts;
+- inject unexpected changes into the project repo.
+
+So the flow is **detect + hint + user confirmation**:
+
+1. When the switch is on, the plugin compares the project copy against the bundled one;
+   if it lags, a paragraph is appended to the injected policy that tells the model to
+   **ask the user first**, not to act on its own;
+2. On approval, run `/agent-notes sync-skill` — it prints a diff by default (preview);
+   add `--yes` to actually write;
+3. Files present only in the project are **never deleted** — they belong to the project.
+
+#### CI needs no separate sync
+
+The project CI chain is:
+
+```
+ci.yml → npm run verify-notes → tsx .agents/skills/agent-notes/scripts/*.ts
+```
+
+`ci.yml` only says `npm run verify-notes` — **no version or file list**. So syncing the
+script directory updates exactly what CI executes; `ci.yml`, `package.json` and
+`.github/` need no changes.
+
+Those scripts have **zero external dependencies** — only `node:` builtins and mutual
+imports — so a version bump cannot introduce a new npm package.
 
 ### The bundled copy updates itself (async, never blocks startup)
 

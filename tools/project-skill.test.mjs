@@ -1,0 +1,132 @@
+/**
+ * 项目副本检测与同步的测试。
+ *
+ * 为什么单独测：项目里的 `.agents/skills/agent-notes/` 被项目 git 跟踪，
+ * 插件擅自改写会在用户仓库里制造未提交改动。所以这里的核心契约是
+ * **只在不一致时才提示、只在显式 --yes 时才落盘**。
+ */
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import {
+  BUNDLED_SKILL_DIR,
+  PROJECT_SKILL_REL,
+  buildDriftHint,
+  inspectProjectSkillCopy,
+  syncProjectSkillCopy
+} from '../lib/project-skill.js';
+import { POLICY_MARKERS, buildPolicyText } from '../lib/policy.js';
+
+/** 造一个带项目副本的临时项目目录。 */
+function makeProject() {
+  const dir = mkdtempSync(join(tmpdir(), 'an-proj-'));
+  const target = join(dir, PROJECT_SKILL_REL);
+  cpSync(BUNDLED_SKILL_DIR, target, { recursive: true });
+  return { dir, target };
+}
+
+test('project-skill: 副本与内置一致时不提示', () => {
+  const { dir } = makeProject();
+  try {
+    const info = inspectProjectSkillCopy(dir);
+    assert.equal(info.present, true, '应当识别出副本存在');
+    assert.equal(info.behind, false, '完全一致时不得报落后');
+    assert.equal(buildDriftHint(info), undefined, '一致时必须不产生提示');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('project-skill: 没有副本时不提示，也不误报', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'an-noproj-'));
+  try {
+    const info = inspectProjectSkillCopy(dir);
+    assert.equal(info.present, false, '没有副本');
+    assert.equal(info.behind, false, '没有副本不等于落后');
+    assert.equal(buildDriftHint(info), undefined, '没有副本时不该提示');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('project-skill: 内容被改 / 文件缺失都算落后，并给出可问用户的提示', () => {
+  const { dir, target } = makeProject();
+  try {
+    const skill = join(target, 'SKILL.md');
+    const original = readFileSync(skill, 'utf8');
+    writeFileSync(skill, `${original}\n篡改\n`, 'utf8');
+    /* 再删一个文件，覆盖 missing 分支。 */
+    rmSync(join(target, 'templates', 'proposed.md'), { force: true });
+
+    const info = inspectProjectSkillCopy(dir);
+    assert.equal(info.present, true);
+    assert.equal(info.behind, true, '有差异时必须报落后');
+    assert.ok(info.changed.includes('SKILL.md'), 'SKILL.md 应计入 changed');
+    assert.ok(info.missing.includes('templates/proposed.md'), '删除的文件应计入 missing');
+
+    const hint = buildDriftHint(info);
+    assert.equal(typeof hint, 'string', '落后时必须产生提示');
+    /* 提示要能让模型知道「去问用户」而不是自己改。 */
+    assert.match(hint, /问/, '提示必须要求先问用户');
+    assert.match(hint, /sync-skill/, '提示必须给出命令名');
+    assert.match(hint, /\d+ 个文件/, '提示应给出规模');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('project-skill: 项目多出来的文件不算落后，且不会被删', () => {
+  const { dir, target } = makeProject();
+  try {
+    const extra = join(target, 'references', 'local-only.md');
+    writeFileSync(extra, '# 项目自己的东西\n', 'utf8');
+
+    const info = inspectProjectSkillCopy(dir);
+    assert.equal(info.behind, false, '多出文件不算落后');
+    assert.ok(info.extra.includes('references/local-only.md'), '应记进 extra');
+
+    syncProjectSkillCopy(dir, {});
+    assert.ok(existsSync(extra), '同步不得删除项目自己加的文件');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('project-skill: dryRun 不写盘，--yes 才真写', () => {
+  const { dir, target } = makeProject();
+  try {
+    const skill = join(target, 'SKILL.md');
+    writeFileSync(skill, '# 旧内容\n', 'utf8');
+
+    const preview = syncProjectSkillCopy(dir, { dryRun: true });
+    assert.ok(preview.written.includes('SKILL.md'), '预览应列出待写文件');
+    assert.equal(readFileSync(skill, 'utf8'), '# 旧内容\n', '预览绝不能写盘');
+
+    const applied = syncProjectSkillCopy(dir, {});
+    assert.ok(applied.written.includes('SKILL.md'), '落盘应列出已写文件');
+    assert.equal(
+      readFileSync(skill, 'utf8'),
+      readFileSync(join(BUNDLED_SKILL_DIR, 'SKILL.md'), 'utf8'),
+      '落盘后必须与内置版本逐字相同'
+    );
+    /* 写完之后再查一次，应当已经一致。 */
+    assert.equal(inspectProjectSkillCopy(dir).behind, false, '同步后不应再报落后');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('policy: 带提示时规范仍完整，只是追加一段', () => {
+  const base = buildPolicyText();
+  for (const marker of POLICY_MARKERS) {
+    assert.ok(base.includes(marker), `基础规范必须含判据 ${marker}`);
+  }
+  const withHint = buildPolicyText('# 落后提示\n去问用户。');
+  assert.ok(withHint.startsWith(base), '追加提示不得改动原有规范');
+  assert.ok(withHint.includes('去问用户'), '提示应被附加');
+  assert.equal(buildPolicyText(undefined), base, '无提示时与原规范完全一致');
+  assert.equal(buildPolicyText('   '), base, '空白提示等同于无提示');
+});

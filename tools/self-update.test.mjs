@@ -1,27 +1,79 @@
 /**
  * 技能副本自更新的测试。
  *
- * 重点不是「能拉下来」，而是三条会让插件变成砖头的边界：
- *   1. 网络失败时必须**保留现有副本**，不能清空、不能写半套；
- *   2. 远端清单里的可疑路径（`../`）必须被挡住，不能写到包外；
- *   3. 内容相同时**不许重写磁盘**（重写会让 mtime 变化，触发无谓的热替换）。
+ * **全部离线**：所有 HTTP 都用打桩替换。理由：这些测试原先真的打 CDN，
+ * 和 tools/sync-upstream.test.mjs 并发跑时会互相抢配额，偶发失败。
+ * 偶发失败本身就是缺陷 —— 一个时绿时红的门禁等于没有门禁。
  *
- * 第 1、2 条用打桩（stub）覆盖 —— 真实的断网与恶意清单无法在测试里制造。
- * 第 3 条用真实调用验证。
+ * 重点不是「能拉下来」（那由实机验证覆盖），而是四条会让插件变砖的边界：
+ *   1. 网络失败时必须**保留现有副本**，不能清空、不能写半套；
+ *   2. 远端清单里的可疑路径（`../`）必须被挡住，不能写到目标目录外；
+ *   3. 内容相同时**不许重写磁盘**（否则每次启动都触发无谓热替换）；
+ *   4. `scheduleSkillUpdate` 必须 fire-and-forget，不阻塞启动。
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { basename, join } from 'node:path';
+import { join } from 'node:path';
 
 import { SKILL_COPY_DIR, UPDATE_SOURCE, updateSkillCopy } from '../lib/self-update.js';
 
-/** 备份某个副本文件的当前内容，返回还原函数。 */
-function withBackup(rel) {
-  const target = join(SKILL_COPY_DIR, rel);
-  const original = readFileSync(target, 'utf8');
-  return () => writeFileSync(target, original, 'utf8');
+/** 目标目录的隔离沙箱：每个测试一份，绝不碰真实的 skills/agent-notes。 */
+function makeSandbox() {
+  const dir = mkdtempSync(join(tmpdir(), 'an-selfupd-'));
+  const target = join(dir, 'agent-notes');
+  cpSync(SKILL_COPY_DIR, target, { recursive: true });
+  return { dir, target };
+}
+
+/** 沙箱里所有文件的相对路径 → 内容。 */
+function snapshot(dir) {
+  const out = new Map();
+  const walk = (base, rel) => {
+    const entries = readdirSync(base, { withFileTypes: true });
+    for (const entry of entries) {
+      const full = join(base, entry.name);
+      const key = rel === '' ? entry.name : `${rel}/${entry.name}`;
+      if (entry.isDirectory()) walk(full, key);
+      else out.set(key, readFileSync(full, 'utf8'));
+    }
+  };
+  walk(dir, '');
+  return out;
+}
+
+/**
+ * 用给定内容打桩 fetch，模拟远端仓库。
+ *
+ * @param {Map<string, string>} files 相对技能目录的路径 → 内容。
+ * @returns {() => void} 还原函数。
+ */
+function stubRemote(files) {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const text = String(url);
+    if (text.includes('data.jsdelivr.com')) {
+      return new Response(JSON.stringify({
+        files: [...files.keys()].map((rel) => ({ name: `${UPDATE_SOURCE.prefix}/${rel}` }))
+      }), { status: 200 });
+    }
+    /* 从 URL 里还原相对路径：`.../skills/agent-notes/<rel>`。 */
+    const marker = `${UPDATE_SOURCE.prefix}/`;
+    const index = text.indexOf(marker);
+    const rel = index < 0 ? '' : decodeURI(text.slice(index + marker.length));
+    const content = files.get(rel);
+    if (content === undefined) return new Response('not found', { status: 404 });
+    return new Response(content, { status: 200 });
+  };
+  return () => { globalThis.fetch = realFetch; };
+}
+
+/** 当前沙箱内容当作「远端」用。 */
+function remoteFromSandbox(target) {
+  const map = new Map();
+  for (const [rel, content] of snapshot(target)) map.set(rel, content);
+  return map;
 }
 
 test('self-update: 来源指向本仓库，不是原始上游', () => {
@@ -32,64 +84,63 @@ test('self-update: 来源指向本仓库，不是原始上游', () => {
   assert.equal(UPDATE_SOURCE.branch, 'main');
 });
 
-test('self-update: 内容一致时不重写磁盘', async () => {
-  /* 先跑一次确保是最新，再跑一次看有没有多写。
-     用 mtime 判断：如果每次都重写，mtime 会变，热替换会被无谓触发。 */
-  const first = await updateSkillCopy({});
-  const second = await updateSkillCopy({});
-
-  /* 两次都不该是 failed —— failed 说明网络或 CDN 挂了，测试环境问题。 */
-  assert.notEqual(second.status, 'failed', `更新失败: ${second.reason ?? ''}`);
-  assert.ok(
-    ['current', 'updated'].includes(second.status),
-    `状态异常: ${second.status}`
-  );
-  /* 第二次（或第二次等于第一次的结果）必须收敛到 current：内容已一致。 */
-  if (first.status === 'current') {
-    assert.equal(second.status, 'current', '内容已一致时第二次运行必须报 current');
+test('self-update: 内容一致时报 current，且不写盘', async () => {
+  const box = makeSandbox();
+  const restore = stubRemote(remoteFromSandbox(box.target));
+  try {
+    const before = snapshot(box.target);
+    const result = await updateSkillCopy({ targetDir: box.target });
+    assert.equal(result.status, 'current', '内容一致必须报 current');
+    /* 逐字节比对：不写盘意味着内容完全不变。 */
+    const after = snapshot(box.target);
+    assert.equal(after.size, before.size, '文件数不得变化');
+    for (const [rel, content] of before) {
+      assert.equal(after.get(rel), content, `${rel} 不得被改写`);
+    }
+  } finally {
+    restore();
+    rmSync(box.dir, { recursive: true, force: true });
   }
 });
 
 test('self-update: 本地被篡改时真的拉回上游内容', async () => {
+  const box = makeSandbox();
+  const remote = remoteFromSandbox(box.target);
   const rel = 'references/when-to-write.md';
-  const restore = withBackup(rel);
-  const target = join(SKILL_COPY_DIR, rel);
+  const target = join(box.target, rel);
+  const original = readFileSync(target, 'utf8');
+  writeFileSync(target, '# 篡改\n', 'utf8');
+  const restore = stubRemote(remote);
   try {
-    const original = readFileSync(target, 'utf8');
-    writeFileSync(target, '# 篡改\n', 'utf8');
-
-    const result = await updateSkillCopy({});
-    /* 网络不可用时明确 skip 而不是假绿 —— 这条测试真的需要网络。 */
-    if (result.status === 'failed') {
-      assert.ok(readFileSync(target, 'utf8') === '# 篡改\n', '拉取失败时不得改动本地文件');
-      return;
-    }
+    const result = await updateSkillCopy({ targetDir: box.target });
     assert.equal(result.status, 'updated', '被篡改时应报 updated');
     assert.ok(result.files >= 1, '至少一个文件被写入');
     assert.equal(readFileSync(target, 'utf8'), original, '必须拉回上游原文');
   } finally {
     restore();
+    rmSync(box.dir, { recursive: true, force: true });
   }
 });
 
 test('self-update: 远端不可达时保留现有副本，不抛', async () => {
-  /* 用一个不存在的仓库地址制造「远端不可达」。
-     真实断网无法在测试里制造，但 HTTP 404 走的是同一条失败分支。 */
-  const realFetch = globalThis.fetch;
-  globalThis.fetch = async () => new Response('not found', { status: 404 });
+  const box = makeSandbox();
+  const restore = stubRemote(new Map());
   try {
-    const result = await updateSkillCopy({});
+    const result = await updateSkillCopy({ targetDir: box.target });
     assert.equal(result.status, 'failed', '远端不可达必须报 failed');
-    /* 关键：副本必须还在，且能正常读。 */
-    const content = readFileSync(join(SKILL_COPY_DIR, 'SKILL.md'), 'utf8');
+    const content = readFileSync(join(box.target, 'SKILL.md'), 'utf8');
     assert.ok(content.length > 0, '失败后技能文件不得被清空');
   } finally {
-    globalThis.fetch = realFetch;
+    restore();
+    rmSync(box.dir, { recursive: true, force: true });
   }
 });
 
 test('self-update: 清单里的路径穿越被挡住', async () => {
-  /* 远端清单若被篡改成 `../../../evil`，绝不能写到包外。 */
+  /* 远端清单若被篡改成 `../../../evil`，绝不能写到目标目录之外。
+     断言落在**文件系统事实**上（外面有没有多出文件），而不是只看返回状态 ——
+     后者太弱，failed/updated 都能过。 */
+  const box = makeSandbox();
   const realFetch = globalThis.fetch;
   globalThis.fetch = async (url) => {
     const text = String(url);
@@ -101,35 +152,73 @@ test('self-update: 清单里的路径穿越被挡住', async () => {
         ]
       }), { status: 200 });
     }
-    /* 文件内容统一返回一个与本地必然不同的值，确保进入写盘分支。 */
     return new Response('# 恶意内容\n', { status: 200 });
   };
   try {
-    const result = await updateSkillCopy({});
-    /* 要么被挡（failed:unsafe-path），要么整批放弃；绝不允许成功写入。 */
-    assert.ok(
-      result.status === 'failed' || result.status === 'updated',
-      '状态异常'
-    );
-    if (result.status === 'failed') {
-      assert.match(String(result.reason), /unsafe-path|fetch-incomplete|remote-listing/);
+    const result = await updateSkillCopy({ targetDir: box.target });
+    assert.equal(result.status, 'failed', '含穿越路径的清单必须整批拒绝');
+    assert.equal(result.reason, 'unsafe-path', '必须明确指出是路径不安全');
+    assert.equal(existsSync(join(box.dir, 'evil.md')), false, '不得在沙箱根写出 evil.md');
+    assert.equal(existsSync(join(box.dir, '..', 'evil.md')), false, '不得在沙箱上一级写出 evil.md');
+  } finally {
+    globalThis.fetch = realFetch;
+    rmSync(box.dir, { recursive: true, force: true });
+  }
+});
+
+test('self-update: 部分文件拉不到时整批放弃，不留半套', async () => {
+  /* 这是最危险的失败模式：只写了一半文件，副本处于不一致状态，
+     门禁脚本可能一半新一半旧。必须整批放弃。 */
+  const box = makeSandbox();
+  const remote = remoteFromSandbox(box.target);
+  /* 篡改一个文件让它进入写盘分支，同时让另一个文件 404。 */
+  const rel = 'references/when-to-write.md';
+  writeFileSync(join(box.target, rel), '# 篡改\n', 'utf8');
+  const before = snapshot(box.target);
+
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url) => {
+    const text = String(url);
+    if (text.includes('data.jsdelivr.com')) {
+      return new Response(JSON.stringify({
+        files: [...remote.keys()].map((name) => ({ name: `${UPDATE_SOURCE.prefix}/${name}` }))
+      }), { status: 200 });
+    }
+    if (text.endsWith('templates/rejected.md')) {
+      return new Response('not found', { status: 404 });
+    }
+    const marker = `${UPDATE_SOURCE.prefix}/`;
+    const index = text.indexOf(marker);
+    const name = index < 0 ? '' : decodeURI(text.slice(index + marker.length));
+    const content = remote.get(name);
+    return content === undefined
+      ? new Response('not found', { status: 404 })
+      : new Response(content, { status: 200 });
+  };
+  try {
+    const result = await updateSkillCopy({ targetDir: box.target });
+    assert.equal(result.status, 'failed', '有文件拉不到必须整批失败');
+    assert.match(String(result.reason), /fetch-incomplete/, '原因应指明拉取不完整');
+    /* 关键：一个文件都不许被改。 */
+    const after = snapshot(box.target);
+    for (const [name, content] of before) {
+      assert.equal(after.get(name), content, `${name} 不得被写入（整批放弃）`);
     }
   } finally {
     globalThis.fetch = realFetch;
+    rmSync(box.dir, { recursive: true, force: true });
   }
 });
 
 test('self-update: scheduleSkillUpdate 立即返回（不阻塞启动）', async () => {
-  /* 这是最关键的契约：apply 里 fire-and-forget，启动不能被网络拖慢。
-     用打桩让 fetch 永远 pending，验证函数仍然同步返回。 */
+  /* 最关键的契约：apply 里 fire-and-forget，启动不能被网络拖慢。
+     用永远 pending 的 fetch，并断言返回值类型 ——
+     光测耗时抓不到，因为不 await 就永远 0ms。 */
   const realFetch = globalThis.fetch;
   globalThis.fetch = () => new Promise(() => { /* 永不 resolve */ });
   try {
     const { scheduleSkillUpdate } = await import('../lib/self-update.js');
     const started = Date.now();
-    /* 关键：**不 await**。如果实现内部变成阻塞（比如被改成 async 且
-       调用方必须 await 才完成），这里返回的会是 Promise，
-       类型判断立刻暴露 —— 光看耗时抓不到，因为不 await 就永远 0ms。 */
     const returned = scheduleSkillUpdate({});
     const elapsed = Date.now() - started;
     assert.equal(
