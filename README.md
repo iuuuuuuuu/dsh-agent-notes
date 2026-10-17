@@ -194,13 +194,31 @@ node skills/agent-notes/scripts/verify-archived-agent-notes.ts  # 归档封印�
 内置内容来自上游固定 commit，可主动核对与合并：
 
 ```sh
-node tools/sync-upstream.mjs --check    # 只报告漂移，零写入（有漂移则非零退出，可直接进 CI）
+npm run sync:latest                     # 与上游默认分支逐文件比对，判断是否落后（推荐）
+node tools/sync-upstream.mjs --check    # 只比对钉死的那个 ref，零写入
 node tools/sync-upstream.mjs            # 展示逐文件 diff 摘要，需要 --yes 才落盘
 node tools/sync-upstream.mjs --yes      # 真的覆盖内置副本并记录清单
 node tools/sync-upstream.mjs --ref <branch|commit>   # 换 ref
 ```
 
-**为什么默认钉 commit 而不是 `main`**：jsDelivr 对分支名的清单缓存实测会滞后——锚 `@main` 会拿到重构前的旧目录结构，导致路径匹配失败。钉 commit 才拿到该次提交的真实树。这条是踩出来的，不是猜的。
+### 两条检查的区别（重要）
+
+| 命令 | 回答的问题 | 会变红吗 |
+|---|---|---|
+| `--check` | 内置副本与**钉住的那个 commit** 是否逐字相同 | **几乎永远绿** —— ref 就是上次同步时的 commit |
+| `--latest` | 内置副本与**上游默认分支**是否一致 | 会：落后即退出码 1 |
+
+`--check` 单独用时是一条**恒绿的门禁**：它存在、每次都过、不验证任何东西。
+真正该问的是「上游有没有新提交」，那只能拿本地清单去和上游分支逐文件比。
+`--latest` 就是干这个的，`.github/workflows/verify.yml` 会在每次 push、
+PR 和每日定时任务里跑它。
+
+退出码语义：`0` 一致，`1` 已落后（真红），`2` 无法核对（网络/限流）。
+**`2` 也让 job 变红** —— 否则「查不到」会被当成「没问题」。
+
+**为什么默认钉 commit 而不是 `main`**：jsDelivr 对分支名的**清单缓存**实测会滞后——锚 `@main` 会拿到重构前的旧目录结构，导致路径枚举失败。但它的**文件读取**是准的（已验证 `@main` 与钉住 commit 的同一文件逐字相同），所以 `--latest` 走「按本地清单逐个取文件内容比对」，不依赖远端枚举。
+
+**为什么不用 GitHub API 查 HEAD**：实测未认证请求 60 次/小时就 403（rate limit exceeded），CI 里天天跑必然撞墙。
 
 合并后必须重跑：
 
@@ -208,13 +226,24 @@ node tools/sync-upstream.mjs --ref <branch|commit>   # 换 ref
 node --test tools/*.test.mjs && node tools/fault-injection.mjs
 ```
 
+### 副本更新后，模型什么时候看到新规则
+
+`lib/skill.js` 的 `get()` **每次调用都现读磁盘**，没有缓存。所以：
+
+- 跑完 `sync --yes` 后，模型下一次加载技能就是新内容，**不需要重启 DSH**；
+- 但技能内容不是每轮都注入的 —— 它按需加载（`SkillDefinition` 语义），
+  已加载过的会话可能还持有旧正文。
+
+判据：改完副本后，让模型重新触发一次技能加载即可；要绝对确定就重启宿主。
+
 ## 自检与测试
 
 ```sh
 npm test                       # 行为测试（真跑子进程、真写文件）
 npm run gate:fault-injection   # 证明门禁会红，而不是恒绿
 npm run verify                 # 包自检：清单 / patch / 零依赖 / 双语文档与徽标 / vendored 与上游哈希
-npm run sync:check             # 上游是否已有更新
+npm run sync:latest            # 上游是否已漂移（会真变红）
+npm run sync:check             # 副本与钉住 ref 是否逐字相同
 npm run evidence               # 实机证据：用 DSH 自带的真实 SkillRegistry 验证注册
 npm run check                  # 以上四条串跑
 ```

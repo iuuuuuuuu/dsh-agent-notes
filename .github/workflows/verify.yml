@@ -1,0 +1,54 @@
+# 上游漂移与门禁自检。
+#
+# 存在理由：内置的技能副本（skills/agent-notes）是上游
+# czm15053/write-notes-like-deepseek 的 vendored 拷贝。上游改规则时，
+# 副本不会自己跟进 —— 而**没有任何机制会告诉你它落后了**。
+# 没有 CI 时，`npm run sync:check` 只比对钉死的 commit，永远返回「一致」，
+# 那是一条恒绿的门禁：检查存在、不验证任何东西。
+#
+# 本工作流做两件事：
+#   1. 逐文件比对内置副本与上游默认分支，落后就让 job 变红；
+#   2. 跑完整自检（verify + test + 故障注入 + 实机证据）。
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # 上游更新不会触发我们的事件，只能定期主动查。
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # 完整自检：包清单、patch 一致性、零依赖、双语文档、vendored 哈希、
+      # 客户端 bundle 同步、投影与命令名一致性，然后跑测试与故障注入。
+      - name: 自检
+        run: npm run verify && npm test && npm run gate:fault-injection
+
+  upstream-drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # 逐文件比对内置副本与上游默认分支。
+      # 退出码：0=一致，1=落后（真红），2=无法核对（网络/限流）。
+      # 2 也必须让 job 变红 —— 否则「查不到」会被当成「没问题」。
+      - name: 上游是否已漂移
+        run: npm run sync:latest

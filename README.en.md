@@ -215,13 +215,40 @@ These gates are **proven to actually fail** by fault injection (see below). The 
 Bundled content comes from a pinned upstream commit and can be checked and merged:
 
 ```sh
-node tools/sync-upstream.mjs --check    # report drift only, zero writes (non-zero exit on drift, CI-ready)
+npm run sync:latest                     # per-file compare against the upstream default branch (recommended)
+node tools/sync-upstream.mjs --check    # compare against the pinned ref only, zero writes
 node tools/sync-upstream.mjs            # show a per-file diff summary; needs --yes to write
 node tools/sync-upstream.mjs --yes      # actually overwrite the bundled copy and record the manifest
 node tools/sync-upstream.mjs --ref <branch|commit>   # use another ref
 ```
 
-**Why the default ref is a commit rather than `main`**: jsDelivr's manifest cache for branch names lags in practice — anchoring at `@main` returned a pre-refactor directory layout, so path matching failed. Pinning a commit yields that commit's real tree. This was learned the hard way, not assumed.
+### The two checks answer different questions
+
+| Command | Question it answers | Can it go red? |
+|---|---|---|
+| `--check` | Is the bundled copy byte-identical to **the pinned commit**? | **Almost always green** — the ref *is* the last synced commit |
+| `--latest` | Does the bundled copy match **the upstream default branch**? | Yes: exit 1 once it lags |
+
+`--check` on its own is an **always-green gate**: it exists, passes every time, and
+verifies nothing. The real question is "has upstream published new commits", and the
+only way to answer it is to compare the local manifest against the upstream branch
+file by file. That is what `--latest` does, and `.github/workflows/verify.yml` runs it
+on every push, every PR, and daily on a schedule.
+
+Exit codes: `0` in sync, `1` lagging (genuinely red), `2` unable to check
+(network/rate limit). **`2` also fails the job** — otherwise "could not check" would
+be read as "no problem".
+
+**Why the default ref is a commit rather than `main`**: jsDelivr's **manifest cache**
+for branch names lags in practice — anchoring at `@main` returned a pre-refactor
+directory layout, so path enumeration failed. Its **file reads** are accurate, though
+(verified: the same file under `@main` and under the pinned commit is byte-identical),
+so `--latest` compares file contents against the local manifest and never relies on
+remote enumeration.
+
+**Why not ask the GitHub API for HEAD**: unauthenticated requests hit
+403 (rate limit exceeded) after 60/hour — a CI job running daily would inevitably
+trip it.
 
 After merging, always re-run:
 
@@ -229,13 +256,24 @@ After merging, always re-run:
 node --test tools/*.test.mjs && node tools/fault-injection.mjs
 ```
 
+### When does the model see updated rules
+
+`get()` in `lib/skill.js` **reads the disk on every call** — there is no cache. So
+after `sync --yes`, the model gets the new content on its next skill load and **DSH
+does not need a restart**.
+
+Caveat: skill content is not injected every turn — it loads on demand
+(`SkillDefinition` semantics), so a session that already loaded it may still hold the
+old body. To be certain, re-trigger a skill load, or restart the host.
+
 ## Self-check and tests
 
 ```sh
 npm test                       # behavior tests (real subprocesses, real files)
 npm run gate:fault-injection   # prove the gates can go red rather than being always-green
 npm run verify                 # package self-check: manifest / patch / zero-dep / bilingual docs + badge / vendored-vs-upstream digests
-npm run sync:check             # whether upstream has moved
+npm run sync:latest            # has upstream drifted? (really goes red)
+npm run sync:check             # bundled copy vs the pinned ref, byte for byte
 npm run evidence               # live evidence against DSH's own real SkillRegistry
 npm run check                  # runs the four above in sequence
 ```

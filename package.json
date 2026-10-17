@@ -64,7 +64,8 @@
     "verify": "node tools/verify-plugin.mjs",
     "gate:fault-injection": "node tools/fault-injection.mjs",
     "evidence": "node tools/live-evidence.mjs",
-    "check": "npm run verify && npm test && npm run gate:fault-injection && npm run evidence"
+    "check": "npm run verify && npm test && npm run gate:fault-injection && npm run evidence",
+    "sync:latest": "node tools/sync-upstream.mjs --latest"
   },
   "upstreamCommit": "0e8200c0f80d37a1c75e585a65b35401ae198462"
 }

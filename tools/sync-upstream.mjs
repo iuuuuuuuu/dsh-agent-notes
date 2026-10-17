@@ -35,9 +35,54 @@ const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
  * `--ref <branch>` 显式覆盖。 */
 const UPSTREAM = {
   repository: 'https://github.com/czm15053/write-notes-like-deepseek.git',
+  /** GitHub API 用 owner/repo；与上面 URL 同源，改一处必须同步另一处。 */
+  slug: 'czm15053/write-notes-like-deepseek',
   pathPrefix: 'skills/write-notes-like-deepseek',
   defaultRef: '0e8200c0f80d37a1c75e585a65b35401ae198462'
 };
+
+/**
+ * 判断内置副本是否落后于上游默认分支。
+ *
+ * **为什么需要这个**：`--check` 只比对 `defaultRef` 钉住的那个 commit，
+ * 它永远返回「一致」—— 哪怕上游已经发了 100 个新提交。那是假绿：
+ * 检查存在、恒绿、不验证任何东西。
+ *
+ * **为什么不用 GitHub API 查 HEAD**：实测未认证请求 60 次/小时就 403
+ * （rate limit exceeded），CI 里天天跑必然撞墙。查不到时又不能当成
+ * 「已是最新」，那等于换个姿势假绿。
+ *
+ * **为什么不用 jsDelivr 清单 API**：它对分支名的缓存实测滞后——锚 `@main`
+ * 会拿到重构前的旧目录结构。但它的**文件读取**是准的（已验证 @main 与
+ * 钉住 commit 的同一文件逐字相同），所以这里走「按已知清单逐个取文件内容
+ * 比对」：清单来自本地 manifest，不依赖远端枚举。
+ *
+ * 任一侧取不到就明确返回 undefined —— 由调用方报错，绝不静默放行。
+ *
+ * @param {string} branch 分支名。
+ * @returns {Promise<{changed: string[], missing: string[], checked: number} | undefined>}
+ *   changed=内容与本地不同的文件；missing=上游已删除的文件。
+ */
+async function compareWithBranch(branch = 'main') {
+  const manifest = readManifest();
+  if (manifest === undefined) return undefined;
+  const rels = Object.keys(manifest.files ?? {});
+  if (rels.length === 0) return undefined;
+
+  const changed = [];
+  const missing = [];
+  let checked = 0;
+  for (const rel of rels) {
+    const remote = await fetchUpstream(branch, rel);
+    if (remote === undefined) {
+      missing.push(rel);
+      continue;
+    }
+    checked += 1;
+    if (digest(remote) !== manifest.files[rel]) changed.push(rel);
+  }
+  return { changed, missing, checked };
+}
 
 /**
  * 通过 jsDelivr CDN 读上游文件。
@@ -134,18 +179,28 @@ async function collectPaths(ref) {
 
 /** 解析命令行参数。 */
 function parseArgs(argv) {
-  const args = { check: false, yes: false, ref: UPSTREAM.defaultRef };
+  const args = { check: false, yes: false, latest: false, branch: 'main', ref: UPSTREAM.defaultRef };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--check') args.check = true;
     else if (arg === '--yes') args.yes = true;
-    else if (arg === '--ref') {
+    else if (arg === '--latest') args.latest = true;
+    else if (arg === '--branch') {
+      const value = argv[index + 1];
+      if (value === undefined) throw new Error('--branch 需要一个值');
+      args.branch = value;
+      index += 1;
+    } else if (arg === '--ref') {
       const value = argv[index + 1];
       if (value === undefined) throw new Error('--ref 需要一个值');
       args.ref = value;
       index += 1;
     } else if (arg === '--help' || arg === '-h') {
-      console.log('用法: node tools/sync-upstream.mjs [--check] [--yes] [--ref <branch|commit>]');
+      console.log('用法: node tools/sync-upstream.mjs [--check] [--yes] [--latest] [--branch <name>] [--ref <branch|commit>]');
+      console.log('  --check        只报告内置副本与该 ref 的差异，零写入');
+      console.log('  --latest       与上游默认分支逐文件比对，判断是否落后（防假绿）');
+      console.log('  --branch <n>   配合 --latest 指定上游分支，默认 main');
+      console.log('  --yes          真的覆盖内置副本并记录清单');
       process.exit(0);
     } else {
       throw new Error(`未知参数: ${arg}`);
@@ -160,6 +215,35 @@ function parseArgs(argv) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const ref = args.ref;
+
+  /* `--latest`：判断内置副本是否落后于上游默认分支。
+     与 `--check` 是两件事 —— `--check` 只回答「副本与该 ref 是否逐字相同」，
+     它永远回答「相同」，因为 ref 就是上次同步时钉下的那个 commit。
+     真正该问的是「上游有没有新提交」，那只能查远端 HEAD。 */
+  if (args.latest) {
+    const branch = args.branch;
+    const result = await compareWithBranch(branch);
+    if (result === undefined) {
+      console.error('✖ 无法核对上游（清单缺失、网络不可达或被限流）。');
+      console.error('  这不是「已是最新」—— 本次检查无效，请稍后重试。');
+      process.exit(2);
+    }
+    console.log(`上游默认分支: ${branch}`);
+    console.log(`已核对 ${result.checked} 个文件（基准: tools/upstream-manifest.json）`);
+    const changedCount = result.changed.length;
+    const missingCount = result.missing.length;
+    if (changedCount === 0 && missingCount === 0) {
+      console.log('\n✔ 内置副本与上游一致，无漂移。');
+      process.exit(0);
+    }
+    console.error(`\n✖ 内置副本已落后于上游：${changedCount} 个文件内容变了，${missingCount} 个文件上游已删除。`);
+    for (const rel of result.changed) console.error(`  变更  ${rel}`);
+    for (const rel of result.missing) console.error(`  删除  ${rel}`);
+    console.error(`\n合并方式: node tools/sync-upstream.mjs --ref ${branch} --yes`);
+    console.error('合并后必须重跑: npm run check');
+    process.exit(1);
+  }
+
   console.log(`上游: ${UPSTREAM.repository} @ ${ref}`);
 
   const paths = await collectPaths(ref);
@@ -244,6 +328,28 @@ async function main() {
   }
   writeManifest(manifest, ref);
   console.log('\n合并完成。请重跑测试与故障注入确认门禁仍可信。');
+}
+
+/**
+ * 读已记录的逐文件摘要清单。
+ *
+ * 清单是「上次同步时每个上游文件的摘要」，也是 `--latest` 的比对基准 ——
+ * 有了它就不必远端枚举目录（jsDelivr 对分支的清单缓存会滞后）。
+ *
+ * @returns {{ version: number, ref: string, files: Record<string, string> } | undefined}
+ *   清单；缺失或损坏时 undefined（调用方据此明确报错，不当成「无差异」）。
+ */
+function readManifest() {
+  const manifestFile = join(PACKAGE_ROOT, 'tools', 'upstream-manifest.json');
+  if (!existsSync(manifestFile)) return undefined;
+  try {
+    const parsed = JSON.parse(readFileSync(manifestFile, 'utf8'));
+    if (parsed === null || typeof parsed !== 'object') return undefined;
+    if (parsed.files === null || typeof parsed.files !== 'object') return undefined;
+    return parsed;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
