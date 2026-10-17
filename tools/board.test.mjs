@@ -8,11 +8,14 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { buildBoard, parseNote, scanNotes } from '../lib/board.js';
 import { isInside, registerBoardRoutes } from '../lib/board-route.js';
+
+const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 /** 造一个临时仓库 + 笔记树。 */
 function makeRepo(notes = []) {
@@ -211,4 +214,83 @@ test('board-route: 会话解析不出笔记根时回 409，不猜一个路径', 
   });
   assert.equal(res.statusCode, 409, '解析不出根时应 409，而不是给一个空看板');
   assert.match(JSON.parse(res.body).error, /no notes root/);
+});
+
+test('board-route: 正文含 HTML 片段时不得破坏注入的脚本块', async () => {
+  /* 回归测试：曾经用字符串形式调 String.replace，payload 里的 `$&`、`$'`
+     被当成反向引用展开，于是页面里凭空多出 <script 标签、数据被截断，
+     看板恒显示「0 项」。笔记正文引用 HTML 片段是完全合法的，
+     宿主必须挡住，不能让数据反过来改写宿主页面。 */
+  const evil = [
+    '# Agent Note: 引用 HTML 的笔记',
+    '',
+    'Status: implemented',
+    '',
+    '## Problem',
+    '正文里引用了看板源码片段：',
+    '',
+    '```html',
+    '</aside>',
+    '<script id="embedded-data">',
+    'window.__INLINE_DATA__ = null;',
+    '</script>',
+    '```',
+    '',
+    '还有会被 replace 当成反向引用的字符：$& 与 $` 与 $\'',
+    '',
+    '## Decision',
+    '保持原样。',
+    '',
+    '## Alternatives considered',
+    '无。',
+    '',
+    '## Consequences',
+    '无。',
+    ''
+  ].join('\n');
+
+  const { dir, root } = makeRepo([
+    { lifecycle: 'implemented', class: 'process', file: '2026-01-01-evil.md', body: evil }
+  ]);
+  const handlers = [];
+  const ctx = {
+    get(name) {
+      if (name === 'webServer') {
+        return { register(route) { handlers.push(route); return () => {}; } };
+      }
+      throw new Error('no');
+    }
+  };
+  try {
+    registerBoardRoutes(ctx, { notesRootFor: () => root });
+    const res = await new Promise((settle) => {
+      const r = {
+        statusCode: 0, body: '',
+        writeHead(code) { this.statusCode = code; },
+        end(body) { this.body = body ?? ''; settle(this); }
+      };
+      handlers[0].handler({ method: 'GET', url: '/agent-notes/ui?session=x' }, r);
+    });
+
+    assert.equal(res.statusCode, 200);
+    const html = res.body;
+    // 关键断言：注入不得增加 <script 的数量。
+    const scriptTags = (html.match(/<script/g) ?? []).length;
+    const closeTags = (html.match(/<\/script>/g) ?? []).length;
+    const original = (readFileSync(
+      join(ROOT, 'skills', 'agent-notes', 'assets', 'agent-notes-board.html'), 'utf8'
+    ).match(/<script/g) ?? []).length;
+    assert.equal(scriptTags, original, `注入后 <script 数量必须不变（${original}），实际 ${scriptTags}`);
+    assert.equal(closeTags, original, `注入后 </script> 数量必须不变（${original}），实际 ${closeTags}`);
+
+    // 数据必须能完整解析回来，且正文原样保留。
+    const start = html.indexOf('window.__INLINE_DATA__ = ') + 'window.__INLINE_DATA__ = '.length;
+    const end = html.indexOf(';\n</script>', start);
+    const parsed = JSON.parse(html.substring(start, end));
+    assert.equal(parsed.length, 1);
+    assert.ok(parsed[0].rawBody.includes('</aside>'), '正文里的 HTML 标签必须原样保留');
+    assert.ok(parsed[0].rawBody.includes('$&'), '正文里的 $& 必须原样保留');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

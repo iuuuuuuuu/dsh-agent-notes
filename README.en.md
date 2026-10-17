@@ -103,31 +103,39 @@ costs zero tokens.
 
 ### Notes board: a "Notes" tab next to Conversation / Trajectory
 
-A **"Notes"** tab appears beside Conversation / Trajectory. It lists every note in
-the **current session's repository** `.agents/notes/` — date, class, title, status —
-with search, lifecycle filtering, and click-to-expand body. It follows session
-switches and re-reads on every activation (no caching, so you never see stale text).
+A **"Notes"** tab appears beside Conversation / Trajectory. It hosts the upstream
+board UI itself (four views: architecture baseline, evolution timeline, rejected-
+alternatives vault, decision directory) — **no hand-rolled UI**:
 
-It reads **live** rather than from a static snapshot: the host registers read-only
-HTTP routes (`/agent-notes/board`, `/agent-notes/note`, `/agent-notes/health`) and
-the browser reads the disk each time you switch to the tab.
+> The tab iframes the vendored upstream asset
+> `skills/agent-notes/assets/agent-notes-board.html`; the host only injects the
+> **current session repository's** notes into the `window.__INLINE_DATA__` slot the
+> board already provides.
+>
+> Why: the upstream board is a mature 76K UI (cross-reference in-degree, causal
+> chains, multi-dimensional filters). Redrawing it by hand would look worse and drift
+> from upstream forever. Through an iframe, **visuals and interaction follow upstream
+> updates**, and this plugin only maintains the data adapter (`buildInlineData`).
+
+It reads **live disk content**, not a snapshot: the host registers read-only HTTP
+routes (`/agent-notes/ui`, `/agent-notes/board`, `/agent-notes/note`,
+`/agent-notes/health`) and re-reads on every activation.
 
 > Why not the session projection: a projection's `view` must be a **synchronous pure
 > function** over the folded session log — it cannot touch the filesystem (verified in
-> source: `view: state => wire.view(state)`). Notes live on disk and change under an
-> editor, so HTTP is the only honest channel.
+> source: `view: state => wire.view(state)`).
 >
 > Security boundary: fixed route paths only, reads confined to `notesRoot` with `..`
 > rejected, and a session whose notes root cannot be resolved gets **409** — never a
 > guessed path, never the process working directory.
 
-Three states stay distinguishable — the board never passes off "0 notes" as "all compliant":
+**Two injection hazards are covered by regression tests:**
 
-| Situation | Shown |
-|---|---|
-| No `.agents/notes` in the repo | "This repository has no .agents/notes yet" + the actual path |
-| Directory exists, zero notes | "The notes tree exists but has no notes yet" |
-| Notes exist | The list (count, class, filterable) |
+1. A note body containing `</script>` or `<!--` truncates the injected script block
+   (blank page, count stuck at 0). Every `<` in the JSON is emitted as `<`.
+2. Calling `String.replace` with a string replacement lets `$&` and `` $` `` in the
+   data expand as back-references, splicing raw HTML into the page. The replacement
+   must be a **function**.
 
 Once enabled, the model also gains:
 - an **`agent-notes` skill** — the full method, class rules, templates, and archival policy, loaded on demand;

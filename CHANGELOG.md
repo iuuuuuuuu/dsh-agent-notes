@@ -7,12 +7,14 @@
 
 ### 新增
 
-- **笔记看板 tab**（`conversation.view` 槽位）：对话 / 轨迹 旁边多一个「笔记」tab，列出当前会话仓库 `.agents/notes/` 的全部笔记，支持搜索、按生命周期筛选、点行展开正文。
+- **笔记看板 tab**（`conversation.view` 槽位）：对话 / 轨迹 旁边多一个「笔记」tab。**改用上游成品 UI**：iframe 加载 vendored 的 `agent-notes-board.html`，宿主只注入当前仓库的实时数据到它预留的 `window.__INLINE_DATA__` 插槽 —— 视觉与交互跟随上游更新，不再自绘。
+  - 之前那版自己拼的列表 UI 已删除（`lib/client.js` 从 16988 降到 11068 字节）。
   - **实时读取**，不是静态快照：宿主侧注册只读 HTTP 路由（`lib/board-route.js`），浏览器每次切到该 tab 现读磁盘。原因是会话投影的 `view` 必须是同步纯函数（已核对源码），读不到文件系统。
   - **安全边界**：固定路径、只读 `notesRoot` 之下、`isInside` 拒绝 `..` 与「前缀相同但不是子路径」（`/a/bc` vs `/a/b`）；会话解析不出笔记根返回 409，不猜路径、不退回进程目录。
   - **三态分明**：没树 / 有树零篇 / 有笔记，看板如实显示，不拿「0 篇」冒充「全部合规」。
   - tab id 用 `agent-notes-board` 而非 `trajectory` —— 后者是宿主内置轨迹视图的保留 id 且受 developerTools 开关限制。
-  - 新增 `lib/board.js`（解析与扫描）、`lib/board-route.js`（HTTP 通道）、`tools/board.test.mjs`（9 项）。已做故障注入：去掉 `isInside` 的路径校验、去掉未知分类过滤，各自**变红 1 条**。
+  - 新增 `lib/board.js`（解析与扫描，含 `buildInlineData` 适配上游格式）、`lib/board-route.js`（HTTP 通道）、`tools/board.test.mjs`（10 项）。已做故障注入：去掉 `isInside` 的路径校验、去掉未知分类过滤、把函数式 replace 改回字符串形式，各自**变红 1 条**。
+  - **修复两个注入陷阱**（都补了回归测试）：① 笔记正文含 `</script>` / `<!--` 会截断脚本块 → JSON 里每个 `<` 转 `<`；② 字符串形式的 `String.replace` 会把数据里的 `$&` 当反向引用展开、凭空塞进原 HTML 片段 → 必须用函数式 replace。
 
 ### 变更
 
