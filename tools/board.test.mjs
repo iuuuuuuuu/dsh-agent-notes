@@ -17,6 +17,31 @@ import { isInside, registerBoardRoutes } from '../lib/board-route.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
+/**
+ * 造一个提供 `webServer` 的假 ctx。
+ *
+ * 必须模拟**真实的 `ctx.inject(['webServer'], cb)` 语义**：插件侧现在用
+ * inject 等服务就绪（用 `ctx.get` 现取会拿到 undefined，导致路由永不挂上），
+ * 所以 mock 只给 `get` 会让测试通过而真机失败 —— 那正是假绿。
+ *
+ * @param {(route: any) => void} onRegister 收到注册的 route。
+ * @returns {any} 假 ctx。
+ */
+function ctxWithWebServer(onRegister) {
+  const webServer = {
+    register(route) { onRegister(route); return () => {}; }
+  };
+  return {
+    inject(names, callback) {
+      assert.ok(names.includes('webServer'), 'inject 必须声明 webServer');
+      callback({ webServer });
+      return () => {};
+    },
+    get() { throw new Error('测试应走 inject，不应走 get'); }
+  };
+}
+
+
 /** 造一个临时仓库 + 笔记树。 */
 function makeRepo(notes = []) {
   const dir = mkdtempSync(join(tmpdir(), 'an-board-'));
@@ -127,19 +152,7 @@ test('board-route: 路由真能返回看板与单篇，且拒绝穿越', async (
     { lifecycle: 'implemented', class: 'feature', file: '2026-01-01-x.md', body: noteBody('路由测试') }
   ]);
   const handlers = [];
-  const ctx = {
-    get(name) {
-      if (name === 'webServer') {
-        return {
-          register(route) {
-            handlers.push(route);
-            return () => {};
-          }
-        };
-      }
-      throw new Error(`cannot get property "${name}" without inject`);
-    }
-  };
+  const ctx = ctxWithWebServer((route) => { handlers.push(route); });
   try {
     registerBoardRoutes(ctx, { notesRootFor: () => root });
     assert.equal(handlers.length, 1, '应注册一个路由');
@@ -195,14 +208,7 @@ test('board-route: 没有 webServer 服务时静默降级，不抛', () => {
 
 test('board-route: 会话解析不出笔记根时回 409，不猜一个路径', async () => {
   const handlers = [];
-  const ctx = {
-    get(name) {
-      if (name === 'webServer') {
-        return { register(route) { handlers.push(route); return () => {}; } };
-      }
-      throw new Error('no');
-    }
-  };
+  const ctx = ctxWithWebServer((route) => { handlers.push(route); });
   registerBoardRoutes(ctx, { notesRootFor: () => undefined });
   const res = await new Promise((settle) => {
     const r = {
@@ -253,14 +259,7 @@ test('board-route: 正文含 HTML 片段时不得破坏注入的脚本块', asyn
     { lifecycle: 'implemented', class: 'process', file: '2026-01-01-evil.md', body: evil }
   ]);
   const handlers = [];
-  const ctx = {
-    get(name) {
-      if (name === 'webServer') {
-        return { register(route) { handlers.push(route); return () => {}; } };
-      }
-      throw new Error('no');
-    }
-  };
+  const ctx = ctxWithWebServer((route) => { handlers.push(route); });
   try {
     registerBoardRoutes(ctx, { notesRootFor: () => root });
     const res = await new Promise((settle) => {
