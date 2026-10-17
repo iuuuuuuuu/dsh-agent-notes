@@ -90,6 +90,23 @@ Once enabled, the model also gains:
 - an **`agent_notes_status` tool** — current switch and note-tree overview;
 - a **session-scoped policy section** — injected only into sessions where the switch is on, leaving the global system prompt untouched.
 
+### Which repository the tools act on
+
+`agent_notes_gate` and `agent_notes_status` default to **the current session's
+repository root** (from the session header's `cwd`, walking up to the directory
+containing `.git`). Pass `cwd` explicitly to override.
+
+**When the session has no working directory they fail loudly** — `passed: false`
+with `reason: "NO_SESSION_CWD"` — instead of falling back to the process working
+directory. That fallback is deliberately avoided: the DSH process cwd is **DSH's
+own installation directory**, which usually also has `.agents/notes` (DSH's own
+development notes). Falling back there would really run and really return green —
+while testing a completely different repository. That is a fake green, so we
+refuse to produce it.
+
+> So: if your session was created without a workspace, pass an explicit `cwd`
+> when running the gates.
+
 ## What a note looks like
 
 The path *is* the state; there is no index file:

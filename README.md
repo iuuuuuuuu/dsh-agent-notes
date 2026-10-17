@@ -84,6 +84,18 @@ dsh plugin add --profile <你的profile> github:iuuuuuuuu/dsh-agent-notes
 - **`agent_notes_status` 工具** —— 当前开关与笔记树概况；
 - **会话级规范段** —— 只在开关打开的会话注入，不污染全局系统提示词。
 
+### 工具作用于哪个仓库
+
+`agent_notes_gate` / `agent_notes_status` 默认作用于**当前会话的仓库根**
+（取自会话头的 `cwd`，向上找含 `.git` 的目录）。也可以显式传 `cwd` 覆盖。
+
+**会话拿不到工作目录时会明确失败**，返回 `passed: false` + `reason: "NO_SESSION_CWD"`，
+而不是退回进程当前目录。这一点是刻意的：DSH 进程的 cwd 是**它自己的安装目录**，
+那里往往也有 `.agents/notes`（DSH 自己的开发笔记），退回过去会真的跑通并返回
+绿 —— 但测的根本不是你的仓库，属于「假绿」。宁可报错。
+
+> 所以：如果你的会话是在没有工作区的状态下建的，跑门禁请显式传 `cwd`。
+
 ## 笔记长什么样
 
 路径即状态，无总索引：

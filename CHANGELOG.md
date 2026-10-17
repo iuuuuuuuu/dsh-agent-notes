@@ -28,6 +28,11 @@
 - **客户端在 `apply` 时就缓存 `sessions` 服务**：那一刻服务往往还没就绪，缓存下来就永久是 `undefined`，按钮点了只显示「切换失败」（真机点一下即复现）。改为点击时惰性解析。
 - **生效 tag 原计划放对话头部，但该槽位被 DSH 包在 `!hideChrome` 里** —— 空会话（新会话）时整个工具区不渲染，而新会话恰恰最需要看到是否生效。实测确认后改到 `conversation.input.dock`（渲染在输入框之前，不受 `hideChrome` 影响）。
 - **安装文档漏了关键一步**：`dsh plugin add` 只写 `dependencies`，**不写** `dsh.profile.bundles`，而 DSH 是按 `bundles` 逐层加载的 —— 只 `add` 的话插件装了却完全不跑，且启动日志无任何报错。README 中英文均已补充说明与验证方法。
+- **`agent_notes_gate` 默认 cwd 取错对象，会在错的仓库上跑出真绿**（Owner 实机发现）。
+  - 根因：`@deepseek-ai/dsh-agent` 的 `Agent` 接口**只有 `id` 一个字段**，没有 `cwd`；旧代码读 `exec.agent.cwd` 恒为 `undefined`，再静默退回 `process.cwd()` —— 那是 **DSH 自己的安装目录**（如 `C:\...\dependencies\dsh`）。该目录通常也有 `.agents/notes`（DSH 自己的开发笔记），于是门禁**真跑通并返回绿**，测的却是另一个仓库。属「假绿门禁」。
+  - 修复：新增 `lib/target.js`，从**会话头** `ctx.sessions.get(agent.id).header.cwd` 取真实工作目录（实机解压会话日志确证该字段存在：`"cwd":"C:\\Users\\...\\default-workspace"`）。
+  - 拿不到 cwd 时**明确失败**（`passed: false` + `reason: "NO_SESSION_CWD"` + `notesRoot: null` + `results: []`），绝不退回 `process.cwd()`；`agent_notes_status` 同步报告 `cwd: null` 与 `cwdUnresolved` 说明。
+  - 新增 7 项回归测试，已做故障注入：把旧的回退行为注入回去，测试**变红 2 条**；还原后 7/7 绿。
 
 ### 说明
 
