@@ -12,7 +12,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildBoard, parseNote, scanNotes } from '../lib/board.js';
+import { buildBoard, buildBoardFromRoots, parseNote, scanNotes } from '../lib/board.js';
 import { isInside, registerBoardRoutes } from '../lib/board-route.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -289,6 +289,57 @@ test('board-route: 正文含 HTML 片段时不得破坏注入的脚本块', asyn
     assert.equal(parsed.length, 1);
     assert.ok(parsed[0].rawBody.includes('</aside>'), '正文里的 HTML 标签必须原样保留');
     assert.ok(parsed[0].rawBody.includes('$&'), '正文里的 $& 必须原样保留');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('board: 多个 worktree 的笔记合并，当前工作树优先', () => {
+  /* 回归测试：笔记常写在某个 git worktree 里（改哪条分支就在哪个工作树干活），
+     而会话 cwd 可能落在主工作树上。只扫一个根会让别处的笔记凭空消失 ——
+     实测踩到：主仓库零篇、wt-port 一篇，看板却显示「还没有 .agents/notes」。 */
+  const { dir } = makeRepo();
+  const main = join(dir, 'repo');
+  const wtA = join(dir, 'wt-a');
+  const wtB = join(dir, 'wt-b');
+  const write = (root, file, body) => {
+    const target = join(root, '.agents', 'notes', 'implemented', 'process');
+    mkdirSync(target, { recursive: true });
+    writeFileSync(join(target, file), body, 'utf8');
+  };
+  try {
+    write(main, '2026-01-01-shared.md', noteBody('主仓库版本'));
+    write(wtA, '2026-02-01-only-a.md', noteBody('只有 A 有'));
+    write(wtA, '2026-01-01-shared.md', noteBody('A 的版本'));
+    write(wtB, '2026-03-01-only-b.md', noteBody('只有 B 有'));
+
+    const roots = [join(main, '.agents', 'notes'), join(wtA, '.agents', 'notes'), join(wtB, '.agents', 'notes')];
+    const board = buildBoardFromRoots(roots);
+
+    assert.equal(board.total, 3, '三个不同 id 的笔记都要出现');
+    assert.ok(board.notes.some((n) => n.slug === 'only-a'), 'wt-a 独有笔记必须在');
+    assert.ok(board.notes.some((n) => n.slug === 'only-b'), 'wt-b 独有笔记必须在');
+
+    // 同 id 去重：主仓库排在前面，所以主仓库的版本胜出。
+    const shared = board.notes.filter((n) => n.slug === 'shared');
+    assert.equal(shared.length, 1, '同 id 只能出现一次');
+    assert.match(shared[0].title, /主仓库版本/, '当前工作树优先');
+    assert.equal(shared[0].shadowedBy.length, 1, '被覆盖的那份要记下来源，不能悄悄吞掉');
+    assert.match(shared[0].shadowedBy[0], /wt-a/, 'shadowedBy 指向被覆盖的 worktree');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('board: 全部根都不存在时 exists=false，不冒充「有树但空」', () => {
+  const { dir } = makeRepo();
+  try {
+    const board = buildBoardFromRoots([
+      join(dir, 'nope1', '.agents', 'notes'),
+      join(dir, 'nope2', '.agents', 'notes')
+    ]);
+    assert.equal(board.exists, false, '所有根都不存在');
+    assert.equal(board.total, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
