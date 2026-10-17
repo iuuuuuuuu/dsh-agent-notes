@@ -29,11 +29,12 @@
 
 ```sh
 npm test                       # 行为测试（真跑子进程、真写文件）
-npm run gate:fault-injection   # 证明门禁会红
+npm run gate:fault-injection   # 证明门禁会红（含笔记门禁外壳）
+npm run notes:gate             # 本仓库笔记门禁（空树/零篇判失败）
 npm run verify                 # 包自检（含双语文档与 dsh 徽标门禁）
 npm run sync:check             # 上游是否有更新
 npm run evidence               # 实机证据（需能找到 DSH；非标准位置设 DSH_DIST）
-npm run check                  # 上面四条串跑
+npm run check                  # 上面五条串跑（含 notes:gate）
 npm run sync -- --yes          # 真合并上游（改完必须重跑 check）
 ```
 
@@ -55,13 +56,17 @@ class 封闭集：`feature`、`bug-fix`、`simplification`、`architecture`、`p
 判定：改了**行为 / 架构 / 跨文件契约 / 流程工具链 / 测试策略 / 落盘·网络·配置格式** → 必写；
 纯格式化、错别字、不改行为的补丁、常规 CRUD → 不写。
 
-门禁：
+门禁（日常用第一条；它复用 `lib/notes.js`，把「空树 / 零篇」判成失败）：
 
 ```sh
+npm run notes:gate    # ← 推荐：等价于下面三条，但空集合会红
 node skills/agent-notes/scripts/verify-agent-note-tree.ts
 node skills/agent-notes/scripts/verify-agent-note-format.ts
 node skills/agent-notes/scripts/verify-archived-agent-notes.ts
 ```
+
+⚠️ 直接跑下面三条时，它们在**空集合**上都 `exit 0` 并打印 `ok: 0 note(s)` ——
+笔记树不存在也算绿。**别把它们单独接进 CI**，接 `npm run notes:gate`。
 
 要点：备选方案必写且**先写它最强的理由再否定**；`implemented` 的
 `## Decision` 用现在时；收益与代价都写；一篇笔记不得被改写成另一个决定

@@ -8,7 +8,7 @@
 #
 # 本工作流做两件事：
 #   1. 逐文件比对内置副本与上游默认分支，落后就让 job 变红；
-#   2. 跑完整自检（verify + test + 故障注入 + 实机证据）。
+#   2. 跑完整自检（verify + notes:gate + test + 故障注入 + 实机证据）。
 name: verify
 
 on:
@@ -35,8 +35,10 @@ jobs:
 
       # 完整自检：包清单、patch 一致性、零依赖、双语文档、vendored 哈希、
       # 客户端 bundle 同步、投影与命令名一致性，然后跑测试与故障注入。
+      # notes:gate 单独列出来：三条 vendored 脚本在空集合上 exit 0，
+      # 外壳负责把「没有可验对象」判成失败（见 .agents/notes 里那篇 process 笔记）。
       - name: 自检
-        run: npm run verify && npm test && npm run gate:fault-injection
+        run: npm run verify && npm run notes:gate && npm test && npm run gate:fault-injection
 
   upstream-drift:
     runs-on: ubuntu-latest

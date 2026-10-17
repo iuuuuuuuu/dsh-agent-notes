@@ -7,6 +7,24 @@
 
 ### 新增
 
+- **本仓库自己的决策笔记门禁**（`tools/verify-notes.mjs` + `npm run notes:gate`）：`.agents/notes/` 此前不存在，三条 vendored 校验脚本也从未接进 npm 与 CI —— 规范只写在 `AGENTS.md` 里，没有任何东西执行它。
+  - 不直接把三脚本接进 CI 的原因：它们在**空集合**上都 `exit 0` 并打印 `ok: 0 note(s) verified`，笔记树不存在时 CI 照样绿，是一条恒绿门禁。外壳复用 `lib/notes.js` 的 `runAllGates()`，把空树判成 `NO_NOTES_TREE`、零篇判成 `NO_NOTES_YET`。
+  - 判定逻辑不另写一份：CLI、`/agent-notes gate` 工具与 CI 走同一个 `runAllGates()`，避免两份真相漂移成「一个入口拦住、另一个没拦住」。
+  - 已接进 `npm run check` 与 `.github/workflows/verify.yml`；`tools/fault-injection.mjs` 新增 `[verify-notes]` 一节，对空树、不存在的树、违规笔记断言变红，并以「合规树必须 exit=0」作反向对照。
+  - 文档同步：`README.md` / `README.en.md` 的 CI 片段加了「照抄会恒绿」的警告，`AGENTS.md` 把 `npm run notes:gate` 列为推荐门禁。
+
+- **项目内副本的检测与同步**（`/agent-notes sync-skill`）：项目仓库里通常还有一份
+  `.agents/skills/agent-notes/`（被项目 git 跟踪，供项目自己的 CI 用）。插件不擅自改它，
+  改为「检测 + 提示 + 用户确认」：
+  - 开关打开时比对项目副本与内置版本，落后就在注入的规范末尾追加一段提示，
+    明确要求模型**先问用户**
+  - `/agent-notes sync-skill` 默认只打印差异，加 `--yes` 才落盘
+  - 项目里多出来的文件不会被删
+  - 同步脚本目录即等于更新 CI 的校验逻辑：`ci.yml` 只写 `npm run verify-notes`，
+    不含版本号或文件清单；脚本零外部依赖
+  - 实机验证：在真实项目里篡改副本 → 检测到落后并生成提示 → 预览不写盘 →
+    落盘还原 → 复核不落后，项目 `git status` 干净
+
 - **技能副本异步自更新**：插件启动时在后台拉取本仓库的 `skills/agent-notes`，
   内容有变即替换并调 `SkillProviderControl.invalidate()` 热替换，模型下次加载即新规则。
   - 绝不阻塞启动：`scheduleSkillUpdate()` 是 fire-and-forget，实测 9.1 秒就绪

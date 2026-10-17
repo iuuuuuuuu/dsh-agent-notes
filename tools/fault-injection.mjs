@@ -58,6 +58,63 @@ const GOOD_NOTE = [
 ].join('\n');
 
 /**
+ * 跑本仓库的笔记门禁外壳 `tools/verify-notes.mjs`，返回退出码与输出。
+ *
+ * 与 `run()` 的区别：外壳作用于**它自己的仓库根**，所以这里只覆盖
+ * `$AGENT_NOTE_ROOT` 指向临时树 —— 正好也是 CI 里调用的那条通路。
+ *
+ * @param {string} root 笔记根。
+ * @returns {{ code: number, out: string }} 退出码与合并输出。
+ */
+function runCli(root) {
+  const result = spawnSync(NODE, [join(PACKAGE_ROOT, 'tools', 'verify-notes.mjs')], {
+    cwd: PACKAGE_ROOT,
+    encoding: 'utf8',
+    env: { ...process.env, AGENT_NOTE_ROOT: root },
+    windowsHide: true
+  });
+  return { code: result.status ?? -1, out: `${result.stdout ?? ''}${result.stderr ?? ''}` };
+}
+
+/**
+ * 断言外壳在给定故障下必须失败。
+ *
+ * @param {string} label 场景说明。
+ * @param {string} root 笔记根。
+ * @param {RegExp} expectPattern 诊断应匹配的模式。
+ */
+function expectRedCli(label, root, expectPattern) {
+  const { code, out } = runCli(root);
+  if (code === 0) {
+    console.error(`  ✖ ${label} — 外壳没有变红（exit=0），这是假绿！`);
+    failures += 1;
+    return;
+  }
+  if (!expectPattern.test(out)) {
+    console.error(`  ✖ ${label} — 变红了但诊断不指向该故障：${out.trim().split('\n').slice(-3).join(' | ')}`);
+    failures += 1;
+    return;
+  }
+  console.log(`  ✔ ${label} — exit=${code}`);
+}
+
+/**
+ * 断言外壳在无故障时必须通过。
+ *
+ * @param {string} label 场景说明。
+ * @param {string} root 笔记根。
+ */
+function expectGreenCli(label, root) {
+  const { code, out } = runCli(root);
+  if (code !== 0) {
+    console.error(`  ✖ ${label} — 本应通过却失败（exit=${code}）：${out.trim().split('\n').slice(-3).join(' | ')}`);
+    failures += 1;
+    return;
+  }
+  console.log(`  ✔ ${label} — exit=0`);
+}
+
+/**
  * 断言某条门禁在给定故障下必须失败。
  *
  * @param {string} label 场景说明。
@@ -180,6 +237,26 @@ try {
     rmSync(sealed, { force: true });
     expectRed('删除已封印归档', 'verify-archived-agent-notes.ts', work, /no file on disk|missing/);
   }
+
+  console.log('\n[verify-notes] 本仓库门禁外壳：没有可验对象时不许绿');
+  /* 这一节存在的理由：vendored 三脚本在空集合上 exit 0，直接接进 CI 就是
+     一条恒绿门禁。外壳必须比脚本更严，且必须能对「空」变红。 */
+  const emptyTree = join(work, '.agents', 'notes-empty');
+  mkdirSync(emptyTree, { recursive: true });
+  expectRedCli('空树（有目录、零篇）', emptyTree, /NO_NOTES_YET|没有可验/);
+  expectRedCli('笔记树不存在', join(work, '.agents', 'notes-absent'), /NO_NOTES_TREE|不存在/);
+
+  /* 反向对照：证明上面变红不是因为外壳一律报错 —— 合规树必须真绿。
+     先清掉上一节故意留下的坏归档（那里删掉了已封印文件却没重写 manifest），
+     否则这里验的就不是「合规树」而是那处残留故障。 */
+  rmSync(join(notesRoot, 'archived'), { recursive: true, force: true });
+  expectGreenCli('合规树', notesRoot);
+
+  /* 再把违规笔记塞进去，外壳必须跟着脚本一起变红（不是只看篇数）。 */
+  const rogue = join(notesRoot, 'implemented', 'architecture', '2026-01-03-rogue.md');
+  writeFileSync(rogue, GOOD_NOTE.replace('## Decision', '## Proposal'), 'utf8');
+  expectRedCli('implemented 里出现 ## Proposal', notesRoot, /Proposal|Decision/);
+  rmSync(rogue, { force: true });
 
   console.log('\n[自证] 清掉全部故障后必须回到绿');
   rmSync(join(notesRoot, 'archived'), { recursive: true, force: true });
