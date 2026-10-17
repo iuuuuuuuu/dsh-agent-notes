@@ -1,0 +1,13 @@
+# DSH bundle patch for dsh-agent-notes.
+#
+# Inserts the plugin into the profile's plugin tree. The `name` below is the
+# published package name, so it is resolved from the profile's node_modules.
+#
+# The plugin registers:
+#   - an `agent-notes` skill provider (vendored method + verify scripts)
+#   - `/agent-notes` slash command for the session/global switch
+#   - real-gate tools that shell out to the vendored verify scripts
+#   - a session-scoped system-prompt policy section (only while enabled)
+- insert:
+    - id: agent-notes
+      name: "dsh-agent-notes"

@@ -1,0 +1,15 @@
+# 依赖
+node_modules/
+
+# 同步缓存与临时产物
+.sync-cache/
+*.tmp
+*.log
+
+# 生成产物（看板等，按需生成不入库）
+board.html
+demo.html
+
+# 探针/临时
+.probe/
+tmp/

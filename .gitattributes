@@ -1,0 +1,24 @@
+# 行尾统一为 LF。
+#
+# 本仓库有硬性理由，不只是风格：tools/upstream-manifest.json 记录的是
+# vendored 文件**内容**的 SHA-256，verify-plugin.mjs 会逐文件比对。
+# 本机 core.autocrlf 是开的，若不钉住，checkout 出来的工作树就是 CRLF，
+# 哈希立刻对不上，别人克隆后 `npm run verify` 会无故变红。
+* text=auto eol=lf
+
+*.md text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.js text eol=lf
+*.mjs text eol=lf
+*.ts text eol=lf
+*.html text eol=lf
+cordis.patch.yml text eol=lf
+.gitignore text eol=lf
+LICENSE text eol=lf
+
+# 二进制：不做行尾转换
+*.png binary
+*.jpg binary
+*.zip binary

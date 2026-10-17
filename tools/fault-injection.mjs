@@ -1,0 +1,197 @@
+#!/usr/bin/env node
+/**
+ * 门禁自证：证明门禁真的会红，而不是恒绿。
+ *
+ * Owner 硬规则：「新门禁先做故障注入证明它会失败，才承认它是绿的」。
+ * 本脚本对每条门禁注入它该拦的故障，断言 exit != 0；再清掉故障断言回到 0。
+ * 只要有一条门禁对故障无反应，本脚本自身非零退出——它自己也必须能变红。
+ *
+ * 用法：node tools/fault-injection.mjs
+ */
+import { spawnSync } from 'node:child_process';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
+const SCRIPTS = join(PACKAGE_ROOT, 'skills', 'agent-notes', 'scripts');
+const NODE = process.execPath;
+
+let failures = 0;
+
+/**
+ * 跑一个 vendored 脚本，返回退出码与输出。
+ *
+ * @param {string} script 脚本文件名。
+ * @param {string} cwd 工作目录。
+ * @returns {{ code: number, out: string }} 退出码与合并输出。
+ */
+function run(script, cwd) {
+  const result = spawnSync(NODE, [join(SCRIPTS, script)], {
+    cwd,
+    encoding: 'utf8',
+    env: { ...process.env },
+    windowsHide: true
+  });
+  return { code: result.status ?? -1, out: `${result.stdout ?? ''}${result.stderr ?? ''}` };
+}
+
+/** 一篇合规笔记。 */
+const GOOD_NOTE = [
+  '# Agent Note: 探针',
+  '',
+  'Status: implemented',
+  '',
+  '## Problem',
+  '问题。',
+  '',
+  '## Decision',
+  '决定。',
+  '',
+  '## Alternatives considered',
+  '- **备选** — 最强理由；否掉的原因。',
+  '',
+  '## Consequences',
+  '- 代价与收益。',
+  ''
+].join('\n');
+
+/**
+ * 断言某条门禁在给定故障下必须失败。
+ *
+ * @param {string} label 场景说明。
+ * @param {string} script 脚本文件名。
+ * @param {string} cwd 工作目录。
+ * @param {RegExp} expectPattern 诊断应匹配的模式（NULL 表示不校验）。
+ */
+function expectRed(label, script, cwd, expectPattern) {
+  const { code, out } = run(script, cwd);
+  if (code === 0) {
+    console.error(`  ✖ ${label} — 门禁没有变红（exit=0），这是假绿！`);
+    failures += 1;
+    return;
+  }
+  if (expectPattern !== null && !expectPattern.test(out)) {
+    console.error(`  ✖ ${label} — 变红了但诊断不指向该故障：${out.trim().split('\n').slice(-3).join(' | ')}`);
+    failures += 1;
+    return;
+  }
+  console.log(`  ✔ ${label} — exit=${code}`);
+}
+
+/**
+ * 断言门禁在无故障时必须通过。
+ *
+ * @param {string} label 场景说明。
+ * @param {string} script 脚本文件名。
+ * @param {string} cwd 工作目录。
+ */
+function expectGreen(label, script, cwd) {
+  const { code, out } = run(script, cwd);
+  if (code !== 0) {
+    console.error(`  ✖ ${label} — 本应通过却失败（exit=${code}）：${out.trim().split('\n').slice(-3).join(' | ')}`);
+    failures += 1;
+    return;
+  }
+  console.log(`  ✔ ${label} — exit=0`);
+}
+
+const work = mkdtempSync(join(tmpdir(), 'agent-notes-fault-'));
+try {
+  const notesRoot = join(work, '.agents', 'notes');
+  const impl = join(notesRoot, 'implemented', 'architecture');
+  mkdirSync(impl, { recursive: true });
+  mkdirSync(join(work, '.git'));
+  writeFileSync(join(impl, '2026-01-01-good.md'), GOOD_NOTE, 'utf8');
+
+  console.log('故障注入：先证明门禁是真的');
+
+  console.log('\n[基线] 合规树必须通过');
+  expectGreen('tree 绿基线', 'verify-agent-note-tree.ts', work);
+  expectGreen('format 绿基线', 'verify-agent-note-format.ts', work);
+  expectGreen('archived 绿基线', 'verify-archived-agent-notes.ts', work);
+
+  console.log('\n[tree] 目录与命名');
+  const illegalClass = join(notesRoot, 'implemented', 'refactor');
+  mkdirSync(illegalClass, { recursive: true });
+  writeFileSync(join(illegalClass, '2026-01-02-bad.md'), GOOD_NOTE, 'utf8');
+  expectRed('非法分类目录 refactor', 'verify-agent-note-tree.ts', work, /unknown class folder|refactor/);
+  rmSync(illegalClass, { recursive: true, force: true });
+
+  writeFileSync(join(impl, 'wrong-name.md'), GOOD_NOTE, 'utf8');
+  expectRed('文件名不符合 yyyy-mm-dd', 'verify-agent-note-tree.ts', work, /filename|yyyy-mm-dd/);
+  rmSync(join(impl, 'wrong-name.md'), { force: true });
+
+  writeFileSync(join(notesRoot, 'implemented', 'INDEX.md'), '# index\n', 'utf8');
+  expectRed('出现 INDEX.md', 'verify-agent-note-tree.ts', work, /INDEX/);
+  rmSync(join(notesRoot, 'implemented', 'INDEX.md'), { force: true });
+
+  console.log('\n[format] 头部与骨架');
+  writeFileSync(join(impl, '2026-01-05-noalt.md'),
+    GOOD_NOTE.replace(/## Alternatives considered[\s\S]*?(?=## Consequences)/, ''), 'utf8');
+  expectRed('缺 ## Alternatives considered', 'verify-agent-note-format.ts', work, /Alternatives|备选/);
+  rmSync(join(impl, '2026-01-05-noalt.md'), { force: true });
+
+  writeFileSync(join(impl, '2026-01-06-prop.md'),
+    GOOD_NOTE.replace('## Decision', '## Proposal'), 'utf8');
+  expectRed('implemented 出现 ## Proposal', 'verify-agent-note-format.ts', work, /Proposal|Decision/);
+  rmSync(join(impl, '2026-01-06-prop.md'), { force: true });
+
+  writeFileSync(join(impl, '2026-01-07-status.md'),
+    GOOD_NOTE.replace('Status: implemented', 'Status: proposed'), 'utf8');
+  expectRed('Status 与所在目录不符', 'verify-agent-note-format.ts', work, /Status|status/);
+  rmSync(join(impl, '2026-01-07-status.md'), { force: true });
+
+  console.log('\n[archived] 封印只增不改');
+  const arch = join(notesRoot, 'archived', 'process');
+  mkdirSync(arch, { recursive: true });
+  const sealed = join(arch, '2026-01-10-sealed.md');
+  writeFileSync(sealed, [
+    '# Agent Note: 封存样本',
+    '',
+    'Status: implemented',
+    'Archived: 2026-01-10',
+    '',
+    '## Problem',
+    '问题。',
+    '',
+    '## Decision',
+    '决定。',
+    '',
+    '## Alternatives considered',
+    '- **备选** — 最强理由。',
+    '',
+    '## Consequences',
+    '- 代价。',
+    ''
+  ].join('\n'), 'utf8');
+  const seal = spawnSync(NODE, [join(SCRIPTS, 'verify-archived-agent-notes.ts'), '--write'], {
+    cwd: work, encoding: 'utf8', windowsHide: true
+  });
+  if ((seal.status ?? -1) !== 0 || !existsSync(join(notesRoot, 'archived', 'manifest.json'))) {
+    console.error(`  ✖ 封印写入失败：${seal.stdout}${seal.stderr}`);
+    failures += 1;
+  } else {
+    console.log('  ✔ 封印已写入 manifest.json');
+    writeFileSync(sealed, `${GOOD_NOTE}\n被篡改的内容\n`, 'utf8');
+    expectRed('篡改已封印归档', 'verify-archived-agent-notes.ts', work, /seal mismatch|modified/);
+
+    rmSync(sealed, { force: true });
+    expectRed('删除已封印归档', 'verify-archived-agent-notes.ts', work, /no file on disk|missing/);
+  }
+
+  console.log('\n[自证] 清掉全部故障后必须回到绿');
+  rmSync(join(notesRoot, 'archived'), { recursive: true, force: true });
+  expectGreen('tree 复原', 'verify-agent-note-tree.ts', work);
+  expectGreen('format 复原', 'verify-agent-note-format.ts', work);
+  expectGreen('archived 复原', 'verify-archived-agent-notes.ts', work);
+
+  if (failures > 0) {
+    console.error(`\n故障注入未通过：${failures} 项。门禁不可信，先修门禁。`);
+    process.exit(1);
+  }
+  console.log('\n故障注入全部通过：每条门禁都能对该拦的故障变红，且无故障时为绿。');
+} finally {
+  rmSync(work, { recursive: true, force: true });
+}

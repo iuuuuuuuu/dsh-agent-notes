@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "ref": "0e8200c0f80d37a1c75e585a65b35401ae198462",
+  "files": {
+    "SKILL.md": "sha256:0e6628cb72dc49fe2dbdcd07e5f0eeeb00eb7201ec106e11ba7be7f2495a6314",
+    "references/archiving.md": "sha256:e4e570bcffbbd4e2ac4bd69e924d418d2840e9d36b8ce7c21af9694778eafb9f",
+    "references/classification.md": "sha256:6f33394aeba1deed850ff2bbd2ea384528ceba7d902f17f93ac88bcde12dc8bb",
+    "references/note-format.md": "sha256:a79fd05c042ed26c9b1f12fd75107874df56d43170885e37a289cf591b8198f1",
+    "references/prose-checklist.md": "sha256:e9e193d7e261a379870e0f9b708ee9fd5bb546abec7553d62a2b51b11249e4c6",
+    "references/quality-gate.md": "sha256:dbd28655da018cd6a284cee9f4582b2becc1813039e5483256f68696ff7ee667",
+    "references/simplification-checklist.md": "sha256:dfd3964d97aa6ca0f897c6898223371a497a111e8058ac976abe082f155f46ea",
+    "references/verification.md": "sha256:8d5bd7dbc64b202fb2671ce1e7c246e15a0971bbc2f1a717b0da34327016d647",
+    "references/when-to-write.md": "sha256:835d7f24b09fff787fc28a989efabf06ff6ed05ddb682278270cce8586465c7c",
+    "templates/implemented.md": "sha256:e749fb276653fb9cc8547dcffb05d321c17e6d47a52d5d9f931013ca8c2ad7ee",
+    "templates/proposed.md": "sha256:5f1ca4c292a92c7ebad7c6e45764fe06a49249fa4c8f56bc0743e2611da81873",
+    "templates/rejected.md": "sha256:7e89cf61829c691fc74d754444b937b53479d95739dccfb40978d3163404fbd0",
+    "templates/verify-notes.yml": "sha256:4bd70cf35adbde97362a5ced030d158c255f8cb2a76e68a72c7c3b147d395e79",
+    "scripts/agent-note-tree.ts": "sha256:19c76e73c5babad50bb84585216c8bd899cb89c9a32009b5dec0f77ba1465d79",
+    "scripts/archive-agent-note.ts": "sha256:8c56b3f76452d212cfb51ecc53568f6e28f58bbd3111ae022475860bd748e79a",
+    "scripts/build-board.ts": "sha256:13815f35b1ec9ef31fa985490ce2c8af5a382e3575bc4f962ed06178afcf6afc",
+    "scripts/check-note-anchors.ts": "sha256:cfc4a384a26b6f7f220089a84207c08f48170fdb355f6a8abf81a5d463932a9e",
+    "scripts/verify-agent-note-format.ts": "sha256:73db6a73deed9f682565a2d00ca093d3ac311062c2567274a2667f2fadfca0b2",
+    "scripts/verify-agent-note-tree.ts": "sha256:cf6b7b813974f6fa56ee247dafc87e83cee4f7fd819ee3e03e8aaa348a2b4547",
+    "scripts/verify-archived-agent-notes.ts": "sha256:2da90cbe7cca77abcaa9b90c30c954a872ac85196fd2003b5921eca83954f3f8",
+    "assets/agent-notes-board.html": "sha256:1c692049b81b0854e2de5bd20dc36ddd3d34ac285273fc5028c5469ed22e7d09"
+  }
+}

@@ -1,0 +1,61 @@
+{
+  "name": "dsh-agent-notes",
+  "version": "0.1.0",
+  "description": "DSH 决策笔记（Agent Notes）：把「为什么这样改、放弃了什么」沉淀成可机械校验的仓库笔记，提供 Skill、会话级开关、真门禁与上游合并。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "skills",
+    "tools",
+    "cordis.patch.yml",
+    "upstream.json",
+    "README.md",
+    "README.en.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.19"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "agent-notes",
+    "decision-record",
+    "adr",
+    "skill"
+  ],
+  "license": "MIT",
+  "author": "iuuuuuuuu",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/iuuuuuuuu/dsh-agent-notes.git"
+  },
+  "homepage": "https://github.com/iuuuuuuuu/dsh-agent-notes#readme",
+  "bugs": {
+    "url": "https://github.com/iuuuuuuuu/dsh-agent-notes/issues"
+  },
+  "scripts": {
+    "test": "node --test tools/*.test.mjs",
+    "sync": "node tools/sync-upstream.mjs",
+    "sync:check": "node tools/sync-upstream.mjs --check",
+    "verify": "node tools/verify-plugin.mjs",
+    "gate:fault-injection": "node tools/fault-injection.mjs",
+    "evidence": "node tools/live-evidence.mjs",
+    "check": "npm run verify && npm test && npm run gate:fault-injection && npm run evidence"
+  },
+  "upstreamCommit": "0e8200c0f80d37a1c75e585a65b35401ae198462"
+}
