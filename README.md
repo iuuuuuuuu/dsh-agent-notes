@@ -284,6 +284,21 @@ ci.yml → npm run verify-notes → tsx .agents/skills/agent-notes/scripts/*.ts
 
 关掉它：把 `lib/index.js` 里的 `scheduleSkillUpdate(...)` 调用删掉即可（或按需加配置项）。
 
+### 侧边栏（dsh-better-sidebar）
+
+装了 [dsh-better-sidebar](https://github.com/dhicoc/dsh-better-sidebar) 时，看板也会出现在它的
+右侧栏里，**同一个开关控制**：笔记规范关着就不出现，打开才出现。
+
+接入方式是该插件公开的客户端服务 `ctx.betterSidebar.registerTab(...)`，不是私有 API：
+
+- **可选依赖**：用 `ctx.inject(['betterSidebar'], …)` 等待，绝不写进插件级 `inject` ——
+  写进去的话，没装那个插件时本插件会**整个不加载**；
+- **状态分开记账**：两个宿主（内置槽位 / 侧边栏）各存各的注册状态。共用一份会让
+  「一个就绪、另一个没就绪」互相覆盖，表现为 tab 时有时无；
+- **会话字段两种形状都认**：内置槽位给顶层 `sessionId`，better-sidebar 给
+  `scope.sessionId`。只认一种的话，另一个宿主里 iframe 会拼出空 session，
+  路由回 409，整块空白。
+
 ### 版本号
 
 市场、官方插件源、第三方靠**版本号**判断有没有更新 —— 内容变了但版本号不动，

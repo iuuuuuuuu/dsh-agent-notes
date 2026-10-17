@@ -165,3 +165,142 @@ test('客户端 bundle：用官方命令通道写状态，不自己写日志', (
   // 投影键必须与宿主侧一致，否则读不到状态、徽标恒为「未知」。
   assert.ok(bundle.includes(`'${PROJECTION_KEY}'`), `客户端必须读投影键 ${PROJECTION_KEY}`);
 });
+
+test('客户端 bundle：看板同时接入 dsh-better-sidebar 的右侧栏', () => {
+  const bundle = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8');
+
+  /* 两个宿主并存：DSH 内置的 conversation.view，以及第三方插件
+     dsh-better-sidebar 提供的 ctx.betterSidebar。 */
+  assert.ok(bundle.includes('betterSidebar'), '必须通过 ctx.betterSidebar 接入右侧栏');
+  assert.ok(bundle.includes('registerTab'), '必须调用 registerTab 注册 tab 类型');
+
+  /* 服务是**可选**依赖：没装 dsh-better-sidebar 时笔记功能必须照常可用。
+     所以只能用 ctx.inject 等待，绝不能写进插件级 inject 数组 ——
+     那会让整个插件在缺该服务时根本不加载。 */
+  assert.match(
+    bundle,
+    /inject\(\s*\[\s*['"]betterSidebar['"]\s*\]/,
+    '必须用 ctx.inject 把 betterSidebar 当可选依赖等待'
+  );
+  const pluginInject = /inject:\s*\[([^\]]*)\]/.exec(bundle);
+  assert.ok(pluginInject !== null, '应能读到插件级 inject 声明');
+  assert.ok(
+    !pluginInject[1].includes('betterSidebar'),
+    'betterSidebar 不得进插件级 inject —— 缺该服务时整个插件会不加载'
+  );
+
+  /* 两个宿主各有独立的状态记账：一个就绪、另一个没就绪时不能互相覆盖，
+     否则表现为 tab 时有时无。
+     不能只断言字符串存在 —— 那样把两个宿主都指向同一个状态也能通过（实测：
+     注入 `name = 'slots'` 让两者共用状态，光靠 includes 一条都没红）。
+     所以直接**执行** syncHost，观察它是否真的按宿主分开记账。 */
+  /* bundle 是客户端模块，外面包着 window.__ModuleLoader__.load({id, factory})。
+     hosts/syncHost 都在闭包里、工厂只 return {name, inject, apply}，
+     所以只能走真实路径：调 apply，喂假的 ctx/slots，观察注册与注销行为。
+     这比断言字符串强得多 —— 注入「两个宿主共用状态」时它会真的红。 */
+  let captured = null;
+  const fakeWindow = {
+    __ModuleLoader__: { load: (entry) => { captured = entry.factory; } }
+  };
+  const factoryFn = new Function('window', 'document', 'module', 'exports', 'require', bundle);
+  factoryFn(fakeWindow, { createElement: () => null, documentElement: {} }, {}, {}, (name) => {
+    if (name === 'react') {
+      return {
+        createElement: () => null,
+        useState: () => [null, () => {}],
+        useEffect: () => {},
+        useRef: () => ({ current: null }),
+        useMemo: (fn) => fn(),
+        useSyncExternalStore: (sub, get) => get()
+      };
+    }
+    return {};
+  });
+  assert.ok(captured !== null, '应能捕获到客户端模块工厂');
+  const mod = captured(() => ({}));
+  assert.equal(typeof mod.apply, 'function', '工厂应返回 apply');
+
+  /* 记录两个宿主各自的注册/注销。slots 宿主通过 slots.inject 回调提供座位，
+     better-sidebar 宿主通过 ctx.inject(['betterSidebar']) 提供。 */
+  const seatRegistrations = [];
+  const fakeSlots = {
+    inject(name, cb) {
+      if (name === 'conversation.view') cb();
+      return () => {};
+    },
+    register(options, component) {
+      seatRegistrations.push(options.id);
+      let disposed = false;
+      return () => { disposed = true; };
+    }
+  };
+  const sidebarRegistrations = [];
+  const fakeSidebar = {
+    registerTab(descriptor) {
+      sidebarRegistrations.push(descriptor.id);
+      return () => { sidebarRegistrations.disposed = true; };
+    }
+  };
+  const fakeCtx = {
+    inject(deps, cb) {
+      /* 只模拟 betterSidebar 就绪；其它依赖一律不回调（模拟缺服务）。 */
+      if (Array.isArray(deps) && deps.includes('betterSidebar')) cb({ betterSidebar: fakeSidebar, effect: (fn) => { fn(); } });
+      return () => {};
+    },
+    effect() {},
+    get() { return undefined; }
+  };
+
+  mod.apply(fakeCtx);
+  /* 开关默认关闭：两侧都不该注册任何 tab。 */
+  assert.equal(seatRegistrations.length, 0, '开关关闭时不应注册 conversation.view tab');
+  assert.equal(sidebarRegistrations.length, 0, '开关关闭时不应注册侧边栏 tab');
+
+  /* 再单独验证 syncHost 的分宿主记账 —— 从源码里取出来执行。
+     为什么不从 bundle 拿：它被闭包包住，工厂只 return {name, inject, apply}。
+     从 src 取能直接观察状态机，且不污染生产代码表面。 */
+  const src = readFileSync(join(ROOT, 'src', 'client.js'), 'utf8');
+  const start = src.indexOf('var hosts = {');
+  const end = src.indexOf('/* 与 lib/projection.js 的 PROJECTION_KEY 必须一致。 */');
+  assert.ok(start > 0 && end > start, '应能从源码定位 hosts 与 syncHost');
+  const block = src.slice(start, end);
+  const build = new Function(`${block}; return { hosts, syncHost, syncBoardTab };`);
+  const { hosts, syncHost, syncBoardTab } = build();
+
+  /* slots 就绪、sidebar 未就绪：开。 */
+  let slotsOn = 0;
+  hosts.slots.register = () => { slotsOn += 1; return () => { slotsOn -= 1; }; };
+  hosts.sidebar.register = null;
+  syncBoardTab(true);
+  assert.equal(slotsOn, 1, 'slots 就绪时应注册');
+  assert.equal(hosts.sidebar.enabled, true, 'sidebar 未就绪时应记住意图，不能丢');
+  assert.equal(hosts.slots.enabled, true, 'slots 状态不得被 sidebar 覆盖');
+
+  /* 关：slots 注销，sidebar 只改意图。 */
+  syncBoardTab(false);
+  assert.equal(slotsOn, 0, '关闭后 slots 应注销');
+  assert.equal(hosts.sidebar.enabled, false, 'sidebar 应记住关闭意图');
+  assert.equal(hosts.slots.enabled, false, '两个宿主各自记账，都要变成 false');
+
+  /* 补一次：sidebar 后来就绪，应立刻按记住的意图注册。 */
+  let sidebarOn = 0;
+  hosts.sidebar.register = () => { sidebarOn += 1; return () => { sidebarOn -= 1; }; };
+  syncHost('sidebar', true);
+  assert.equal(sidebarOn, 1, 'sidebar 就绪后应按意图注册');
+  assert.equal(slotsOn, 0, 'sidebar 注册不得顺带把 slots 也打开 —— 两者独立');
+  /* 侧边栏 tab 用单实例：重复打开聚焦已有的，不开一堆。 */
+  assert.match(bundle, /single:\s*true/, '侧边栏 tab 应声明 single: true');
+});
+
+test('客户端 bundle：看板要认两种宿主的会话字段', () => {
+  const bundle = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8');
+  /* 两个宿主传的会话信息形状不同：
+       - conversation.view：顶层 sessionId
+       - better-sidebar 的 TabComponentProps：scope.sessionId
+     只认前者时，侧边栏里 iframe 的 src 会变成 `?session=`（空串），
+     路由按设计回 409，表现为整块空白。这类问题在单测里看不出、
+     在浏览器里也容易被当成「没数据」，所以钉死两种来源都要读。 */
+  assert.match(bundle, /props\.sessionId/, '必须读顶层 sessionId（内置槽位）');
+  assert.match(bundle, /props\.scope/, '必须读 scope（better-sidebar）');
+  assert.match(bundle, /scope\.sessionId/, '必须从 scope 里取 sessionId');
+});

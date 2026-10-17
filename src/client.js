@@ -32,24 +32,63 @@ function createAgentNotesClient(require) {
    * 隐藏机制；而 apply 阶段还没有任何会话，读不到投影。开关组件挂在输入框
    * 里、每个会话都在、且已经订阅同一个投影，因此由它当信使最自然。
    */
-  var boardTab = { register: null, dispose: null, enabled: null };
+  /**
+   * 看板 tab 的注册状态，**每个宿主一份**。
+   *
+   * 目前有两个宿主：
+   *   - `slots`：DSH 内置的 `conversation.view`（对话/轨迹 旁边的 tab）
+   *   - `sidebar`：dsh-better-sidebar 的右侧栏（第三方插件提供的 ctx.betterSidebar）
+   *
+   * 为什么分成多份：两个宿主的可用性彼此独立 —— 装了 better-sidebar 没有
+   * 不代表 slots 不可用，反之亦然。用一份状态记账会让「一个注册成功、
+   * 另一个还没就绪」互相覆盖，表现为 tab 时有时无。
+   *
+   * `register` 为 null 表示该宿主还没就绪；此时只记 enabled，等它就绪时
+   * 自己按状态补注册（见各自的 ready 逻辑）。
+   *
+   * @type {Record<string, { register: null | (() => void), dispose: null | (() => void), enabled: boolean | null }>}
+   */
+  var hosts = {
+    slots: { register: null, dispose: null, enabled: null },
+    sidebar: { register: null, dispose: null, enabled: null }
+  };
 
   /**
-   * 按开关状态增删看板 tab。
+   * 按开关状态增删某个宿主的看板 tab。
+   *
+   * @param {string} name 宿主名（`slots` / `sidebar`）。
+   * @param {boolean} enabled 本会话是否启用笔记规范。
+   */
+  function syncHost(name, enabled) {
+    var host = hosts[name];
+    if (host === undefined) return;
+    if (host.register === null) {
+      /* 宿主未就绪：先记住意图，等它 ready 时自己补。 */
+      host.enabled = enabled;
+      return;
+    }
+    if (host.enabled === enabled) return;
+    host.enabled = enabled;
+    if (enabled) {
+      if (host.dispose === null) {
+        try { host.dispose = host.register(); } catch (e) { /* 注册失败不得影响开关 */ }
+      }
+    } else if (host.dispose !== null) {
+      try { host.dispose(); } catch (e) { /* 注销失败不得影响开关本身 */ }
+      host.dispose = null;
+    }
+  }
+
+  /**
+   * 所有宿主一起按开关状态对齐。
    *
    * @param {boolean} enabled 本会话是否启用笔记规范。
    */
   function syncBoardTab(enabled) {
-    if (boardTab.register === null) return;
-    if (boardTab.enabled === enabled) return;
-    boardTab.enabled = enabled;
-    if (enabled) {
-      if (boardTab.dispose === null) boardTab.dispose = boardTab.register();
-    } else if (boardTab.dispose !== null) {
-      try { boardTab.dispose(); } catch (e) { /* 注销失败不得影响开关本身 */ }
-      boardTab.dispose = null;
-    }
+    syncHost('slots', enabled);
+    syncHost('sidebar', enabled);
   }
+
   /* 与 lib/projection.js 的 PROJECTION_KEY 必须一致。 */
   var PROJECTION_KEY = 'agentNotes';
   var COMMAND = '/agent-notes';
@@ -291,7 +330,17 @@ function createAgentNotesClient(require) {
     var phase = frameState[0];
     var setPhase = frameState[1];
 
+    /* 两个宿主传的会话信息形状不同，必须都认：
+       - conversation.view（DSH 内置槽位）：顶层 `sessionId`
+       - dsh-better-sidebar 的 TabComponentProps：`scope.sessionId`
+       只认前者的话，侧边栏里的 iframe 会拼出 `?session=`（空串），
+       路由按设计回 409，表现为一片空白 —— 这类「换宿主就空白」的坑
+       不能靠肉眼发现，所以两种来源都取，取不到才留空。 */
     var sessionId = props.sessionId;
+    if (sessionId === undefined || sessionId === null || sessionId === '') {
+      var scope = props.scope;
+      if (scope !== undefined && scope !== null) sessionId = scope.sessionId;
+    }
     var src = '/agent-notes/ui?session=' + encodeURIComponent(String(sessionId ?? ''));
 
     /* `data-conversation-composer-overlay` 是宿主认的「本视图自己占满整块」标记。
@@ -368,7 +417,7 @@ function createAgentNotesClient(require) {
          投影状态驱动（原因见 boardTab 的注释）。 */
     try {
       slots.inject('conversation.view', function () {
-        boardTab.register = function () {
+        hosts.slots.register = function () {
           return slots.register({
             name: 'conversation.view',
             id: 'agent-notes-board',
@@ -377,19 +426,57 @@ function createAgentNotesClient(require) {
           }, AgentNotesBoard);
         };
         /* 已有关状态就先按它对齐一次（组件可能比座位先就绪）。 */
-        if (boardTab.enabled === true && boardTab.dispose === null) {
-          boardTab.dispose = boardTab.register();
+        if (hosts.slots.enabled === true && hosts.slots.dispose === null) {
+          hosts.slots.dispose = hosts.slots.register();
         }
         return function () {
-          if (boardTab.dispose !== null) {
-            try { boardTab.dispose(); } catch (e) { /* 忽略 */ }
-            boardTab.dispose = null;
+          if (hosts.slots.dispose !== null) {
+            try { hosts.slots.dispose(); } catch (e) { /* 忽略 */ }
+            hosts.slots.dispose = null;
           }
-          boardTab.register = null;
-          boardTab.enabled = null;
+          hosts.slots.register = null;
+          hosts.slots.enabled = null;
         };
       });
     } catch (e) { /* 座位注册失败不得炸掉整个客户端 */ }
+
+    /* dsh-better-sidebar 的右侧栏：同一个看板，换一个宿主。
+       该插件提供客户端服务 `ctx.betterSidebar`，用 registerTab 注册 tab 类型，
+       返回的是 disposer（cordis 会在 fiber 销毁时自动调用，HMR 安全）。
+       服务可能没装/没就绪 —— 用 ctx.inject 等它，拿不到就静默跳过，
+       绝不让「没装这个插件」变成笔记功能不可用。 */
+    try {
+      ctx.inject(['betterSidebar'], function (subCtx) {
+        var sidebar = subCtx.betterSidebar;
+        if (sidebar === undefined || sidebar === null || typeof sidebar.registerTab !== 'function') return;
+        hosts.sidebar.register = function () {
+          return sidebar.registerTab({
+            id: 'agent-notes-board',
+            title: function () { return copy('boardTitle'); },
+            description: function () { return copy('boardTitle'); },
+            /* 排在文件/搜索等内置之后，不与它们抢位置。 */
+            order: 60,
+            /* 单实例：重复打开聚焦已有的那个，而不是开一堆。 */
+            single: true,
+            component: function () { return h(AgentNotesBoard, null); }
+          });
+        };
+        /* 服务比开关先就绪时，按已记住的意图补注册。 */
+        if (hosts.sidebar.enabled === true && hosts.sidebar.dispose === null) {
+          hosts.sidebar.dispose = hosts.sidebar.register();
+        }
+        subCtx.effect(function () {
+          return function () {
+            if (hosts.sidebar.dispose !== null) {
+              try { hosts.sidebar.dispose(); } catch (e) { /* 忽略 */ }
+              hosts.sidebar.dispose = null;
+            }
+            hosts.sidebar.register = null;
+            hosts.sidebar.enabled = null;
+          };
+        });
+      });
+    } catch (e) { /* better-sidebar 不在时不影响其它功能 */ }
   }
 
   return { name: NS, inject: ['slots'], apply: apply };

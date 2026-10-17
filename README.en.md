@@ -329,6 +329,25 @@ blocked here. The source constant is `UPDATE_SOURCE`.
 To disable it, remove the `scheduleSkillUpdate(...)` call in `lib/index.js` (or gate it
 behind a config flag).
 
+### Sidebar (dsh-better-sidebar)
+
+When [dsh-better-sidebar](https://github.com/dhicoc/dsh-better-sidebar) is installed, the board
+also appears in its right sidebar — **driven by the same switch**: it is absent while note
+discipline is off and appears once you turn it on.
+
+Integration uses that plugin's public client service `ctx.betterSidebar.registerTab(...)`, not a
+private API:
+
+- **Optional dependency**: awaited via `ctx.inject(['betterSidebar'], …)` and never placed in the
+  plugin-level `inject` array — doing so would make this plugin **fail to load entirely** when that
+  plugin is absent;
+- **Separate state per host**: the built-in slot and the sidebar each track their own registration.
+  Sharing one record lets "one ready, the other not" overwrite each other, which shows up as the
+  tab appearing and disappearing;
+- **Both session-field shapes are read**: the built-in slot passes a top-level `sessionId`, while
+  better-sidebar passes `scope.sessionId`. Reading only one leaves the other host building an
+  empty session into the iframe URL, which the route answers with 409 — a blank panel.
+
 ### Version numbers
 
 Marketplaces, official plugin indexes and third parties decide "is there an update"

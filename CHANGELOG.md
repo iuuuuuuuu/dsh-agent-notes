@@ -13,6 +13,16 @@
   - 已接进 `npm run check` 与 `.github/workflows/verify.yml`；`tools/fault-injection.mjs` 新增 `[verify-notes]` 一节，对空树、不存在的树、违规笔记断言变红，并以「合规树必须 exit=0」作反向对照。
   - 文档同步：`README.md` / `README.en.md` 的 CI 片段加了「照抄会恒绿」的警告，`AGENTS.md` 把 `npm run notes:gate` 列为推荐门禁。
 
+- **接入 dsh-better-sidebar 侧边栏**：看板同时出现在该插件的右侧栏，**同一个开关控制**。
+  用它的公开客户端服务 `ctx.betterSidebar.registerTab`，不是私有 API。
+  - 用 `ctx.inject(['betterSidebar'], …)` 当可选依赖等待；写进插件级 inject 会让
+    没装该插件时本插件整个不加载
+  - 两个宿主各存各的注册状态，共用一份会让 tab 时有时无
+  - 会话字段两种形状都认（顶层 `sessionId` / `scope.sessionId`）—— 只认一种时
+    另一个宿主里 iframe 拼出空 session，路由回 409，整块空白
+  - 故障注入：两宿主共用状态 → 变红；只认 props.sessionId → 变红；
+    betterSidebar 进插件级 inject → 变红
+
 - **版本号与快速探针**：市场/官方源/第三方靠版本号判断更新，所以自动合并后会
   `minor` 递增并打 tag。版本号同时作自更新的探针：只读一个 1.8 KB 的 `package.json`，
   变了才拉 21 个技能文件。实测冷启动 2028 ms → 热启动 79 ms（25.7 倍），热路径零文件请求。
