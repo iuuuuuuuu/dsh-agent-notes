@@ -8,12 +8,14 @@
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { buildBoard, buildBoardFromRoots, parseNote, scanNotes } from '../lib/board.js';
 import { isInside, registerBoardRoutes } from '../lib/board-route.js';
+import { listGitChildren, originOf, resolveNotesRoots } from '../lib/notes.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
@@ -340,6 +342,89 @@ test('board: 全部根都不存在时 exists=false，不冒充「有树但空」
     ]);
     assert.equal(board.exists, false, '所有根都不存在');
     assert.equal(board.total, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes: originOf 把 https 与 ssh 写法归一，且区分不同仓库', () => {
+  /* origin 是「同一个仓库」的判据：容器目录下可能混着别人的参考仓库
+     （实测有 ref-panel、ref-sliverkiss 两个第三方 clone），
+     不加过滤就会把别人的决策笔记显示出来。
+     用真实 git init，因为 git 只认真正的仓库元数据。 */
+  const dir = mkdtempSync(join(tmpdir(), 'an-origin-'));
+  const mk = (name, origin) => {
+    const p = join(dir, name);
+    mkdirSync(p, { recursive: true });
+    spawnSync('git', ['init', '-q'], { cwd: p, windowsHide: true });
+    if (origin !== undefined) {
+      spawnSync('git', ['remote', 'add', 'origin', origin], { cwd: p, windowsHide: true });
+    }
+    return p;
+  };
+  try {
+    const repo = mk('repo', 'https://github.com/me/proj.git');
+    const wt = mk('wt-a', 'https://github.com/me/proj.git');
+    const other = mk('ref-x', 'https://github.com/someone/other.git');
+    const ssh = mk('ssh-clone', 'git@github.com:me/proj.git');
+
+    assert.equal(originOf(repo), originOf(wt), '同源仓库的 origin 必须相等');
+    assert.notEqual(originOf(repo), originOf(other), '别人的仓库必须区分开');
+    assert.equal(originOf(repo), originOf(ssh), 'ssh 与 https 应归一为同一个值');
+    /* 归一结果里不该残留协议与 .git 后缀。 */
+    assert.equal(originOf(repo), 'github.com/me/proj');
+    assert.equal(originOf(mk('no-remote')), undefined, '没有 origin 时返回 undefined');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes: listGitChildren 只下探一层，跳过 node_modules', () => {
+  const { dir } = makeRepo();
+  try {
+    mkdirSync(join(dir, 'a', '.git'), { recursive: true });
+    mkdirSync(join(dir, 'b', '.git'), { recursive: true });
+    mkdirSync(join(dir, 'node_modules', 'x', '.git'), { recursive: true });
+    mkdirSync(join(dir, 'plain'), { recursive: true });
+    const found = listGitChildren(dir).map((p) => basename(p));
+    assert.deepEqual(found, ['a', 'b'], '只认直接子目录里的 .git，跳过 node_modules');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes: resolveNotesRoots 在容器目录下真的排除别人的仓库', () => {
+  /* 关键回归：只测 originOf 是不够的 —— 它证明「能分辨」，
+     证明不了「真的按它过滤」。这条测试直接打 resolveNotesRoots，
+     故障注入（去掉过滤）会让它变红。 */
+  const dir = mkdtempSync(join(tmpdir(), 'an-filter-'));
+  const mk = (name, origin) => {
+    const p = join(dir, name);
+    mkdirSync(p, { recursive: true });
+    spawnSync('git', ['init', '-q'], { cwd: p, windowsHide: true });
+    if (origin !== undefined) {
+      spawnSync('git', ['remote', 'add', 'origin', origin], { cwd: p, windowsHide: true });
+    }
+    return p;
+  };
+  try {
+    const mine = mk('repo', 'https://github.com/me/proj.git');
+    const wt = mk('wt-a', 'https://github.com/me/proj.git');
+    const theirs = mk('ref-x', 'https://github.com/someone/other.git');
+
+    /* 各自放一篇笔记，用 slug 区分来源。 */
+    for (const [root, slug] of [[mine, 'mine'], [wt, 'mine-wt'], [theirs, 'theirs']]) {
+      const target = join(root, '.agents', 'notes', 'implemented', 'process');
+      mkdirSync(target, { recursive: true });
+      writeFileSync(join(target, `2026-01-01-${slug}.md`), noteBody(slug), 'utf8');
+    }
+
+    const roots = resolveNotesRoots(dir);
+    const slugs = buildBoardFromRoots(roots).notes.map((n) => n.slug);
+
+    assert.ok(slugs.includes('mine'), '自己仓库的笔记必须在');
+    assert.ok(slugs.includes('mine-wt'), '同源 worktree 的笔记必须在');
+    assert.ok(!slugs.includes('theirs'), '别人的仓库的笔记必须被排除');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
