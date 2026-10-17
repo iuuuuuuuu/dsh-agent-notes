@@ -63,6 +63,21 @@ dsh plugin add --profile <你的profile> github:iuuuuuuuu/dsh-agent-notes
 /agent-notes gate            跑真门禁（也可 gate tree / gate format / gate archived）
 ```
 
+### 默认是关闭的
+
+装好插件后，**新会话和旧会话默认都不启用**，需要时手动打开（点胶囊，或
+`/agent-notes on`）。这样装上插件不会悄悄改变任何既有会话的行为。
+
+想让所有会话默认开启，二选一：
+
+```
+/agent-notes on --global        # 运行时改全局默认，落盘持久化
+```
+
+或在插件配置里写 `enabled: true`（仅在该配置生效的 profile 里）。
+
+会话级开关优先级高于全局：单独关掉某个会话后，改全局也不会影响它。
+
 ### 界面上的状态提示
 
 不用敲命令也能一眼看到当前会话是否生效：**输入框工具行左侧**有一枚绿色胶囊

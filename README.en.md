@@ -65,6 +65,23 @@ dsh plugin add --profile <your-profile> github:iuuuuuuuu/dsh-agent-notes
 /agent-notes gate            Run the real gates (also: gate tree / gate format / gate archived)
 ```
 
+### Off by default
+
+After installing, **both new and existing sessions start with the policy off** —
+turn it on when you need it (click the chip, or `/agent-notes on`). Installing the
+plugin therefore never silently changes the behavior of sessions you already have.
+
+To enable it everywhere, either:
+
+```
+/agent-notes on --global        # change the global default at runtime, persisted
+```
+
+or set `enabled: true` in the plugin config (only for the profile that carries it).
+
+A session override wins over the global default: once you turn a session off, later
+global changes won't affect it.
+
 ### Status indicator in the UI
 
 You don't have to type a command to see whether the policy is on for the current

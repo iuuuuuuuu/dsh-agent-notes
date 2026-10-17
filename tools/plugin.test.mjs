@@ -48,6 +48,37 @@ function validNote() {
   ].join('\n');
 }
 
+test('状态：默认关闭 —— 新老会话都要手动打开', () => {
+  const dir = tempDir('notes-default-off-');
+  const file = join(dir, 'state.json');
+  try {
+    const store = createStateStore({}, file);
+
+    // 1. 什么都不设时，兜底必须是「关」。装上插件不能悄悄改变既有会话。
+    assert.equal(store.effective('s1'), false, '未设置时默认必须是关');
+    assert.equal(store.effective('never-seen-session'), false, '从没见过的会话也是关');
+
+    // 2. 显式传兜底 true 时仍应尊重调用方（配置项 enabled:true 的通路）。
+    assert.equal(store.effective('s1', true), true, '显式兜底 true 应生效');
+
+    // 3. 全局设为开之后，未单独覆盖的会话跟随全局。
+    store.setGlobal(true);
+    assert.equal(store.effective('s1'), true, '跟随全局开');
+
+    // 4. 会话级覆盖优先于全局。
+    store.setSession('s1', false);
+    assert.equal(store.effective('s1'), false, '会话覆盖优先');
+    assert.equal(store.effective('s2'), true, '其他会话仍跟随全局');
+
+    // 5. 重载后仍然默认关（新进程起来时不能变成开）。
+    const reloaded = createStateStore({}, file);
+    reloaded.setGlobal(false);
+    assert.equal(reloaded.effective('brand-new'), false, '重载后新会话仍默认关');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('状态：全局默认与会话覆盖双持久化，重载后保持', () => {
   const dir = tempDir('notes-state-');
   const file = join(dir, 'state.json');

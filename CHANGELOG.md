@@ -5,6 +5,13 @@
 
 ## [Unreleased]
 
+### 变更
+
+- **默认改为关闭**（Owner 要求）：新会话与旧会话默认都不启用，需要时手动打开。装插件不再悄悄改变既有会话的行为。
+  - `state.effective` 兜底 `true → false`；`apply` 的 `config.enabled` 兜底 `true → false`；`commands.js` 的 `fallbackEnabled` 由 `config.enabled !== false` 改为 `config.enabled === true`；投影 `view` 的兜底 `global === null ? true` 改为 `false`（否则界面胶囊会显示成开）。
+  - 想默认开启仍可：`/agent-notes on --global`（落盘），或配置 `enabled: true`。
+  - 新增 3 项测试（默认关、显式 true 逃生口、重载后仍默认关），故障注入验证：把默认值改回 `true` 后**变红 2 条**。
+
 ### 新增
 
 - **浏览器端状态开关**（客户端插件，`src/client.js` + `lib/client.js`）：**输入框工具行左侧**一枚绿色胶囊「● 笔记规范」，紧挨权限选择器（「完全权限/工作区内修改」）那一排，**点击即切换**，关闭时变灰。读会话投影 `agentNotes`，刷新/重连/切会话都自动正确；点击走官方斜杠命令通道，与手敲命令完全等价。

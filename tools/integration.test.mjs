@@ -188,7 +188,7 @@ function mount(options) {
         if (index >= 0) current.splice(index, 1);
       };
     };
-    applyPlugin(ctx, { stateFile: options.stateFile, enabled: true });
+    applyPlugin(ctx, { stateFile: options.stateFile, ...(options.config ?? { enabled: true }) });
     return { ctx, registered, mode };
   }
 
@@ -209,7 +209,7 @@ function mount(options) {
     registered.listeners.set(event, list);
     return () => {};
   };
-  applyPlugin(ctx, { stateFile: options.stateFile, enabled: true });
+  applyPlugin(ctx, { stateFile: options.stateFile, ...(options.config ?? { enabled: true }) });
   return { ctx, registered, mode };
 }
 
@@ -352,6 +352,37 @@ test('集成：能力缺失时优雅降级，不崩', async () => {
     assert.equal(registered.providers.length, 1, '缺可选能力时技能仍须注册');
     assert.equal(registered.tools.length, 0);
     assert.equal(registered.commands.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('集成：不配置 enabled 时默认关闭，新会话不挂规范段', () => {
+  const { dir, file } = tempState();
+  try {
+    mkdirSync(dir, { recursive: true });
+    // 关键：状态文件里连 global 字段都没有 —— 这正是「装上插件、什么都没设」
+    // 的真实形态。旧行为会兜底成开，导致插件悄悄改变既有会话。
+    writeFileSync(file, JSON.stringify({ version: 1, sessions: {} }), 'utf8');
+
+    // 不传 enabled，走 apply 的默认值。
+    const { registered } = mount({ stateFile: file, config: {} });
+    emit(registered, 'agent/created', { agent: { id: 'sess-default', ctx: { systemPrompt: ctxPrompt(registered) } } });
+    assert.equal(registered.sections.length, 0, '不配置时必须默认关闭，不得注入规范段');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('集成：显式配 enabled:true 时才默认打开（保留逃生口）', () => {
+  const { dir, file } = tempState();
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(file, JSON.stringify({ version: 1, sessions: {} }), 'utf8');
+
+    const { registered } = mount({ stateFile: file, config: { enabled: true } });
+    emit(registered, 'agent/created', { agent: { id: 'sess-on', ctx: { systemPrompt: ctxPrompt(registered) } } });
+    assert.equal(registered.sections.length, 1, '显式 enabled:true 时应注入');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
