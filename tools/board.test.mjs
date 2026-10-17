@@ -13,6 +13,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { injectResponsiveCss, RESPONSIVE_CSS, RESPONSIVE_STYLE_ID } from '../lib/board-responsive.js';
 import { buildBoard, buildBoardFromRoots, parseNote, scanNotes } from '../lib/board.js';
 import { isInside, registerBoardRoutes } from '../lib/board-route.js';
 import { listGitChildren, originOf, resolveNotesRoots } from '../lib/notes.js';
@@ -224,6 +226,41 @@ test('board-route: 会话解析不出笔记根时回 409，不猜一个路径', 
   assert.match(JSON.parse(res.body).error, /no notes root/);
 });
 
+test('board-route: 空 session 必须归一化成「没带会话」，诊断指向缺失而非无 cwd', async () => {
+  /* 实测踩过：侧边栏宿主的 props 被丢弃后，iframe 拼出 `?session=` 空串。
+     旧代码把它当成合法 id 一路查下去，最终也回 409，但 reason 会是
+     「会话没有记录工作目录」—— 把人引向 sessions 服务，而真实原因是
+     前端根本没把 id 传下来。两种成因必须能在响应里分辨。 */
+  const seen = [];
+  const handlers = [];
+  const ctx = ctxWithWebServer((route) => { handlers.push(route); });
+  registerBoardRoutes(ctx, {
+    notesRootFor: (sessionId) => { seen.push(sessionId); return undefined; }
+  });
+  const call = (url) => new Promise((settle) => {
+    const r = {
+      statusCode: 0, body: '',
+      writeHead(code) { this.statusCode = code; },
+      end(body) { this.body = body ?? ''; settle(this); }
+    };
+    handlers[0].handler({ method: 'GET', url }, r);
+  });
+
+  const empty = await call('/agent-notes/board?session=');
+  assert.equal(empty.statusCode, 409);
+  const emptyBody = JSON.parse(empty.body);
+  assert.equal(emptyBody.reason, 'MISSING_SESSION_ID', '空串应判成「没带会话」');
+  assert.equal(seen[0], undefined, '空串不得被当成合法 session id 传下去');
+
+  const missing = await call('/agent-notes/board');
+  assert.equal(JSON.parse(missing.body).reason, 'MISSING_SESSION_ID', '完全不传也是同一个成因');
+
+  const real = await call('/agent-notes/board?session=sess-1');
+  assert.equal(real.statusCode, 409);
+  assert.equal(JSON.parse(real.body).reason, 'NO_NOTES_ROOT', '真带了 id 才是解析不出仓库');
+  assert.deepEqual(seen, [undefined, undefined, 'sess-1'], '只有非空 id 才原样传下去');
+});
+
 test('board-route: 正文含 HTML 片段时不得破坏注入的脚本块', async () => {
   /* 回归测试：曾经用字符串形式调 String.replace，payload 里的 `$&`、`$'`
      被当成反向引用展开，于是页面里凭空多出 <script 标签、数据被截断，
@@ -294,6 +331,166 @@ test('board-route: 正文含 HTML 片段时不得破坏注入的脚本块', asyn
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('board-route: UI 响应里必须带窄屏适配样式，且不破坏上游页面', async () => {
+  /* 右侧栏只有 400–700px，而上游顶栏是 `height:64px` 且不换行 ——
+     实测 652px 下 brand-group 高 154px、deck-tabs 高 134px，文字被压成
+     逐字竖排。看板 HTML 是 vendored 资产不能手改，所以由宿主注入覆盖样式。
+     这条测试钉两件事：样式真的进了响应；注入不改变上游的其余结构。 */
+  const { dir, root } = makeRepo([
+    { lifecycle: 'implemented', class: 'process', file: '2026-01-01-a.md', body: noteBody() }
+  ]);
+  const handlers = [];
+  const ctx = ctxWithWebServer((route) => { handlers.push(route); });
+  try {
+    registerBoardRoutes(ctx, { notesRootFor: () => root });
+    const res = await new Promise((settle) => {
+      const r = {
+        statusCode: 0, body: '',
+        writeHead(code) { this.statusCode = code; },
+        end(body) { this.body = body ?? ''; settle(this); }
+      };
+      handlers[0].handler({ method: 'GET', url: '/agent-notes/ui?session=x' }, r);
+    });
+    assert.equal(res.statusCode, 200);
+
+    const html = res.body;
+    const original = readFileSync(
+      join(ROOT, 'skills', 'agent-notes', 'assets', 'agent-notes-board.html'), 'utf8'
+    );
+
+    // ① 适配样式必须在，且只出现一次。
+    const count = (html.match(new RegExp(`id="${RESPONSIVE_STYLE_ID}"`, 'g')) ?? []).length;
+    assert.equal(count, 1, `适配样式应恰好注入一次，实际 ${count}`);
+    assert.ok(html.includes(RESPONSIVE_CSS.trim()), '注入的必须是完整覆盖样式');
+
+    // ② 必须插在 </head> 之前，否则样式要等 body 解析完才生效（会闪）。
+    const styleAt = html.indexOf(RESPONSIVE_STYLE_ID);
+    const headAt = html.lastIndexOf('</head>');
+    assert.ok(styleAt !== -1 && styleAt < headAt, '样式必须在 </head> 之前');
+
+    // ③ 关键：注入只能「加」，不能改动上游原有字节。
+    const stripped = html.replace(new RegExp(`<style id="${RESPONSIVE_STYLE_ID}">[\\s\\S]*?</style>\\n?`), '');
+    const expected = original.replace(
+      'window.__INLINE_DATA__ = null;',
+      () => `window.__INLINE_DATA__ = ${JSON.stringify(JSON.parse(
+        stripped.slice(
+          stripped.indexOf('window.__INLINE_DATA__ = ') + 'window.__INLINE_DATA__ = '.length,
+          stripped.indexOf(';\n</script>')
+        )
+      )).replace(/</g, '\\u003c')};`
+    );
+    assert.equal(stripped, expected, '去掉适配样式后必须与「只注入数据」的结果逐字节一致');
+
+    // ④ 覆盖样式本身必须真的针对窄屏（媒体查询），不能影响宽屏观感。
+    assert.match(RESPONSIVE_CSS, /@media \(max-width: 900px\)/);
+    assert.match(RESPONSIVE_CSS, /@media \(max-width: 720px\)/);
+    // 顶栏解除固定高度是修好竖排的关键，钉死它。
+    assert.match(
+      RESPONSIVE_CSS,
+      /header\.hud-topbar\s*\{[^}]*height:\s*auto/s,
+      '窄屏下必须解除 header 的固定高度（否则换行内容被裁成竖排）'
+    );
+    // 导航条必须允许横向滚动，而不是让按钮内部折行。
+    assert.match(RESPONSIVE_CSS, /nav\.deck-tabs\s*\{[^}]*overflow-x:\s*auto/s);
+    assert.match(RESPONSIVE_CSS, /nav\.deck-tabs\s*\{[^}]*min-width:\s*0/s,
+      'flex 子项不设 min-width:0 时 overflow-x 不生效，会反过来把 header 撑宽');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('board-route: 解析不出根时 /ui 回可读说明页，不是原始 JSON', async () => {
+  /* 实测踩过：/agent-notes/ui 是 iframe 的 src，浏览器会原样渲染响应体。
+     回 JSON 时用户在侧边栏里看到的就是一坨 `{"error":...}`，看着像插件坏了；
+     而真实成因通常只是「这个 tab 指向的会话还没加载」。
+     所以 /ui 必须回 HTML 说明页，/board 仍回 JSON（那是给程序用的）。 */
+  const handlers = [];
+  const ctx = ctxWithWebServer((route) => { handlers.push(route); });
+  registerBoardRoutes(ctx, { notesRootFor: () => undefined });
+  const call = (url) => new Promise((settle) => {
+    const r = {
+      statusCode: 0, body: '', headers: {},
+      writeHead(code, headers) { this.statusCode = code; this.headers = headers ?? {}; },
+      end(body) { this.body = body ?? ''; settle(this); }
+    };
+    handlers[0].handler({ method: 'GET', url }, r);
+  });
+
+  const ui = await call('/agent-notes/ui?session=deadbeef-0000-0000-0000-000000000000');
+  assert.equal(ui.statusCode, 409);
+  assert.match(String(ui.headers['content-type']), /text\/html/, '/ui 必须回 HTML');
+  assert.ok(ui.body.includes('笔记看板暂时读不到'), '应给出可读标题');
+  assert.ok(ui.body.includes('NO_NOTES_ROOT'), '应写清成因');
+  assert.ok(ui.body.includes('deadbeef'), '应回显会话 id 便于排查');
+  // 不能把 JSON 当页面吐出来。
+  assert.ok(!ui.body.trimStart().startsWith('{'), '不能直接回 JSON');
+
+  // 程序用的端点保持 JSON。
+  const board = await call('/agent-notes/board?session=deadbeef');
+  assert.equal(board.statusCode, 409);
+  assert.match(String(board.headers['content-type']), /application\/json/);
+  assert.equal(JSON.parse(board.body).reason, 'NO_NOTES_ROOT');
+});
+
+test('board-route: 说明页必须转义会话 id（防注入）', async () => {
+  /* 会话 id 来自 URL 查询参数，会原样回显到页面里。不转义的话，
+     `?session=<script>...` 就是一个反射型 XSS。虽然 iframe 有 sandbox，
+     但没有理由把未转义的用户输入拼进 HTML。 */
+  const handlers = [];
+  const ctx = ctxWithWebServer((route) => { handlers.push(route); });
+  registerBoardRoutes(ctx, { notesRootFor: () => undefined });
+  const res = await new Promise((settle) => {
+    const r = {
+      statusCode: 0, body: '',
+      writeHead(code) { this.statusCode = code; },
+      end(body) { this.body = body ?? ''; settle(this); }
+    };
+    handlers[0].handler({
+      method: 'GET',
+      url: `/agent-notes/ui?session=${encodeURIComponent('<script>alert(1)</script>')}`
+    }, r);
+  });
+  assert.equal(res.statusCode, 409);
+  assert.ok(!res.body.includes('<script>alert(1)</script>'), '会话 id 必须被转义，不能原样拼进 HTML');
+  assert.ok(res.body.includes('&lt;script&gt;'), '应以转义实体呈现');
+});
+
+test('board-responsive: 注入幂等、缺 head 时原样返回（适配层不是功能前提）', () => {
+  const page = '<html><head><title>t</title></head><body>x</body></html>';
+  const once = injectResponsiveCss(page);
+  assert.notEqual(once, page, '应真的注入');
+  assert.equal(injectResponsiveCss(once), once, '重复注入必须幂等，不能插两次');
+  // 没有 </head> 的畸形页面：宁可少一层适配，也不能把页面弄坏。
+  assert.equal(injectResponsiveCss('<p>x</p>'), '<p>x</p>');
+  assert.equal(injectResponsiveCss(''), '');
+  assert.equal(injectResponsiveCss(undefined), undefined);
+});
+
+test('board-responsive: 数据里提到样式 id 时仍必须注入（不能靠 includes 判重）', () => {
+  /* 实测踩过的坑，代价很高：
+     幂等判断原本写的是 `html.includes(RESPONSIVE_STYLE_ID)`。而笔记正文会
+     作为数据被注入**同一个页面**，本仓库有一篇笔记恰好写了
+     `agent-notes-responsive` 这个 id —— 于是函数把「数据里提到过这个名字」
+     误判成「样式已经插过了」，直接原样返回。
+
+     表现是窄屏适配**时有时无**：笔记里提到一次就失效，删掉那篇笔记又好了。
+     排查时极易误判成「进程没重载」，我实际就在这上面绕了很久。
+     判据必须是完整的 `<style id="...">` 标签，不是 id 子串。 */
+  const page = '<html><head></head><body>x</body></html>';
+  const dataMentionsId = `<html><head></head><body><script>window.__INLINE_DATA__ = [{"rawBody":"把 <style id=\\"${RESPONSIVE_STYLE_ID}\\"> 插到 head"}]</script></body></html>`;
+  const out = injectResponsiveCss(dataMentionsId);
+  assert.notEqual(out, dataMentionsId, '数据里提到 id 不等于样式已注入，必须仍然注入');
+  assert.ok(
+    out.includes(`<style id="${RESPONSIVE_STYLE_ID}">`),
+    '必须插入真正的 style 标签'
+  );
+  // 但真的插过之后，幂等判断仍要生效。
+  assert.equal(injectResponsiveCss(out), out, '已注入过就必须幂等');
+
+  // 只有 style 标签才算「已注入」：正文里出现裸 id 不算。
+  assert.notEqual(injectResponsiveCss(page.replace('x', RESPONSIVE_STYLE_ID)), page.replace('x', RESPONSIVE_STYLE_ID));
 });
 
 test('board: 多个 worktree 的笔记合并，当前工作树优先', () => {

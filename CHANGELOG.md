@@ -3,7 +3,53 @@
 本文件记录对使用者有影响的变更。格式对齐 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.3.0] - 2026-10-17
+
+### 修复
+
+- **侧边栏 tab 显示原始 JSON / 整块空白**：better-sidebar 用
+  `createElement(descriptor.component, {ctx, store, scope, tab, visible, …})` 渲染 tab，
+  会话 id 只在 `scope.sessionId` 上。上一版把 `component` 写成零参函数，
+  把整个 props 丢掉 —— iframe 拼出 `?session=` 空串，路由按设计回 409。
+  - 改为 `component: function (props) { return h(AgentNotesBoard, props); }`
+  - **原测试为什么没拦住**：断言的是 `bundle 里出现过 scope.sessionId 这段字符串`。
+    那句话确实在，但值根本传不到 —— 字符串断言对「props 被丢弃」完全免疫，属假绿。
+  - 新测试执行真实路径：捕获 bundle 工厂 → 桩 React 实例化 → 渲染开关触发 `registerTab`
+    → 调 `component({scope:{sessionId}})` → 断言最终 iframe 的 `src` 带该 id。
+    桩的 `createElement` 必须就地展开函数组件，否则看不到内部的 iframe。
+  - 故障注入：改回零参函数 → 变红；还原 → 绿
+
+- **窄屏下顶栏被压成逐字竖排**：上游 `header.hud-topbar` 是 `height:64px` 且不换行，
+  右侧栏 400–700px 里五个子项抢不到宽度，每个子项内部逐字换行 —— 实测 652px 下
+  `brand-group` 实际高 154px、`deck-tabs` 134px，却被 64px 固定高度裁掉。
+  - 看板 HTML 是 vendored 上游资产，**手改会被 `verify-plugin.mjs` 的哈希比对拦下**，
+    因此新增 `lib/board-responsive.js`，由宿主在 `/agent-notes/ui` 响应里注入覆盖 CSS
+    （只在媒体查询内生效，宽屏视觉与上游完全一致）
+  - 窄屏重排为两行：品牌 + 状态灯 + 搜索框 / 导航独占整行并横向滚动。
+    顶栏从 140px 降到 100px，500–652px 下四个 tab 完整显示
+  - 关键点：`height: auto`（不解除固定高度换行内容仍被裁）、
+    `nav { min-width: 0 }`（flex 子项默认 `min-width:auto` 会让 `overflow-x` 失效）、
+    `.hud-grow { display: none }`（弹性占位符会抢走一整行，把品牌挤到右上角）
+  - **注入幂等判据踩过一个很贵的坑**：原本用 `html.includes(RESPONSIVE_STYLE_ID)`，
+    而笔记正文会作为数据注入**同一个页面**，本仓库一篇笔记恰好写了
+    `agent-notes-responsive` 这个 id —— 于是把「数据里提到过这个名字」误判成
+    「样式已经插过了」，直接原样返回。表现是适配**时有时无**，排查时极易误判成
+    「进程没重载」。已改成匹配完整的 `<style id="...">` 标签，并加回归测试
+  - 故障注入：去掉 `height:auto` → 变红；完全不注入 → 变红；去掉幂等判断 → 变红；
+    把判据改回 `includes(id)` → 变红
+
+- **读不到笔记时把原始 JSON 显示在侧边栏里**：`/agent-notes/ui` 是 iframe 的 `src`，
+  浏览器会原样渲染响应体。会话尚未加载（持久化的 tab 仍指向旧会话）时回 409 JSON，
+  用户看到的是一坨 `{"error":...}`，看着像插件坏了。
+  - `/ui` 现在回一张可读的说明页：写清成因、给出恢复方法（切会话或重开 tab）、
+    回显会话 id 与 `reason`；`/board`、`/note` 等给程序用的端点仍回 JSON
+  - 会话 id 做了 HTML 转义（它来自 URL 查询参数并回显到页面，不转义就是反射型 XSS）
+  - `?session=` 空串归一化成「没传会话」，与「传了但解析不出」用不同 `reason` 区分
+  - **没有为了消掉 409 去猜仓库**：曾实现「从同项目其它活跃会话推断 cwd」，实测证伪 ——
+    同一项目下 209 个会话的 id 是彼此无关的 UUID，无共享前缀；而 `get()` 只查活跃会话，
+    没有任何可证信号能绑定项目。唯一「能拿到值」的写法会在多项目并行时把看板指向
+    别人的仓库（显示别人的决策笔记），那种绿比报错更坏，因此保持明确失败
+  - 故障注入：说明页分支改成 `if (false)` → 变红；去掉转义 → 变红
 
 ### 新增
 
@@ -126,6 +172,8 @@
 ### 说明
 
 - 新增自检门禁：客户端源码与构建产物不同步（改了 `src/client.js` 忘了 build）、宿主与客户端投影键漂移、命令名不一致，任一项都会让 `npm run verify` 变红（已用故障注入验证会红）。
+
+## [Unreleased]
 
 ## [0.1.0] - 2026-10-17
 

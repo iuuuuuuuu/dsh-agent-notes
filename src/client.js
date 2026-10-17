@@ -458,7 +458,15 @@ function createAgentNotesClient(require) {
             order: 60,
             /* 单实例：重复打开聚焦已有的那个，而不是开一堆。 */
             single: true,
-            component: function () { return h(AgentNotesBoard, null); }
+            /* **必须把宿主传进来的 props 转交下去**。
+               better-sidebar 用 createElement(descriptor.component, {ctx, store,
+               scope, tab, visible, …}) 渲染（lib/client.js 里那处 RenderBoundary），
+               会话 id 在 scope.sessionId 上。写成零参函数 `function () { … }`
+               会把这些 props 整个丢掉 —— 表现为侧边栏里 iframe 拼出 `?session=`
+               空串、路由按设计回 409「no notes root resolvable for this session」，
+               整块空白。实测踩过：单测断言的是「代码里读了 scope.sessionId」，
+               那句话确实在，但值根本传不到，测试照样全绿。 */
+            component: function (props) { return h(AgentNotesBoard, props); }
           });
         };
         /* 服务比开关先就绪时，按已记住的意图补注册。 */

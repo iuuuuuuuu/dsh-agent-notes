@@ -304,3 +304,116 @@ test('客户端 bundle：看板要认两种宿主的会话字段', () => {
   assert.match(bundle, /props\.scope/, '必须读 scope（better-sidebar）');
   assert.match(bundle, /scope\.sessionId/, '必须从 scope 里取 sessionId');
 });
+
+test('侧边栏宿主：component 必须把宿主 props 转交给看板，iframe src 带真实会话 id', () => {
+  /* 这条测试的存在理由（实测踩过）：
+     上一版把 descriptor 写成 `component: function () { return h(Board, null); }`
+     —— 零参函数，宿主传进来的 {scope, tab, …} 整个被丢掉。而 better-sidebar
+     是用 `createElement(descriptor.component, {ctx, store, scope, tab, visible, …})`
+     渲染的，会话 id 只在 scope 上。结果：侧边栏里 iframe 拼出 `?session=` 空串，
+     路由按设计回 409 `no notes root resolvable for this session`，整块空白。
+
+     为什么旧测试没拦住：它断言的是「代码里出现了 scope.sessionId 这段字符串」。
+     那句话确实在，但值根本传不到 —— 字符串断言对「props 被丢掉」完全免疫。
+     所以这里必须**真的调用 component**，喂一个只带 scope 的 props（模拟侧边栏），
+     再看最终 iframe 的 src。 */
+  const bundle = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8');
+
+  let captured = null;
+  const fakeWindow = {
+    __ModuleLoader__: { load: (entry) => { captured = entry.factory; } }
+  };
+  /* 记录 createElement 收到的树，用来找 iframe 的 src。
+     **函数型组件必须就地展开**：`h(AgentNotesBoard, props)` 只是构造一个元素，
+     不展开的话永远看不到 AgentNotesBoard 内部渲染出的 iframe —— 而
+     「props 有没有传到 AgentNotesBoard」正是本测试要验的东西。
+     这也顺带证明 descriptor.component 返回的元素确实携带了 props。 */
+  const created = [];
+  const reactStub = {
+    createElement(type, props, ...children) {
+      if (typeof type === 'function') return type(props);
+      const node = { type, props: props ?? {}, children };
+      created.push(node);
+      return node;
+    },
+    useState: (initial) => [initial, () => {}],
+    /* 必须真的执行：开关靠 useEffect 把「已开启」这个事实推给 syncBoardTab，
+       不执行就等于开关永远没打开，测试会以「没注册」的方式假绿。 */
+    useEffect: (fn) => { fn(); },
+    useRef: () => ({ current: null }),
+    useMemo: (fn) => fn(),
+    useSyncExternalStore: (sub, get) => get()
+  };
+  const factoryFn = new Function('window', 'document', 'module', 'exports', 'require', bundle);
+  factoryFn(fakeWindow, { createElement: () => null, documentElement: {} }, {}, {}, (name) => {
+    if (name === 'react') return reactStub;
+    return {};
+  });
+  assert.ok(captured !== null, '应能捕获到客户端模块工厂');
+
+  let descriptor = null;
+  const fakeSidebar = {
+    registerTab(d) {
+      descriptor = d;
+      return () => {};
+    }
+  };
+  /* 走真实路径驱动开关：apply 把开关组件注册进 conversation.input.left，
+     这里捕获该组件、用「投影说已开启」渲染它，开关的 useEffect 就会调
+     syncBoardTab(true) → hosts.sidebar.register() → registerTab。
+     这样验的是模块自己那份 hosts，不是另建的一份。 */
+  let switchComponent = null;
+  const fakeSlots = {
+    inject(name, cb) { if (name === 'conversation.input.left') cb(); return () => {}; },
+    register(options, component) {
+      if (options?.name === 'conversation.input.left') switchComponent = component;
+      return () => {};
+    }
+  };
+  /* 实例化模块：require 必须真的给回 React 桩，否则闭包里的 React 是空对象，
+     组件一渲染就抛 "useState is not a function"。 */
+  const mod = captured((name) => (name === 'react' ? reactStub : {}));
+  const fakeCtx = {
+    inject(deps, cb) {
+      if (Array.isArray(deps) && deps.includes('betterSidebar')) {
+        cb({ betterSidebar: fakeSidebar, effect: (fn) => { fn(); } });
+      }
+      return () => {};
+    },
+    effect() {},
+    get() { return undefined; }
+  };
+  /* apply 需要 slots 服务；没有就什么都不注册，所以这里给一个。 */
+  mod.apply({
+    ...fakeCtx,
+    get(name) { return name === 'slots' ? fakeSlots : undefined; }
+  });
+  assert.equal(typeof switchComponent, 'function', '开关组件应已注册进输入框工具行');
+
+  /* 渲染开关：投影说「已开启」，useEffect 立即执行（reactStub 里同步调）。 */
+  created.length = 0;
+  switchComponent({
+    sessionId: 'sess-sidebar-42',
+    useProjection: () => ({ enabled: true })
+  });
+  assert.ok(descriptor !== null, '开关打开后应真的调用 registerTab');
+  assert.equal(typeof descriptor.component, 'function', 'descriptor.component 必须是可调用函数');
+
+  /* 核心断言：模拟侧边栏宿主渲染 —— 传的 props 只有 scope.sessionId。 */
+  created.length = 0;
+  descriptor.component({
+    ctx: fakeCtx,
+    store: {},
+    scope: { sessionId: 'sess-sidebar-42' },
+    tab: { id: 'agent-notes-board', type: 'agent-notes-board' },
+    visible: true
+  });
+  const frame = created.find((node) => node.type === 'iframe');
+  assert.ok(frame !== undefined, 'component 应渲染出 iframe');
+  assert.match(
+    String(frame.props.src),
+    /[?&]session=sess-sidebar-42(?:&|$)/,
+    `iframe src 必须带上 scope.sessionId（实际 ${frame.props.src}）—— `
+    + '丢掉 props 时这里会是 ?session= 空串，路由回 409'
+  );
+});
