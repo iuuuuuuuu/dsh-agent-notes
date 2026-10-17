@@ -148,6 +148,10 @@ test('门禁：故障注入必须真红（不是假绿）', async () => {
     const base = join(dir, '.agents', 'notes', 'implemented');
     mkdirSync(join(base, 'architecture'), { recursive: true });
     mkdirSync(join(dir, '.git'));
+    /* 先放一篇合法笔记作为基线。没有它的话，「清掉故障后应回到绿」这一步
+       会变成零篇，被 NO_NOTES_YET 拦下 —— 那是空树保护在正常工作，不是
+       门禁恒红。基线笔记让这一步测的才是「故障清掉后真能回头绿」。 */
+    writeFileSync(join(base, 'architecture', '2026-01-01-base.md'), validNote(), 'utf8');
 
     // 故障 1：非法分类目录。
     mkdirSync(join(base, 'refactor'), { recursive: true });
@@ -198,8 +202,13 @@ test('门禁：未知门禁与全跑汇总语义', async () => {
     const all = await runAllGates({ cwd: dir });
     assert.equal(typeof all.passed, 'boolean');
     assert.equal(all.results.length, Object.keys(GATES).length, '全跑必须覆盖每条门禁');
-    // 空目录：tree/format 应通过（0 篇笔记），archived 也应通过。
-    assert.equal(all.passed, true, `空树应通过，实际 ${JSON.stringify(all.results.map((r) => [r.gate, r.exitCode, r.reason]))}`);
+    // 空目录**不再算通过**：脚本本身会 exit 0（"ok: 0 note(s)"），但从
+    // 「我的笔记合规吗」的角度那是空的 —— 0 篇验过不等于验过了。
+    // 旧断言是 all.passed === true，它把这个假绿固化了下来，已随修复一并纠正。
+    assert.equal(all.passed, false, '空树必须判失败，不能拿空集当通过证明');
+    for (const entry of all.results) {
+      assert.match(String(entry.reason), /NO_NOTES_TREE/, `${entry.gate} 应说明是空树`);
+    }
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

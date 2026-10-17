@@ -107,6 +107,24 @@ refuse to produce it.
 > So: if your session was created without a workspace, pass an explicit `cwd`
 > when running the gates.
 
+### Zero notes is not a pass
+
+The gates can only return green after verifying **at least one note**:
+
+| Situation | Result |
+|---|---|
+| `.agents/notes` does not exist | `passed: false`, `reason: NO_NOTES_TREE` |
+| Directory exists but has no notes | `passed: false`, `reason: NO_NOTES_YET` |
+| Notes exist and all comply | `passed: true`, `noteCount` is the real count |
+| Notes exist but violate rules | `passed: false`, `exitCode: 1` plus diagnostics |
+
+The three underlying verify scripts all `exit 0` on an empty directory and print
+`ok: 0 note(s) verified`. That is true in the sense of "the script found no fault",
+but empty in the sense of "are my notes compliant" — **nothing verified is not the
+same as verified**. The plugin therefore checks before spawning the script, so an
+empty set can never be reported as a pass. The return value always carries
+`noteCount` so you can tell the two apart.
+
 ## What a note looks like
 
 The path *is* the state; there is no index file:

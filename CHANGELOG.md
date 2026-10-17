@@ -20,6 +20,13 @@
 
 ### 修复
 
+- **空笔记树被当成「通过」，属假绿门禁**（Owner 指出，已实证复现）。三个校验脚本在空目录上都会 `exit 0` 并打印 `ok: 0 note(s) verified` —— 从「脚本没说错」看是真的，从「笔记是否合规」看是空的。实测一个 `.agents/notes` 根本不存在的仓库，三条门禁全 `passed: true`，被误当成本仓合规证明。
+  - 修复：`runGate` 在 spawn 脚本前先拦。笔记树不存在 → `passed: false` + `reason: NO_NOTES_TREE`；目录存在但零篇 → `passed: false` + `reason: NO_NOTES_YET`（判据是「至少一篇」，不是「目录存在」，否则 `/agent-notes init` 后又会漏）。
+  - `runAllGates` 与 `agent_notes_gate` 返回值新增 `noteCount` / `notesRoot`，让调用方能分辨「0 篇」与「N 篇全过」。
+  - 有笔记且合规时行为不变，仍然 `passed: true`（未误杀正常通路）。
+  - 顺带修掉一个把假绿固化下来的旧断言（`空树应通过`）与一处缺基线笔记的故障注入测试。
+  - 新增 5 项回归测试，已做故障注入：去掉前置检查后**变红 2 条**，还原后全绿。
+
 - **`ctx` 属性访问在服务缺失时直接抛，导致插件整体激活失败**（真机启动才暴露，三处）：
   - `ctx.sessionProjections ?? 兜底` 拦不住 —— 属性访问本身就抛 `cannot get property "sessionProjections" without inject`；
   - `ctx.agents?.list` 同理（`cannot get property "agents" without inject`）；

@@ -96,6 +96,22 @@ dsh plugin add --profile <你的profile> github:iuuuuuuuu/dsh-agent-notes
 
 > 所以：如果你的会话是在没有工作区的状态下建的，跑门禁请显式传 `cwd`。
 
+### 零篇笔记不算通过
+
+门禁只有在**至少验过一篇笔记**时才可能返回绿：
+
+| 情况 | 结果 |
+|---|---|
+| `.agents/notes` 不存在 | `passed: false`，`reason: NO_NOTES_TREE` |
+| 目录存在但一篇笔记都没有 | `passed: false`，`reason: NO_NOTES_YET` |
+| 有笔记且全部合规 | `passed: true`，`noteCount` 为实际篇数 |
+| 有笔记但有违规 | `passed: false`，`exitCode: 1` + 具体诊断 |
+
+底层的三个校验脚本在空目录上都会 `exit 0` 并打印 `ok: 0 note(s) verified`。
+从「脚本没说错」看是真的，但从「我的笔记合规吗」看是空的 ——
+**没东西可验不等于验过了**。所以插件在调用脚本前先拦一道，避免把空集当通过证明。
+返回值里始终带 `noteCount`，让你能分辨这两种情况。
+
 ## 笔记长什么样
 
 路径即状态，无总索引：
