@@ -101,6 +101,34 @@ costs zero tokens.
 > (`ignorable=undefined`, unreadable by `pluginRecordOf`) that looks successful
 > while polluting the log. Riding the command event sidesteps that entirely.
 
+### Notes board: a "Notes" tab next to Conversation / Trajectory
+
+A **"Notes"** tab appears beside Conversation / Trajectory. It lists every note in
+the **current session's repository** `.agents/notes/` — date, class, title, status —
+with search, lifecycle filtering, and click-to-expand body. It follows session
+switches and re-reads on every activation (no caching, so you never see stale text).
+
+It reads **live** rather than from a static snapshot: the host registers read-only
+HTTP routes (`/agent-notes/board`, `/agent-notes/note`, `/agent-notes/health`) and
+the browser reads the disk each time you switch to the tab.
+
+> Why not the session projection: a projection's `view` must be a **synchronous pure
+> function** over the folded session log — it cannot touch the filesystem (verified in
+> source: `view: state => wire.view(state)`). Notes live on disk and change under an
+> editor, so HTTP is the only honest channel.
+>
+> Security boundary: fixed route paths only, reads confined to `notesRoot` with `..`
+> rejected, and a session whose notes root cannot be resolved gets **409** — never a
+> guessed path, never the process working directory.
+
+Three states stay distinguishable — the board never passes off "0 notes" as "all compliant":
+
+| Situation | Shown |
+|---|---|
+| No `.agents/notes` in the repo | "This repository has no .agents/notes yet" + the actual path |
+| Directory exists, zero notes | "The notes tree exists but has no notes yet" |
+| Notes exist | The list (count, class, filterable) |
+
 Once enabled, the model also gains:
 - an **`agent-notes` skill** — the full method, class rules, templates, and archival policy, loaded on demand;
 - an **`agent_notes_gate` tool** — runs the verify scripts and returns their **process exit code**, not a claim of compliance;

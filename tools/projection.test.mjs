@@ -131,18 +131,23 @@ test('客户端 bundle：信封契约（id 必须等于包名）', () => {
   assert.ok(bundle.trimEnd().endsWith('}});'), 'bundle 必须闭合 load 调用');
 });
 
-test('客户端 bundle：只在 composer 工具行注册一个开关', () => {
+test('客户端 bundle：注册 composer 开关 + 看板 tab，且不碰已废弃的槽位', () => {
   const bundle = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8');
   assert.ok(bundle.includes('conversation.input.left'), '必须注册 composer 工具行左侧（截图里「完全权限」那排）');
-  // 只有一个 UI 入口。曾经还注册过输入框上方的 dock tag，按 Owner 要求已移除：
+  assert.ok(bundle.includes('conversation.view'), '必须注册看板 tab（与「轨迹」并排）');
+  // 曾经还注册过输入框上方的 dock tag，按 Owner 要求已移除：
   // 工具行那一枚胶囊已足够表达启用状态，上方再来一条是冗余视觉噪声。
   assert.ok(!/inject\(\s*['"]conversation\.input\.dock['"]/.test(bundle),
     '不应注册 input.dock（上方冗余 tag 已按 Owner 要求移除）');
   assert.ok(!/inject\(\s*['"]conversation\.session\.header\.utilities['"]/.test(bundle),
     '不应注册 header.utilities（空会话下被 hideChrome 隐藏）');
-  // 只该有一个 slots 注册调用：多一个就意味着又冒出了第二个 UI 入口。
+  // 恰好两个 UI 入口：开关 + 看板。多出来就意味着又冒了第三个，需要显式确认。
   const registrations = bundle.match(/slots\.inject\(/g) ?? [];
-  assert.equal(registrations.length, 1, `应只注册一个槽位，实际 ${registrations.length} 个`);
+  assert.equal(registrations.length, 2, `应注册两个槽位（开关 + 看板），实际 ${registrations.length} 个`);
+  // 看板 tab 的 id 不能叫 trajectory —— 那是宿主内置轨迹视图的保留 id，
+  // 且受 developerTools 开关限制，撞了会互相顶掉。
+  assert.ok(!/id:\s*['"]trajectory['"]/.test(bundle), '不得占用宿主保留的 trajectory id');
+  assert.ok(bundle.includes('agent-notes-board'), '看板 tab 应有自己的 id');
 });
 
 test('客户端 bundle：移除 tag 后不得留下孤儿引用', () => {
