@@ -21,13 +21,38 @@ This plugin makes the rules **hard to walk around**: same repository as the code
 
 ```sh
 # From a local directory (during development)
-dsh plugin add /path/to/dsh-agent-notes
+dsh plugin add --profile <your-profile> /path/to/dsh-agent-notes
 
 # Or from GitHub
-dsh plugin add github:iuuuuuuuu/dsh-agent-notes
+dsh plugin add --profile <your-profile> github:iuuuuuuuu/dsh-agent-notes
 ```
 
-Then enable `dsh-agent-notes` in the Web/Desktop plugin list and **restart DSH**.
+> **`plugin add` writes the dependency but does NOT enable the plugin.** Verified
+> behavior: it records the package name in `profiles/<profile>/package.json`
+> `dependencies`, but leaves `dsh.profile.bundles` untouched — and DSH loads
+> plugins **layer by layer from `bundles`** (each layer reads that package's own
+> `cordis.patch.yml`). So after `add` alone the plugin is installed but never
+> runs, and `--dump-config` won't show it.
+>
+> Add the package name to `bundles` yourself:
+>
+> ```jsonc
+> // $DSH_HOME/profiles/<your-profile>/package.json
+> "dsh": {
+>   "profile": {
+>     "bundles": [
+>       "@deepseek-ai/dsh-base",
+>       "@deepseek-ai/dsh-web-app",
+>       "dsh-agent-notes"        // ← add this line
+>     ]
+>   }
+> }
+> ```
+>
+> Then **restart DSH**. To confirm it actually loaded, `dsh --profile <your-profile> --dump-config`
+> should contain `# == dsh-agent-notes` and `- id: agent-notes`. Present in
+> dependencies but absent from `bundles` produces **no startup error** while the
+> plugin silently does nothing — the easiest step to get wrong.
 
 ## Usage
 
@@ -39,6 +64,28 @@ Then enable `dsh-agent-notes` in the Web/Desktop plugin list and **restart DSH**
 /agent-notes init            Scaffold .agents/notes in the current repository
 /agent-notes gate            Run the real gates (also: gate tree / gate format / gate archived)
 ```
+
+### Two status indicators in the UI
+
+You don't have to type a command to see whether the policy is on for the current session:
+
+| Location | Form |
+|---|---|
+| **Above the input box** | A full-width green tag "● Agent notes this session"; hidden while off |
+| **Left of the composer tool row** | A green chip "● Agent notes" next to the permission selector ("Full access" / "Workspace write"); click to toggle |
+
+Both read the **same session projection** (`agentNotes`), so they can never
+disagree — across reloads, reconnects, and session switches.
+
+Clicking the switch submits the official slash command (`/agent-notes on|off`),
+so it is exactly equivalent to typing it, and costs zero tokens.
+
+> Design note: the projection only folds the host's own `command/run` events —
+> **this plugin never writes to the session log**. It cannot: it has zero
+> `@deepseek-ai` dependencies, so `appendPluginRecord` is unreachable; and the
+> fallback `session.append('plugin:…')` was measured to write a crippled record
+> (`ignorable=undefined`, unreadable by `pluginRecordOf`) that looks successful
+> while polluting the log. Riding the command event sidesteps that entirely.
 
 Once enabled, the model also gains:
 - an **`agent-notes` skill** — the full method, class rules, templates, and archival policy, loaded on demand;

@@ -21,13 +21,36 @@
 
 ```sh
 # 从本地目录装进你的 profile（开发期）
-dsh plugin add /path/to/dsh-agent-notes
+dsh plugin add --profile <你的profile> /path/to/dsh-agent-notes
 
 # 或从 GitHub
-dsh plugin add github:iuuuuuuuu/dsh-agent-notes
+dsh plugin add --profile <你的profile> github:iuuuuuuuu/dsh-agent-notes
 ```
 
-装完后在 Web/Desktop 的插件列表里启用 `dsh-agent-notes` 这一项，然后**重启 DSH**。
+> **注意：`plugin add` 只写依赖，不会把插件加进启用列表。** 实测确认：它把
+> 包名写进 `profiles/<profile>/package.json` 的 `dependencies`，但
+> `dsh.profile.bundles` 里没有这一项 —— 而 DSH 是按 `bundles` **逐层加载**
+> 插件的（每层读该包自己的 `cordis.patch.yml`）。所以只 `add` 的话插件装了
+> 却不生效，`--dump-config` 里也看不到它。
+>
+> 还需要手动把包名加进 `bundles`：
+>
+> ```jsonc
+> // $DSH_HOME/profiles/<你的profile>/package.json
+> "dsh": {
+>   "profile": {
+>     "bundles": [
+>       "@deepseek-ai/dsh-base",
+>       "@deepseek-ai/dsh-web-app",
+>       "dsh-agent-notes"        // ← 加这一行
+>     ]
+>   }
+> }
+> ```
+>
+> 然后**重启 DSH**。验证是否真加载：`dsh --profile <你的profile> --dump-config`
+> 里应出现 `# == dsh-agent-notes` 与 `- id: agent-notes`。若只在依赖里而不在
+> `bundles` 里，启动日志不会有报错，插件却完全没跑 —— 这是最容易踩空的一步。
 
 ## 用起来
 
@@ -39,6 +62,26 @@ dsh plugin add github:iuuuuuuuu/dsh-agent-notes
 /agent-notes init            在当前仓库建出 .agents/notes 骨架
 /agent-notes gate            跑真门禁（也可 gate tree / gate format / gate archived）
 ```
+
+### 界面上的两处状态提示
+
+不用敲命令也能一眼看到当前会话是否生效：
+
+| 位置 | 形态 |
+|---|---|
+| **输入框上方** | 整条绿色 tag「● 笔记规范 本会话」；关闭时不显示 |
+| **输入框工具行左侧** | 绿色胶囊「● 笔记规范」，紧挨「完全权限/工作区内修改」那一排；点击即切换 |
+
+两者读的是**同一个会话投影**（`agentNotes`），所以状态永远一致，刷新、重连、
+切换会话都自动正确。
+
+点击开关走的是官方斜杠命令通道（`/agent-notes on|off`），因此和手敲命令
+**完全等价**，并且开关操作零 token。
+
+> 设计说明：投影只折叠宿主自己写的 `command/run` 事件，本插件**不写会话日志**。
+> 原因是插件零 `@deepseek-ai` 依赖，拿不到 `appendPluginRecord`；而退路
+> `session.append('plugin:…')` 实测会写出 `ignorable=undefined` 的残废记录
+> （`pluginRecordOf` 读不回），看着成功实则污染日志。走命令事件则完全绕开这个坑。
 
 开启后，模型侧还会自动获得：
 - **`agent-notes` 技能** —— 完整方法论、六类判定、模板、归档规矩，按需加载；

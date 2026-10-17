@@ -39,6 +39,37 @@ function check(condition, message) {
   if (!condition) fail(message);
 }
 
+/**
+ * 用与 build.mjs 完全相同的规则重建客户端 bundle。
+ *
+ * 目的不是替代构建，而是**比对**：只要 lib/client.js 与这次重建的结果不一致，
+ * 就说明「改了 src/client.js 却忘了 build」——那种情况下浏览器跑的是旧代码，
+ * 本地测试却全绿，属于典型的假绿。
+ *
+ * @returns {string} 重建出的 bundle 文本。
+ */
+function buildClientBundle() {
+  const pkg = JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8'));
+  const source = readFileSync(join(PACKAGE_ROOT, 'src', 'client.js'), 'utf8');
+  const marker = 'function createAgentNotesClient(require) {';
+  const at = source.indexOf(marker);
+  if (at === -1) throw new Error('src/client.js: 找不到 createAgentNotesClient(require) 入口');
+  let body = source.slice(at + marker.length);
+  const tail = body.lastIndexOf('}');
+  if (tail === -1) throw new Error('src/client.js: 函数体没有收尾');
+  body = body.slice(0, tail);
+  return [
+    `window.__ModuleLoader__.load({id:${JSON.stringify(pkg.name)},factory:function(require){`,
+    '"use strict";',
+    'var __dshAgentNotes = (function(){',
+    body.trim(),
+    '})();',
+    'return __dshAgentNotes;',
+    '}});',
+    ''
+  ].join('\n');
+}
+
 // 1. 包清单
 const pkgFile = join(PACKAGE_ROOT, 'package.json');
 check(existsSync(pkgFile), 'package.json 不存在');
@@ -75,11 +106,61 @@ const moduleFiles = [];
 for (const name of readdirSync(libDir)) {
   if (name.endsWith('.js')) moduleFiles.push(join(libDir, name));
 }
-check(moduleFiles.length >= 6, `lib 下模块过少（${moduleFiles.length}），可能有文件缺失`);
+check(moduleFiles.length >= 7, `lib 下模块过少（${moduleFiles.length}），可能有文件缺失`);
 for (const file of moduleFiles) {
   const source = readFileSync(file, 'utf8');
   const badImports = [...source.matchAll(/from\s+['"](@deepseek-ai\/[^'"]+)['"]/g)].map((match) => match[1]);
   check(badImports.length === 0, `${relative(PACKAGE_ROOT, file)} 引入了不可解析的依赖: ${badImports.join(', ')}`);
+}
+
+// 3b. 客户端半边：声明、构建产物与信封契约
+const clientBundled = join(PACKAGE_ROOT, 'lib', 'client.js');
+const clientSource = join(PACKAGE_ROOT, 'src', 'client.js');
+check(existsSync(clientSource), 'src/client.js 不存在（客户端源码是真源）');
+check(existsSync(clientBundled), 'lib/client.js 不存在（需要先 npm run build）');
+check(pkg.dsh?.client?.platform === 'web', 'dsh.client.platform 应为 web');
+check(pkg.exports?.['./client'] !== undefined, 'exports 应提供 ./client 入口');
+if (existsSync(clientBundled)) {
+  const bundle = readFileSync(clientBundled, 'utf8');
+  // 信封是硬约束：id 必须等于包名，否则浏览器加载器拒绝这个模块。
+  check(
+    bundle.includes(`window.__ModuleLoader__.load({id:"${pkg.name}",factory:function(require){`),
+    'lib/client.js 的信封 id 必须等于包名（否则客户端加载不了）'
+  );
+  // 构建产物可能落后于源码——这正是要拦的「改了源码忘了 build」。
+  const hostOnly = `"${pkg.name}"`;
+  check(bundle.includes(hostOnly), 'lib/client.js 应引用包名');
+  const rebuilt = buildClientBundle();
+  check(rebuilt === bundle, 'lib/client.js 与 src/client.js 不同步（请跑 npm run build）');
+}
+
+// 3c. 宿主与客户端的投影键必须一致
+// 两边一旦漂移，浏览器读不到状态，开关与 tag 会永远显示「未知」——
+// 而**所有本地测试仍然全绿**（各测各的常量）。这是最该被门禁拦住的一类错。
+{
+  const projectionSource = readFileSync(join(PACKAGE_ROOT, 'lib', 'projection.js'), 'utf8');
+  const declared = /export\s+const\s+PROJECTION_KEY\s*=\s*'([^']+)'/.exec(projectionSource);
+  check(declared !== null, 'lib/projection.js 必须导出 PROJECTION_KEY');
+  const commandDeclared = /export\s+const\s+COMMAND_NAME\s*=\s*'([^']+)'/.exec(projectionSource);
+  check(commandDeclared !== null, 'lib/projection.js 必须导出 COMMAND_NAME');
+  if (declared !== null && existsSync(clientBundled)) {
+    const bundle = readFileSync(clientBundled, 'utf8');
+    const key = declared[1];
+    check(bundle.includes(`'${key}'`), `客户端必须使用宿主侧声明投影键 "${key}"（两边漂移会让开关恒为未知）`);
+  }
+  if (commandDeclared !== null && existsSync(clientBundled)) {
+    const bundle = readFileSync(clientBundled, 'utf8');
+    check(
+      bundle.includes(`/${commandDeclared[1]}`),
+      `客户端必须调用同名命令 "/${commandDeclared[1]}"（否则点了没反应）`
+    );
+    // 宿主命令注册处也必须用同一个名字。
+    const commandsSource = readFileSync(join(PACKAGE_ROOT, 'lib', 'commands.js'), 'utf8');
+    check(
+      commandsSource.includes(`name: '${commandDeclared[1]}'`),
+      `lib/commands.js 必须以 name: '${commandDeclared[1]}' 注册命令`
+    );
+  }
 }
 
 // 4. 双语文档与 dsh 标识

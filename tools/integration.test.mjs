@@ -154,6 +154,18 @@ function mount(options) {
     };
   }
 
+  // agents 服务：插件用 ctx.inject(['agents']) 拿它（属性访问 ctx.agents 在
+  // Cordis 下会抛，实测踩过）。桩必须提供，否则规范段永远不会挂 —— 那样
+  // 测试会红，正好说明这条依赖是真的。
+  if (options.withAgents !== false) {
+    services.agents = {
+      /** 当前已知的 agent 列表；测试用 registered.agentList 注入。 */
+      list() {
+        return registered.agentList ?? [];
+      }
+    };
+  }
+
   if (mode === 'cordis') {
     // 真 Cordis 要求先 provide 再 set（未 provide 直接 set 会抛）。
     for (const [key, value] of Object.entries(services)) {

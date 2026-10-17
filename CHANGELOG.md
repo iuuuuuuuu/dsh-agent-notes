@@ -5,6 +5,32 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **浏览器端两处状态提示**（客户端插件，`src/client.js` + `lib/client.js`）：
+  - **输入框上方**整条绿色 tag「● 笔记规范 本会话」，关闭时不显示；
+  - **输入框工具行左侧**绿色胶囊「● 笔记规范」，紧挨权限选择器（「完全权限/工作区内修改」）那一排，**点击即切换**。
+  - 两者读同一个会话投影（`agentNotes`），状态永不打架；点击走官方斜杠命令通道，与手敲命令完全等价。
+- **会话投影 `agentNotes`**（`lib/projection.js`）：把「本会话是否启用」变成浏览器可读状态。折叠宿主自己写的 `command/run` 事件，插件**不写会话日志**（零依赖拿不到 `appendPluginRecord`，退路 `session.append('plugin:…')` 实测会写出 `ignorable=undefined` 的残废记录，故不走）。
+- **全局默认的磁盘镜像**（`global.json`，与 `state.json` 同目录）：投影的 `view` 是同步纯函数，看不到插件内存，靠镜像让新会话显示正确的初值。
+- **客户端构建**（`build.mjs`）：把 `src/client.js` 包成 DSH 客户端模块信封（`window.__ModuleLoader__.load({id, factory})`），`package.json` 声明 `dsh.client` 与 `./client` 导出。
+- **诊断开关**：URL 带 `?anDebug=1` 时组件把内部状态画到 DOM 上。浏览器里下不了断点、而各处 try/catch 会静默吞异常，没有它只能靠猜；默认关闭。
+
+### 修复
+
+- **`ctx` 属性访问在服务缺失时直接抛，导致插件整体激活失败**（真机启动才暴露，三处）：
+  - `ctx.sessionProjections ?? 兜底` 拦不住 —— 属性访问本身就抛 `cannot get property "sessionProjections" without inject`；
+  - `ctx.agents?.list` 同理（`cannot get property "agents" without inject`）；
+  - 客户端 `ctx.slots === undefined` 也是同一个坑。
+  三处统一改为 `ctx.inject([...], cb)` / `ctx.get()`，缺失能力降级关闭而不是崩。
+- **客户端在 `apply` 时就缓存 `sessions` 服务**：那一刻服务往往还没就绪，缓存下来就永久是 `undefined`，按钮点了只显示「切换失败」（真机点一下即复现）。改为点击时惰性解析。
+- **生效 tag 原计划放对话头部，但该槽位被 DSH 包在 `!hideChrome` 里** —— 空会话（新会话）时整个工具区不渲染，而新会话恰恰最需要看到是否生效。实测确认后改到 `conversation.input.dock`（渲染在输入框之前，不受 `hideChrome` 影响）。
+- **安装文档漏了关键一步**：`dsh plugin add` 只写 `dependencies`，**不写** `dsh.profile.bundles`，而 DSH 是按 `bundles` 逐层加载的 —— 只 `add` 的话插件装了却完全不跑，且启动日志无任何报错。README 中英文均已补充说明与验证方法。
+
+### 说明
+
+- 新增自检门禁：客户端源码与构建产物不同步（改了 `src/client.js` 忘了 build）、宿主与客户端投影键漂移、命令名不一致，任一项都会让 `npm run verify` 变红（已用故障注入验证会红）。
+
 ## [0.1.0] - 2026-10-17
 
 首个可装可跑的版本。
