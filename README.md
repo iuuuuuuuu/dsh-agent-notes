@@ -284,6 +284,23 @@ ci.yml → npm run verify-notes → tsx .agents/skills/agent-notes/scripts/*.ts
 
 关掉它：把 `lib/index.js` 里的 `scheduleSkillUpdate(...)` 调用删掉即可（或按需加配置项）。
 
+### 版本号
+
+市场、官方插件源、第三方靠**版本号**判断有没有更新 —— 内容变了但版本号不动，
+对它们来说等于没更新。所以：
+
+- 自动合并上游后会 `minor` 递增（`0.2.0` → `0.3.0`）并打 `vX.Y.Z` tag；
+- 手动发布用 `node tools/bump-version.mjs [patch|minor|major]`；
+- 版本号同时是**自更新的快速探针**：插件启动时只读一个 1.8 KB 的
+  `package.json` 判断版本变没变，变了才去拉 21 个技能文件。
+
+实测提速：冷启动（拉全部文件）约 2028 ms，热启动（版本未变）约 79 ms，
+**25.7 倍**，且热路径不产生任何文件请求。
+
+> 为什么不用 commit SHA 做探针：试过 jsDelivr 的 `resolved` 端点（对本仓库返回
+> `version: null`）、jsDelivr 版本列表（新 tag 迟迟不收录）、GitHub API `/tags`
+> （未认证 60 次/小时就 403）。三条都不通，只有读 `package.json` 稳。
+
 ### 上游会自动合并进来（不再需要手动跑）
 
 `.github/workflows/upstream-sync.yml` 每天定时（也可手动触发）执行：

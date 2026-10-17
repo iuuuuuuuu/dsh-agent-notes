@@ -13,6 +13,15 @@
   - 已接进 `npm run check` 与 `.github/workflows/verify.yml`；`tools/fault-injection.mjs` 新增 `[verify-notes]` 一节，对空树、不存在的树、违规笔记断言变红，并以「合规树必须 exit=0」作反向对照。
   - 文档同步：`README.md` / `README.en.md` 的 CI 片段加了「照抄会恒绿」的警告，`AGENTS.md` 把 `npm run notes:gate` 列为推荐门禁。
 
+- **版本号与快速探针**：市场/官方源/第三方靠版本号判断更新，所以自动合并后会
+  `minor` 递增并打 tag。版本号同时作自更新的探针：只读一个 1.8 KB 的 `package.json`，
+  变了才拉 21 个技能文件。实测冷启动 2028 ms → 热启动 79 ms（25.7 倍），热路径零文件请求。
+  - 新增 `tools/bump-version.mjs`（patch / minor / major）
+  - 试过三条不通的路：jsDelivr `resolved` 返回 `version: null`；jsDelivr 版本列表
+    不收录新 tag；GitHub API `/tags` 未认证 60 次/小时即 403
+  - `.synced-version` 进 .gitignore（本地状态，不进版本库）
+  - 故障注入：minor 不清零 patch → 变红
+
 - **上游自动合并**（`.github/workflows/upstream-sync.yml`）：每日定时把原始上游合并进本仓库，
   不再依赖人记得跑 `sync`。链路：原始上游 →(Action) 本仓库 →(插件启动异步) 用户机器，两段都自动。
   - 用 `git ls-remote` 查上游 HEAD，不用 GitHub API（未认证 60 次/小时即 403）

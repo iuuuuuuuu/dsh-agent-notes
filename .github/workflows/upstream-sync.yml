@@ -57,6 +57,19 @@ jobs:
             git diff --stat
           fi
 
+      # 版本号必须跟着动 —— dsh 市场 / 官方插件源 / 第三方看的是版本号，
+      # 内容变了但版本号不动，对它们来说等于没更新。
+      # 上游合并属于内容更新，按 minor 递增（0.2.0 -> 0.3.0）。
+      - name: 递增版本号
+        if: steps.sync.outputs.changed == 'true'
+        id: bump
+        run: |
+          before=$(node -p "require('./package.json').version")
+          node tools/bump-version.mjs minor
+          after=$(node -p "require('./package.json').version")
+          echo "version=$after" >> "$GITHUB_OUTPUT"
+          echo "版本号：$before -> $after"
+
       # 只有真的合并了才需要跑门禁 —— 没改动时跑一遍纯属浪费。
       - name: 门禁（合并后必须通过才允许提交）
         if: steps.sync.outputs.changed == 'true'
@@ -73,9 +86,18 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           # 只提交同步会改到的路径。lib/client.js 不在其中：它只引用 vendored
           # 资产的路径，内容不随 vendored 文件变化（build.mjs 也不打包 board HTML）。
-          git add tools/upstream-manifest.json upstream.json skills/agent-notes
-          git commit -m "chore(sync): 合并上游 skill 副本
+          git add tools/upstream-manifest.json upstream.json skills/agent-notes package.json
+          git commit -m "chore(sync): 合并上游并升级到 v${{ steps.bump.outputs.version }}
 
           由 .github/workflows/upstream-sync.yml 自动生成。
           合并后已通过 verify / notes:gate / test / fault-injection。"
           git push
+
+      # tag 是给市场和用户看的版本标记。推了 tag 才算「发布了这一版」。
+      - name: 打 tag
+        if: steps.sync.outputs.changed == 'true'
+        run: |
+          tag="v${{ steps.bump.outputs.version }}"
+          git tag -a "$tag" -m "$tag"
+          git push origin "$tag"
+          echo "已发布 $tag"

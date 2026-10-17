@@ -13,3 +13,6 @@ demo.html
 # 探针/临时
 .probe/
 tmp/
+
+# 自更新记录的本地状态（版本号），不进版本库。
+skills/agent-notes/.synced-version
