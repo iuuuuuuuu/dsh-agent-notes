@@ -130,3 +130,19 @@ test('policy: 带提示时规范仍完整，只是追加一段', () => {
   assert.equal(buildPolicyText(undefined), base, '无提示时与原规范完全一致');
   assert.equal(buildPolicyText('   '), base, '空白提示等同于无提示');
 });
+
+test('policy: 明确交代两份副本的关系，并禁止编造 README/升级路径', () => {
+  /* 回归测试：实测模型在项目里初始化笔记后会声称
+     「升级方式写在副本 README 里」—— 但项目副本里根本没有 README，
+     SKILL.md 也没有这套说法，是模型自己编的。
+     注入文本必须把机制讲清楚，否则它会继续编。 */
+  const text = buildPolicyText();
+  assert.match(text, /没有 README/, '必须明说副本里没有 README');
+  assert.match(text, /sync-skill/, '必须给出真实的升级命令');
+  assert.match(text, /插件内置那份会自动更新/, '必须说明内置那份不用手工升级');
+  assert.match(text, /别编造/, '必须明确禁止编造文件名或升级路径');
+  /* 原有判据一个字都不能丢。 */
+  for (const marker of POLICY_MARKERS) {
+    assert.ok(text.includes(marker), `规范必须含 ${marker}`);
+  }
+});
