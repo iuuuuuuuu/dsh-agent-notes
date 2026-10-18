@@ -133,6 +133,7 @@ CI 是权威那道 —— 因为实测 `git commit --no-verify` 能绕过本地�
 
 ```sh
 npm run notes:supersession    # 查暂存区新增的笔记
+npm run archive:note -- <路径> # 归档并封印（哈希由脚本算，勿手写 manifest）
 npm run doc:budget            # 文档字数预算（AGENTS.md / README）
 ```
 

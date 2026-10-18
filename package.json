@@ -66,6 +66,7 @@
     "notes:gate": "node tools/verify-notes.mjs",
     "notes:coverage": "node tools/notes-coverage.mjs",
     "notes:supersession": "node tools/notes-supersession.mjs",
+    "archive:note": "node skills/agent-notes/scripts/archive-agent-note.ts",
     "doc:budget": "node tools/doc-budget.mjs",
     "hooks:install": "node tools/install-hooks.mjs",
     "evidence": "node tools/live-evidence.mjs",
