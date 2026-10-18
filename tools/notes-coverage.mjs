@@ -134,19 +134,21 @@ function collectFiles(argv) {
   if (typeof range === 'string' && range !== '') {
     /* 允许 `--range <sha>`：自动补成 <sha>..HEAD。 */
     const spec = range.includes('..') ? range : `${range}..HEAD`;
-    const result = git(['diff', '--name-only', spec]);
+    /* 过滤掉删除（D）：删一篇笔记不能算「带了笔记」。 */
+    const result = git(['diff', '--name-status', '--diff-filter=ACMR', spec]);
     if (!result.ok) {
       return { files: undefined, label: spec, reason: `git diff 失败: ${result.err.trim()}` };
     }
-    return { files: splitLines(result.out), label: spec };
+    return { files: statusLines(result.out), label: spec };
   }
 
-  /* 本地：默认看暂存区（pre-commit 的语义）。 */
-  const result = git(['diff', '--cached', '--name-only']);
+  /* 本地：默认看暂存区（commit-msg 钩子的语义）。
+     过滤删除（D）：删一篇旧笔记配合任意受管改动就能过门禁 —— 实测确认是后门。 */
+  const result = git(['diff', '--cached', '--name-status', '--diff-filter=ACMR']);
   if (!result.ok) {
     return { files: undefined, label: '暂存区', reason: `git diff --cached 失败: ${result.err.trim()}` };
   }
-  return { files: splitLines(result.out), label: '暂存区' };
+  return { files: statusLines(result.out), label: '暂存区' };
 }
 
 /**
@@ -157,6 +159,24 @@ function collectFiles(argv) {
  */
 function splitLines(text) {
   return text.split('\n').map((line) => line.trim()).filter((line) => line !== '');
+}
+
+/**
+ * 解析 `git diff --name-status` 的输出，只返回文件路径。
+ *
+ * 每行形如 `M\tpath`、`A\tpath`、`R100\told\tnew`；改名（R）取**新路径**，
+ * 它才是当前存在的那个文件。
+ *
+ * @param {string} text 原始输出。
+ * @returns {string[]} 路径列表。
+ */
+function statusLines(text) {
+  const out = [];
+  for (const line of splitLines(text)) {
+    const parts = line.split('\t');
+    if (parts.length >= 2) out.push(parts[parts.length - 1].trim());
+  }
+  return out;
 }
 
 /**
@@ -176,21 +196,13 @@ function isManaged(path) {
  * @returns {string | undefined} 理由；没有标记则为 undefined。
  */
 function skipReason() {
-  /* pre-commit 阶段还没有本次提交信息，只能看环境变量。
-     这不是漏洞：CI 会再查一次，而 CI 拿得到真正的 commit message。 */
+  /* 只接受两个来源：环境变量，或 commit-msg 传进来的**本次**提交信息。
+     绝不回退去读 `git log -1`（上一次提交）—— 实测确认那是永久后门：
+     上一条提交写过 `Note-Skip:`，紧接着毫不相干的改动就被静默放行。
+     那比没有门禁更危险，因为看起来还在管。 */
   const fromEnv = process.env.NOTES_COVERAGE_SKIP;
   if (typeof fromEnv === 'string' && fromEnv.trim() !== '') return fromEnv.trim();
-  return undefined;
-}
-
-/**
- * 读最近一次提交的完整信息（CI 用）。
- *
- * @returns {string} 提交信息正文。
- */
-function lastCommitMessage() {
-  const result = git(['log', '-1', '--format=%B']);
-  return result.ok ? result.out : '';
+  return SKIP_MARKER.exec(pendingCommitMessage() ?? '')?.[1];
 }
 
 /**
@@ -234,11 +246,10 @@ if (managed.length === 0 || hasNote) {
   process.exit(0);
 }
 
-/* 走到这里：有受管改动但没有笔记。先看有没有显式放行。
-   优先级：环境变量（手动 / CI）> commit-msg 传进来的本次信息 > 上一次提交信息。 */
-const reasonText = skipReason()
-  ?? SKIP_MARKER.exec(pendingCommitMessage() ?? '')?.[1]
-  ?? SKIP_MARKER.exec(lastCommitMessage())?.[1];
+/* 走到这里：有受管改动但没有笔记。看有没有显式放行。
+   skipReason() 内部已只认「环境变量」与「本次提交信息」，不再回退到
+   上一次提交 —— 那条回退曾导致写一次 Note-Skip 就永久开门。 */
+const reasonText = skipReason();
 
 if (typeof reasonText === 'string' && reasonText.trim() !== '') {
   console.log(`笔记覆盖门禁通过（${label}）：已用 Note-Skip 放行 —— ${reasonText.trim()}`);

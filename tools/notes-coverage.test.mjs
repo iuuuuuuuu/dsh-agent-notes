@@ -15,7 +15,7 @@
  */
 import { strict as assert } from 'node:assert';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -165,4 +165,100 @@ test('notes-coverage: 无法判定时必须退出码 2，绝不能当成通过',
   assert.equal(result.status, 2, `无法判定时必须 exit 2，实际 ${result.status}`);
   const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
   assert.match(out, /无法判定|无效/, '必须说明「这不是已合规」');
+});
+
+/**
+ * 在临时仓库里跑门禁，返回退出码。
+ *
+ * @param {string} dir 仓库目录。
+ * @param {object} [opts] 选项：message 模拟 commit-msg 传入的提交信息。
+ * @returns {number} 退出码。
+ */
+function gateIn(dir, opts = {}) {
+  const args = [join(dir, 'tools', 'notes-coverage.mjs')];
+  if (typeof opts.message === 'string') {
+    const file = join(dir, '.git', 'MSG_PROBE');
+    writeFileSync(file, opts.message, 'utf8');
+    args.push('--message-file', file);
+  }
+  const env = { ...process.env };
+  delete env.NOTES_COVERAGE_SKIP;
+  const r = spawnSync(NODE, args, { cwd: dir, encoding: 'utf8', windowsHide: true, env });
+  return r.status ?? -1;
+}
+
+/**
+ * 造一个已装好门禁脚本的临时仓库。
+ *
+ * @returns {string} 仓库目录。
+ */
+function makeRepoWithGate() {
+  const dir = makeRepo();
+  const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true });
+  mkdirSync(join(dir, 'tools'), { recursive: true });
+  mkdirSync(join(dir, 'lib'), { recursive: true });
+  copyFileSync(SCRIPT, join(dir, 'tools', 'notes-coverage.mjs'));
+  writeFileSync(join(dir, 'lib', 'board.js'), 'export const a = 1;\n', 'utf8');
+  git('add', '-A');
+  git('commit', '-q', '-m', 'init');
+  return dir;
+}
+
+test('notes-coverage: 删除笔记不能算「带了笔记」（后门 1）', () => {
+  /* 实测确认过的真后门：原先只判断「有没有 .agents/notes/ 下以 .md 结尾的
+     路径」，于是「git rm 一篇旧笔记 + 改代码」会被判成「同批带了笔记」而放行。
+     那等于任何人删一篇笔记就能给任意改动开门禁后门。
+     修法是用 --diff-filter=ACMR 把删除挡掉。 */
+  const dir = makeRepoWithGate();
+  try {
+    const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true });
+    const note = '.agents/notes/implemented/process/2026-01-01-old.md';
+    mkdirSync(join(dir, '.agents/notes/implemented/process'), { recursive: true });
+    writeFileSync(join(dir, note), '# Agent Note: old\n\nStatus: implemented\n', 'utf8');
+    git('add', note);
+    git('commit', '-q', '-m', 'add note');
+
+    git('rm', '-q', note);
+    writeFileSync(join(dir, 'lib', 'board.js'), 'export const b = 2;\n', 'utf8');
+    git('add', 'lib/board.js');
+
+    assert.equal(gateIn(dir), 1, '删笔记 + 改受管路径必须被拦下，不能算「带了笔记」');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes-coverage: Note-Skip 不能从上一条提交继承（后门 2）', () => {
+  /* 实测确认过的真后门：原先在找不到本次提交信息时会回退去读
+     `git log -1 --format=%B`，于是上一条提交写过 Note-Skip 之后，
+     紧接着任意不相干的改动都被静默放行 —— 写一次就永久开门，
+     比没有门禁更危险（因为看起来还在管）。 */
+  const dir = makeRepoWithGate();
+  try {
+    const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true });
+    writeFileSync(join(dir, 'lib', 'board.js'), 'export const b = 2;\n', 'utf8');
+    git('add', 'lib/board.js');
+    git('commit', '-q', '--no-verify', '-m', 'probe\n\nNote-Skip: 临时');
+
+    writeFileSync(join(dir, 'lib', 'board.js'), 'export const c = 3;\n', 'utf8');
+    git('add', 'lib/board.js');
+
+    assert.equal(gateIn(dir), 1, '上一条提交的 Note-Skip 不得继承到本条');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes-coverage: 本次提交信息里的 Note-Skip 仍然有效', () => {
+  /* 后门 2 的修法不能把合法出口一起堵掉 —— 那是另一种失效。 */
+  const dir = makeRepoWithGate();
+  try {
+    execFileSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+    writeFileSync(join(dir, 'lib', 'board.js'), 'export const b = 2;\n', 'utf8');
+    execFileSync('git', ['add', 'lib/board.js'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+    assert.equal(gateIn(dir, { message: 'probe\n\nNote-Skip: 只改了注释\n' }), 0,
+      '本次提交信息里的 Note-Skip 必须能放行');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
