@@ -339,6 +339,72 @@ test('notes-coverage: 源码目录靠仓库结构自动检测，不写死语言'
   }
 });
 
+test('notes-coverage: 改门禁脚本自己要要求笔记（.agents/ 不能整目录豁免）', () => {
+  /* 实测踩过的后门：第一版把整个 `.agents/` 放进豁免前缀，
+     于是 `.agents/notes-scripts/notes-coverage.mjs`（门禁脚本本身）改动
+     也不要求笔记 —— 那正是「改门禁不写笔记」这个洞。
+     正确做法是只豁免**笔记目录本身**，`.agents/` 下其它内容照常判定。 */
+  const dir = makeRepoWithGate();
+  try {
+    /* makeRepoWithGate 把脚本放在 tools/，这里另造一个 .agents/notes-scripts 下的。 */
+    mkdirSync(join(dir, '.agents', 'notes-scripts'), { recursive: true });
+    writeFileSync(join(dir, '.agents', 'notes-scripts', 'gate.mjs'), '// gate v1\n', 'utf8');
+    execFileSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+    execFileSync('git', ['commit', '-q', '-m', 'add gate'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+
+    writeFileSync(join(dir, '.agents', 'notes-scripts', 'gate.mjs'), '// gate v2\n', 'utf8');
+    execFileSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+
+    assert.equal(gateIn(dir), 1, '改门禁脚本必须要求笔记，不能因为它在 .agents/ 下就豁免');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes-coverage: 写笔记本身不要求再写笔记', () => {
+  /* 上一条的反面：如果笔记目录也被受管，那「补一篇笔记」这个动作本身
+     又需要一篇笔记 —— 无限递归，门禁没法用。 */
+  const dir = makeRepoWithGate();
+  try {
+    mkdirSync(join(dir, '.agents', 'notes', 'implemented', 'process'), { recursive: true });
+    writeFileSync(join(dir, '.agents', 'notes', 'implemented', 'process', '2026-01-01-a.md'),
+      '# Agent Note: a\n\nStatus: implemented\n', 'utf8');
+    execFileSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+
+    assert.equal(gateIn(dir), 0, '只写笔记不该被要求笔记');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes-coverage: 已受管的目录不该再被报「未归类」（误报噪音）', () => {
+  /* 实测踩过：unclassifiedTopDirs 原先只检查 sourceDirs 与豁免前缀，
+     没有检查 PROCESS_FILES。于是 .githooks 明明已经在流程文件清单里、
+     会被正常拦下，却仍然被报「没被识别为受管」——
+     一条总在误报的门禁，人会开始无视它的全部输出。
+     修复后：命中任何受管规则的目录都不该出现在警告里。 */
+  const dir = makeRepoWithGate();
+  try {
+    mkdirSync(join(dir, '.githooks'), { recursive: true });
+    writeFileSync(join(dir, '.githooks', 'commit-msg'), '#!/bin/sh\n', 'utf8');
+    execFileSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+
+    /* 同时带一篇笔记，让整体走「通过」分支（警告在通过分支也会打印）。 */
+    mkdirSync(join(dir, '.agents', 'notes', 'implemented', 'process'), { recursive: true });
+    writeFileSync(join(dir, '.agents', 'notes', 'implemented', 'process', '2026-01-01-a.md'),
+      '# Agent Note: a\n\nStatus: implemented\n', 'utf8');
+    execFileSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+
+    const r = spawnSync(NODE, [join(dir, 'tools', 'notes-coverage.mjs')], {
+      cwd: dir, encoding: 'utf8', windowsHide: true, env: { ...process.env }
+    });
+    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+    assert.doesNotMatch(out, /没被识别为受管/, `.githooks 已在 PROCESS_FILES 里，不该报未归类：\n${out}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('notes-coverage: 配置文件可覆盖自动检测', () => {
   /* 自动检测不是万能的（比如把源码放在名字奇怪、暂时只有非源码文件的目录里）。
      这时用 .agents/notes-coverage.json 显式声明 —— 但**整体替换**而非叠加，

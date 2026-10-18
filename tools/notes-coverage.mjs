@@ -124,12 +124,33 @@ const MANIFEST_FILES = Object.freeze([
 
 /**
  * 流程文件：定义「什么算改动」的规则本身。改它必须解释。
+ *
+ * `.agents/notes-scripts/` 在这里：那是门禁脚本本身，改它等于改规则。
+ * 若漏了它，就会出现「改进门禁不用写笔记」的后门 —— 实测踩过
+ * （第一版把整个 `.agents/` 豁免，门禁脚本自己的改动也不需要笔记）。
  */
 const PROCESS_FILES = Object.freeze([
   'AGENTS.md',
   'CLAUDE.md',
-  '.github/workflows'
+  '.github/workflows/',
+  '.agents/notes-scripts/',
+  '.githooks/'
 ]);
+
+/**
+ * 判断一个路径是否命中「目录型」清单项。
+ *
+ * 清单项统一写成带尾斜杠的形式，这里同时容忍写成不带斜杠的历史写法 ——
+ * 实测踩过：`.githooks` 写成不带斜杠时，`endsWith('/')` 判断直接跳过它，
+ * 于是那个目录静默不受管。
+ *
+ * @param {string} path 仓库相对路径。
+ * @param {readonly string[]} entries 清单项。
+ * @returns {boolean} 是否命中。
+ */
+function hitDirEntry(path, entries) {
+  return entries.some((entry) => path.startsWith(entry.endsWith('/') ? entry : `${entry}/`));
+}
 
 /**
  * 明确**不要求**笔记的路径前缀。
@@ -139,12 +160,17 @@ const PROCESS_FILES = Object.freeze([
  * 每天的计划更新都会被逼着立一篇决策笔记，几天之内整个笔记树就被注水，
  * 人开始用 `--no-verify`，门禁等于废掉。
  *
- * 这条判断有实测依据：在 sourin-flutter-spike 里统计最近 30 次提交，
+ * 这条判断有实测依据：在某个 Flutter 仓库统计最近 30 次提交，
  * 只有 2 次带笔记，但其中大部分是 `docs(round-66): ...` 改计划文件 ——
  * 那些本来就不该立决策笔记。真正漏的是改了 `lib/` 却没记的那几次。
+ *
+ * **注意 `.agents/` 不在这里。** 第一版把整个 `.agents/` 豁免，结果
+ * 门禁脚本自己（`.agents/notes-scripts/notes-coverage.mjs`）改动也不要求
+ * 笔记 —— 那是给「改门禁不写笔记」留后门，正是本门禁要堵的洞。
+ * 现在只精确豁免**笔记目录本身**（见 noteDirs），`.agents/` 下其它内容
+ * 照常按源码/工具链判定。
  */
 const EXEMPT_PREFIXES = Object.freeze([
-  '.agents/',
   'docs/',
   '.probe/',
   'node_modules/',
@@ -268,23 +294,26 @@ function statusLines(text) {
  * 判断某个路径是否要求配笔记。
  *
  * 判定顺序（先否后肯，避免豁免表被前面的规则绕过）：
- *   1. 显式豁免的精确文件（生成物、锁文件）→ 不要求
- *   2. 豁免前缀（`.agents/`、`docs/` 等）→ 不要求
- *   3. 流程文件（`AGENTS.md`、`.github/workflows`…）→ 要求
- *   4. 仓库根清单（`pubspec.yaml`、`Cargo.toml`…）→ 要求
- *   5. 检测出的源码目录下的文件 → 要求
- *   6. 其余 → 不要求
+ *   1. 笔记目录自身（写笔记不需要再写笔记）→ 不要求
+ *   2. 显式豁免的精确文件（生成物、锁文件）→ 不要求
+ *   3. 豁免前缀（`docs/`、依赖目录等）→ 不要求
+ *   4. 流程文件（`AGENTS.md`、`.github/workflows`…）→ 要求
+ *   5. 仓库根清单（`pubspec.yaml`、`Cargo.toml`…）→ 要求
+ *   6. 检测出的源码目录下的文件 → 要求
+ *   7. 其余 → 不要求
  *
  * @param {string} path 仓库相对路径。
- * @param {{exemptFiles: string[], sourceDirs: string[]}} rules 生效规则。
+ * @param {{exemptFiles: string[], sourceDirs: string[], noteDirs: string[]}} rules 生效规则。
  * @returns {boolean} 是否受管。
  */
 function isManaged(path, rules) {
+  /* 笔记目录自身永远不要求笔记 —— 否则「补一篇笔记」这件事本身又需要一篇笔记。 */
+  if (rules.noteDirs.some((dir) => path.startsWith(`${dir.replace(/\/$/, '')}/`))) return false;
   if (rules.exemptFiles.includes(path)) return false;
   if (EXEMPT_PREFIXES.some((prefix) => path.startsWith(prefix))) return false;
   if (rules.managedFiles.includes(path)) return true;
   if (PROCESS_FILES.includes(path)) return true;
-  if (PROCESS_FILES.some((entry) => entry.endsWith('/') && path.startsWith(entry))) return true;
+  if (hitDirEntry(path, PROCESS_FILES)) return true;
   if (MANIFEST_FILES.includes(path)) return true;
   return rules.sourceDirs.some((dir) => path.startsWith(`${dir}/`));
 }
@@ -390,7 +419,16 @@ function unclassifiedTopDirs(paths, rules) {
     if (slash <= 0) continue;
     const top = path.slice(0, slash);
     if (rules.sourceDirs.includes(top)) continue;
+    /* 已经由流程文件/配置显式受管的目录，不算「未归类」——
+       第一版漏了这条判断，于是 .githooks 明明已在 PROCESS_FILES 里，
+       仍会被报「没被识别为受管」，属于噪音误报。 */
+    if (hitDirEntry(`${top}/`, PROCESS_FILES)) continue;
+    if (rules.managedFiles.some((entry) => entry === `${top}/` || entry.startsWith(`${top}/`))) continue;
     if (EXEMPT_PREFIXES.some((prefix) => prefix === `${top}/`)) continue;
+    /* 笔记目录可能是嵌套的（默认 `.agents/notes`），要比**顶层段**而非全路径：
+       第一版直接比整条路径，于是 `.agents/notes` 匹配不上 `.agents`，
+       写笔记这件事自己被报成「未归类目录」。 */
+    if (rules.noteDirs.some((dir) => dir.replace(/\/$/, '').split('/')[0] === top)) continue;
     out.add(top);
   }
   return [...out].sort();
@@ -464,12 +502,14 @@ if (config.sourceDirs === undefined) {
   }
   detected = detectSourceDirs(splitLines(listed.out));
 }
+const noteDirs = config.noteDirs ?? ['.agents/notes'];
 const rules = {
   sourceDirs: config.sourceDirs ?? detected,
   exemptFiles: [...DEFAULT_EXEMPT_FILES, ...(config.exemptFiles ?? [])],
-  managedFiles: config.managedFiles ?? []
+  managedFiles: config.managedFiles ?? [],
+  noteDirs
 };
-const noteDir = (config.noteDirs ?? ['.agents/notes'])[0] ?? '.agents/notes';
+const noteDir = noteDirs[0] ?? '.agents/notes';
 
 const managed = files.filter((path) => isManaged(path, rules));
 const hasNote = files.some((path) => path.startsWith(`${noteDir.replace(/\/$/, '')}/`) && path.endsWith('.md'));
