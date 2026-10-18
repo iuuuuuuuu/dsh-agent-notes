@@ -58,7 +58,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
 /**
- * 命中即要求配笔记的路径前缀。
+ * 命中即要求配笔记的路径**前缀**（目录）。
  *
  * 顺序无关，逐个前缀判断是否命中。
  */
@@ -67,6 +67,21 @@ const MANAGED_PREFIXES = Object.freeze([
   'tools/',
   '.github/',
   'skills/agent-notes/'
+]);
+
+/**
+ * 命中即要求配笔记的**单个文件**。
+ *
+ * `AGENTS.md` 必须在这里：它定义了「什么算非平凡改动」，改它就是改流程。
+ * 而 `.github/` 在白名单里、`AGENTS.md` 却不在，是没道理的 ——
+ * 两者都是「围着代码转的流程」，只覆盖一半等于给流程改动留了后门
+ * （实测确认：改 AGENTS.md 原先不要求任何笔记）。
+ *
+ * `README*.md` 故意不在：那是面向使用者的说明，改文档不属于非平凡改动。
+ */
+const MANAGED_FILES = Object.freeze([
+  'AGENTS.md',
+  'CLAUDE.md'
 ]);
 
 /**
@@ -187,8 +202,53 @@ function statusLines(text) {
  */
 function isManaged(path) {
   if (EXEMPT_EXACT.includes(path)) return false;
+  if (MANAGED_FILES.includes(path)) return true;
   return MANAGED_PREFIXES.some((prefix) => path.startsWith(prefix));
 }
+
+/**
+ * 找出「顶层目录」里的未归类项。
+ *
+ * 白名单**只能覆盖你想到的路径**，这是它的根本局限：以后引入 `apps/`、
+ * `packages/`、`src/` 之类的新顶层目录时，门禁会对那个目录**静默失效** ——
+ * 不报错、不提示，照常打印「未命中受管路径」。实测确认过。
+ *
+ * 我最初把它写成「已知代价，靠人记得改清单」。这个判定不可靠：
+ * 靠人记得，正是这道门禁要治的病。
+ *
+ * 所以改成主动发现：从改动路径里抽出顶层目录，凡是既不在白名单、
+ * 也不在忽略表里的，打一条警告。**不失败**（那会误报太多），
+ * 但会出现在 CI 日志和本地输出里 —— 至少不再无声无息。
+ *
+ * @param {string[]} paths 本次改动的仓库相对路径。
+ * @returns {string[]} 未归类的顶层目录名（去重、已排序）。
+ */
+function unclassifiedTopDirs(paths) {
+  const out = new Set();
+  for (const path of paths) {
+    const slash = path.indexOf('/');
+    /* 只看目录下的文件；顶层散文件由 MANAGED_FILES / 忽略表管。 */
+    if (slash <= 0) continue;
+    const top = path.slice(0, slash);
+    if (MANAGED_PREFIXES.some((prefix) => prefix === `${top}/`)) continue;
+    if (IGNORED_TOP_DIRS.includes(top)) continue;
+    out.add(top);
+  }
+  return [...out].sort();
+}
+
+/**
+ * 已知不需要笔记的顶层目录。
+ *
+ * 判断标准是「放进去不会掩盖真实缺陷」：笔记自身、临时产物、依赖。
+ * 这里**不是**用来图省事的地方 —— 往里加东西等于给那个目录永久免检。
+ */
+const IGNORED_TOP_DIRS = Object.freeze([
+  '.agents',
+  '.probe',
+  '.git',
+  'node_modules'
+]);
 
 /**
  * 从提交信息里找放行标记。
@@ -237,7 +297,22 @@ if (files === undefined) {
 const managed = files.filter(isManaged);
 const hasNote = files.some((path) => path.startsWith('.agents/notes/') && path.endsWith('.md'));
 
+/**
+ * 报告未归类的顶层目录（不失败，只提示）。
+ *
+ * 白名单的根本局限是「只覆盖你想到的路径」。这里至少让新出现的顶层目录
+ * 在日志里露一面，而不是被静默放行。
+ */
+function warnUnclassified() {
+  const stray = unclassifiedTopDirs(files);
+  if (stray.length === 0) return;
+  console.error(`⚠ 以下顶层目录不在受管清单里，本次未检查：${stray.join('、')}`);
+  console.error('  若它们属于源码/工具链，请加入 tools/notes-coverage.mjs 的 MANAGED_PREFIXES，');
+  console.error('  否则那个目录会一直被静默放行。');
+}
+
 if (managed.length === 0 || hasNote) {
+  warnUnclassified();
   if (managed.length === 0) {
     console.log(`笔记覆盖门禁通过（${label}）：改动未命中受管路径，无需笔记。`);
   } else {
@@ -273,4 +348,5 @@ console.error('');
 console.error('  Note-Skip: <一句话理由>');
 console.error('');
 console.error('理由必须非空 —— 写理由这个动作本身就是要你再想一遍。');
+warnUnclassified();
 process.exit(1);

@@ -262,3 +262,42 @@ test('notes-coverage: 本次提交信息里的 Note-Skip 仍然有效', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('notes-coverage: 改 AGENTS.md 也要求笔记', () => {
+  /* AGENTS.md 定义了「什么算非平凡改动」，改它就是改流程 ——
+     和 .github/ 属于同一类。原先只把 .github/ 放进白名单、AGENTS.md 却没放，
+     实测确认改它不要求任何笔记，这是逻辑矛盾。 */
+  const dir = makeRepoWithGate();
+  try {
+    writeFileSync(join(dir, 'AGENTS.md'), '# A\n', 'utf8');
+    execFileSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+    execFileSync('git', ['commit', '-q', '-m', 'init agents'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+    writeFileSync(join(dir, 'AGENTS.md'), '# A\n\n新规则\n', 'utf8');
+    execFileSync('git', ['add', 'AGENTS.md'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+    assert.equal(gateIn(dir), 1, '改流程规范必须要求笔记');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes-coverage: 未归类的顶层目录要显式警告，不能静默放行', () => {
+  /* 白名单的根本局限：只覆盖你想到的路径。以后引入 apps/ 之类的顶层目录时，
+     门禁会对它静默失效 —— 实测确认过（退出码 0、无任何提示）。
+     我最初把它写成「已知代价，靠人记得改清单」，但靠人记得正是这道门禁要治的病。
+     现在改成至少报警：不失败（避免误报），但必须出现在输出里。 */
+  const dir = makeRepoWithGate();
+  try {
+    mkdirSync(join(dir, 'apps'), { recursive: true });
+    writeFileSync(join(dir, 'apps', 'new.mjs'), 'export const x = 1;\n', 'utf8');
+    execFileSync('git', ['add', 'apps'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+
+    const r = spawnSync(NODE, [join(dir, 'tools', 'notes-coverage.mjs')], {
+      cwd: dir, encoding: 'utf8', windowsHide: true, env: { ...process.env }
+    });
+    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+    assert.match(out, /apps/, '必须点名出现在输出里');
+    assert.match(out, /不在受管清单|MANAGED_PREFIXES/, '必须告诉人怎么修');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

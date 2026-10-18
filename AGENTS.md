@@ -86,9 +86,13 @@ node skills/agent-notes/scripts/verify-archived-agent-notes.ts
 | 命中即要求笔记 | 说明 |
 |---|---|
 | `lib/`、`tools/`、`.github/`、`skills/agent-notes/` | 行为 / 工具链 / 流程 / vendored |
+| `AGENTS.md`、`CLAUDE.md` | 流程规范本身（改了它就是改规则） |
 
 豁免（规范里的「机械改动严禁立笔记」）：`CHANGELOG.md`、`package.json`、
 `upstream.json`、`tools/upstream-manifest.json`。
+
+白名单之外的新顶层目录（如以后的 `apps/`）会打一条 `⚠` 提示，因为白名单
+只能覆盖已想到的路径 —— 它不会自动失声，但也不会自动生效，看到就该补清单。
 
 ```sh
 npm run notes:coverage    # 查暂存区（钩子用的也是它）
