@@ -70,6 +70,17 @@ jobs:
             SUM=$(sha256sum skills/agent-notes/SKILL.md | cut -c1-16)
             echo "$(basename "$f") -> $SUM"
           done
+          echo "== 上面全部干净的话，说明是并行竞态；再验最小组合 =="
+          git checkout -- skills/agent-notes 2>/dev/null || true
+          node --test tools/self-update.test.mjs tools/project-skill.test.mjs >/dev/null 2>&1 || true
+          echo "self-update + project-skill 并行 -> $(sha256sum skills/agent-notes/SKILL.md | cut -c1-16)"
+          git checkout -- skills/agent-notes 2>/dev/null || true
+          node --test tools/self-update.test.mjs tools/sync-upstream.test.mjs >/dev/null 2>&1 || true
+          echo "self-update + sync-upstream 并行 -> $(sha256sum skills/agent-notes/SKILL.md | cut -c1-16)"
+          echo "== 谁在测试期间写过这个文件：看 mtime =="
+          git checkout -- skills/agent-notes 2>/dev/null || true
+          npm test >/dev/null 2>&1 || true
+          stat -c '%y %n' skills/agent-notes/SKILL.md || true
 
       - name: 测试后的 vendored 摘要
         if: always()
