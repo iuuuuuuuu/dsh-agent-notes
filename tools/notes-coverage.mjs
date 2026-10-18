@@ -232,34 +232,63 @@ function git(args) {
 /**
  * 取本次要检查的变更文件列表。
  *
+ * 两种模式返回的形状不同，因为它们的正确语义本就不同：
+ *   - 暂存区（本地钩子）：一次提交一批，合并看是**对的**；
+ *   - 区间（CI）：可能含多次提交，必须**逐个提交**看。
+ *     合并看会漏：区间里只要有一次带了笔记，其余改代码的提交全被掩护过去。
+ *     实测确认：`base..HEAD` 含「带笔记的 probe1」+「改 lib 无笔记的 probe2」
+ *     被判通过 —— 而那正是「一次 push 多个提交」的常见形态。
+ *
  * @param {string[]} argv 命令行参数。
- * @returns {{ files: string[] | undefined, label: string, reason?: string }} 文件列表或失败原因。
+ * @returns {{ mode: 'staged'|'range', label: string, files?: string[],
+ *             commits?: {sha: string, subject: string}[],
+ *             reason?: string }} 检查目标。
  */
-function collectFiles(argv) {
+function collectTargets(argv) {
   const rangeFlag = argv.indexOf('--range');
   const rangeValue = rangeFlag >= 0 ? argv[rangeFlag + 1] : undefined;
   const envBase = process.env.NOTES_COVERAGE_BASE;
 
-  /* CI：按区间取。base 为空（例如首个提交）时退化为「只比 HEAD」。 */
   const range = rangeValue ?? envBase;
   if (typeof range === 'string' && range !== '') {
     /* 允许 `--range <sha>`：自动补成 <sha>..HEAD。 */
     const spec = range.includes('..') ? range : `${range}..HEAD`;
-    /* 过滤掉删除（D）：删一篇笔记不能算「带了笔记」。 */
-    const result = git(['diff', '--name-status', '--diff-filter=ACMR', spec]);
-    if (!result.ok) {
-      return { files: undefined, label: spec, reason: `git diff 失败: ${result.err.trim()}` };
+    const listed = git(['rev-list', '--reverse', spec]);
+    if (!listed.ok) {
+      return { mode: 'range', label: spec, reason: `git rev-list 失败: ${listed.err.trim()}` };
     }
-    return { files: statusLines(result.out), label: spec };
+    const commits = splitLines(listed.out).map((sha) => ({
+      sha,
+      subject: git(['log', '-1', '--format=%s', sha]).out.trim()
+    }));
+    return { mode: 'range', label: spec, commits };
   }
 
   /* 本地：默认看暂存区（commit-msg 钩子的语义）。
      过滤删除（D）：删一篇旧笔记配合任意受管改动就能过门禁 —— 实测确认是后门。 */
   const result = git(['diff', '--cached', '--name-status', '--diff-filter=ACMR']);
   if (!result.ok) {
-    return { files: undefined, label: '暂存区', reason: `git diff --cached 失败: ${result.err.trim()}` };
+    return { mode: 'staged', label: '暂存区', reason: `git diff --cached 失败: ${result.err.trim()}` };
   }
-  return { files: statusLines(result.out), label: '暂存区' };
+  return { mode: 'staged', label: '暂存区', files: statusLines(result.out) };
+}
+
+/**
+ * 取某个提交自己改动的文件（相对它的父提交）。
+ *
+ * 用 `<sha>^!` 而不是 `<sha>..<sha>`：后者是空集。
+ * 首个提交没有父提交，`^!` 会自然退化成「该提交本身引入的全部文件」。
+ *
+ * @param {string} sha 提交 sha。
+ * @returns {{ files: string[] | undefined, reason?: string }} 文件列表。
+ */
+function filesOfCommit(sha) {
+  /* 过滤删除（D）：删除一篇笔记不能算「带了笔记」。 */
+  const result = git(['diff', '--name-status', '--diff-filter=ACMR', `${sha}^!`]);
+  if (!result.ok) {
+    return { files: undefined, reason: `git diff ${sha}^! 失败: ${result.err.trim()}` };
+  }
+  return { files: statusLines(result.out) };
 }
 
 /**
@@ -470,12 +499,18 @@ function pendingCommitMessage() {
 }
 
 const argvAll = process.argv.slice(2);
-const { files, label, reason } = collectFiles(argvAll);
+const target = collectTargets(argvAll);
 
-if (files === undefined) {
+if (target.mode === 'staged' && target.files === undefined) {
   console.error('✖ 无法判定本次改动是否配了笔记。');
-  console.error(`  ${reason ?? '未知原因'}`);
+  console.error(`  ${target.reason ?? '未知原因'}`);
   console.error('  这不是「已合规」—— 本次检查无效，退出码 2。');
+  process.exit(2);
+}
+if (target.mode === 'range' && target.commits === undefined) {
+  console.error('✖ 无法读取提交区间，本次检查无效。');
+  console.error(`  ${target.reason ?? '未知原因'}`);
+  console.error('  这不是「已合规」—— 退出码 2。');
   process.exit(2);
 }
 
@@ -510,17 +545,29 @@ const rules = {
   noteDirs
 };
 const noteDir = noteDirs[0] ?? '.agents/notes';
+const notePrefix = `${noteDir.replace(/\/$/, '')}/`;
 
-const managed = files.filter((path) => isManaged(path, rules));
-const hasNote = files.some((path) => path.startsWith(`${noteDir.replace(/\/$/, '')}/`) && path.endsWith('.md'));
+/**
+ * 判断一批文件是否「有受管改动但没带笔记」。
+ *
+ * @param {string[]} files 这批改动的文件。
+ * @returns {{ managed: string[], hasNote: boolean, ok: boolean }} 判定结果。
+ */
+function evaluate(files) {
+  const managed = files.filter((path) => isManaged(path, rules));
+  const hasNote = files.some((path) => path.startsWith(notePrefix) && path.endsWith('.md'));
+  return { managed, hasNote, ok: managed.length === 0 || hasNote };
+}
 
 /**
  * 报告未归类的顶层目录（不失败，只提示）。
  *
  * 自动检测能覆盖大多数情况，但仍可能漏：新出现的顶层目录若暂时没有源码
  * 文件，就不算源码目录，之后往里加代码会静默不受管。这里让它露一面。
+ *
+ * @param {string[]} files 要检查的文件。
  */
-function warnUnclassified() {
+function warnUnclassified(files) {
   const stray = unclassifiedTopDirs(files, rules);
   if (stray.length === 0) return;
   console.error(`⚠ 以下顶层目录没被识别为受管，本次未检查：${stray.join('、')}`);
@@ -529,12 +576,97 @@ function warnUnclassified() {
   console.error('  否则那个目录会一直被静默放行。');
 }
 
-if (managed.length === 0 || hasNote) {
-  warnUnclassified();
-  if (managed.length === 0) {
+/**
+ * 打印「为什么不行 / 怎么修」。被两个失败分支共用。
+ *
+ * @param {string} scope 检查范围说明。
+ * @param {string[]} managed 受管文件。
+ */
+function explainFailure(scope, managed) {
+  console.error('✖ 有受管路径的改动，但本次没有带决策笔记。');
+  console.error('');
+  console.error(`  检查范围：${scope}`);
+  for (const path of managed) console.error(`    ${path}`);
+  console.error('');
+  console.error('这些路径一改，行为/工具链/流程就变了，按规范属于「非平凡改动」。');
+  console.error('请在 .agents/notes/ 下补一篇（推荐用 agent-notes 技能，含 Problem /');
+  console.error('Decision / Alternatives considered / Consequences 四节）：');
+  console.error('');
+  console.error('  .agents/notes/{proposed|implemented|rejected|archived}/');
+  console.error('    {feature|bug-fix|simplification|architecture|process|testing}/yyyy-mm-dd-主题.md');
+  console.error('');
+  console.error('如果这次确实只是机械改动（错别字、纯注释、生成物），在提交信息里加一行：');
+  console.error('');
+  console.error('  Note-Skip: <一句话理由>');
+  console.error('');
+  console.error('理由必须非空 —— 写理由这个动作本身就是要你再想一遍。');
+}
+
+/* ── 区间模式：**逐个提交**检查 ───────────────────────────────────────
+   实测确认的后门：合并看区间时，只要区间里有**一次**带了笔记，
+   其余改代码却漏记的提交全被掩护过去。那正是「一次 push 多个提交」的
+   常见形态 —— 也是最需要门禁盯住的形态。所以这里按提交逐个判定。 */
+if (target.mode === 'range') {
+  const failures = [];
+  const strayFiles = [];
+
+  for (const commit of target.commits) {
+    const got = filesOfCommit(commit.sha);
+    if (got.files === undefined) {
+      console.error('✖ 无法读取提交内容，本次检查无效。');
+      console.error(`  ${got.reason}`);
+      process.exit(2);
+    }
+    strayFiles.push(...got.files);
+
+    const verdict = evaluate(got.files);
+    if (verdict.ok) continue;
+
+    /* 每个提交可以用自己的 Note-Skip 放行 —— 但只影响它自己。 */
+    const ownSkip = SKIP_MARKER.exec(git(['log', '-1', '--format=%B', commit.sha]).out)?.[1];
+    if (typeof ownSkip === 'string' && ownSkip.trim() !== '') {
+      console.log(`  ✔ ${commit.sha.slice(0, 7)} 已用 Note-Skip 放行 —— ${ownSkip.trim()}`);
+      continue;
+    }
+    failures.push({ sha: commit.sha, subject: commit.subject, managed: verdict.managed });
+  }
+
+  warnUnclassified(strayFiles);
+
+  if (failures.length === 0) {
+    const stray = unclassifiedTopDirs(strayFiles, rules);
+    void stray;
+    console.log(
+      `笔记覆盖门禁通过（${target.label}）：检查了 ${target.commits.length} 个提交，`
+      + '每次受管改动都同批带了笔记。'
+    );
+    process.exit(0);
+  }
+
+  console.error(`✖ 有 ${failures.length} 个提交改了受管路径却没带决策笔记。`);
+  console.error('  逐个提交检查：一个提交带的笔记**不能**替另一个提交顶账。');
+  console.error('');
+  for (const failure of failures) {
+    console.error(`  ${failure.sha.slice(0, 7)}  ${failure.subject}`);
+    for (const path of failure.managed) console.error(`      ${path}`);
+    console.error('');
+  }
+  console.error('补法：为每个提交补一篇笔记（可另起一个「补笔记」提交，');
+  console.error('      或把笔记 amend 进对应提交），或用 Note-Skip 说明为何不必。');
+  process.exit(1);
+}
+
+/* ── 暂存区模式（本地 commit-msg 钩子）：合并看这一批 ───────────────── */
+const files = target.files;
+const verdict = evaluate(files);
+const label = target.label;
+
+if (verdict.ok) {
+  warnUnclassified(files);
+  if (verdict.managed.length === 0) {
     console.log(`笔记覆盖门禁通过（${label}）：改动未命中受管路径，无需笔记。`);
   } else {
-    console.log(`笔记覆盖门禁通过（${label}）：命中 ${managed.length} 个受管路径，且同批带了笔记。`);
+    console.log(`笔记覆盖门禁通过（${label}）：命中 ${verdict.managed.length} 个受管路径，且同批带了笔记。`);
   }
   process.exit(0);
 }
@@ -549,22 +681,6 @@ if (typeof reasonText === 'string' && reasonText.trim() !== '') {
   process.exit(0);
 }
 
-console.error('✖ 有受管路径的改动，但本次没有带决策笔记。');
-console.error('');
-console.error(`  检查范围：${label}`);
-for (const path of managed) console.error(`    ${path}`);
-console.error('');
-console.error('这些路径一改，行为/工具链/流程就变了，按规范属于「非平凡改动」。');
-console.error('请在 .agents/notes/ 下补一篇（推荐用 agent-notes 技能，含 Problem /');
-console.error('Decision / Alternatives considered / Consequences 四节）：');
-console.error('');
-console.error('  .agents/notes/{proposed|implemented|rejected|archived}/');
-console.error('    {feature|bug-fix|simplification|architecture|process|testing}/yyyy-mm-dd-主题.md');
-console.error('');
-console.error('如果这次确实只是机械改动（错别字、纯注释、生成物），在提交信息里加一行：');
-console.error('');
-console.error('  Note-Skip: <一句话理由>');
-console.error('');
-console.error('理由必须非空 —— 写理由这个动作本身就是要你再想一遍。');
-warnUnclassified();
+explainFailure(label, verdict.managed);
+warnUnclassified(files);
 process.exit(1);

@@ -405,6 +405,61 @@ test('notes-coverage: 已受管的目录不该再被报「未归类」（误报�
   }
 });
 
+test('notes-coverage: 区间里一个提交的笔记不能替另一个提交顶账', () => {
+  /* 实测确认的后门：区间模式原先用 `git diff base..HEAD` 合并看，
+     于是「一次 push 多个提交」时，只要其中**一次**带了笔记，
+     其余改代码却漏记的提交全被掩护过去 —— 而那正是最需要门禁盯住的形态。
+     现在改成按提交逐个判定（`git rev-list --reverse` + 每个 `sha^!`）。 */
+  const dir = makeRepoWithGate();
+  try {
+    const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true });
+    const base = git('rev-parse', 'HEAD').trim();
+
+    /* 提交 1：改代码 + 带笔记。 */
+    writeFileSync(join(dir, 'lib', 'board.js'), 'export const b = 2;\n', 'utf8');
+    mkdirSync(join(dir, '.agents', 'notes', 'implemented', 'process'), { recursive: true });
+    writeFileSync(join(dir, '.agents', 'notes', 'implemented', 'process', '2026-01-01-a.md'),
+      '# Agent Note: a\n\nStatus: implemented\n', 'utf8');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'good: 带笔记');
+
+    /* 提交 2：改代码，漏记。 */
+    writeFileSync(join(dir, 'lib', 'board.js'), 'export const c = 3;\n', 'utf8');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'bad: 漏记');
+
+    const r = spawnSync(NODE, [join(dir, 'tools', 'notes-coverage.mjs'), '--range', `${base}..HEAD`], {
+      cwd: dir, encoding: 'utf8', windowsHide: true, env: { ...process.env }
+    });
+    assert.equal(r.status, 1, `区间里有漏记提交必须红，实际 exit=${r.status}`);
+    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+    assert.match(out, /bad: 漏记/, '必须点名是哪个提交漏记');
+    assert.doesNotMatch(out, /good: 带笔记\s*\n\s+lib\//, '带笔记的那个提交不该被报');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes-coverage: 区间里每个提交都能用自己的 Note-Skip 放行', () => {
+  /* 逐提交检查的副作用：Note-Skip 也必须逐提交生效，
+     不能因为别的提交带了笔记就自动放行。 */
+  const dir = makeRepoWithGate();
+  try {
+    const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true });
+    const base = git('rev-parse', 'HEAD').trim();
+    writeFileSync(join(dir, 'lib', 'board.js'), 'export const b = 2;\n', 'utf8');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'skip: 只改注释\n\nNote-Skip: 无行为变化');
+
+    const r = spawnSync(NODE, [join(dir, 'tools', 'notes-coverage.mjs'), '--range', `${base}..HEAD`], {
+      cwd: dir, encoding: 'utf8', windowsHide: true, env: { ...process.env }
+    });
+    assert.equal(r.status, 0, `该提交自己有 Note-Skip，应放行，实际 exit=${r.status}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('notes-coverage: 配置文件可覆盖自动检测', () => {
   /* 自动检测不是万能的（比如把源码放在名字奇怪、暂时只有非源码文件的目录里）。
      这时用 .agents/notes-coverage.json 显式声明 —— 但**整体替换**而非叠加，
