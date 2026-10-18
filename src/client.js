@@ -341,7 +341,22 @@ function createAgentNotesClient(require) {
       var scope = props.scope;
       if (scope !== undefined && scope !== null) sessionId = scope.sessionId;
     }
+    /* 会话 cwd 也带上去。
+       为什么需要（实测）：DSH 重启后，浏览器里持久化的「笔记」tab 会在会话
+       加载完成前发请求，服务端那时 `sessions.get(id)` 返回 undefined、拿不到
+       header.cwd，只能显示「暂时读不到」；刷新才好，但用户不知道该刷新。
+       cwd 来自宿主的会话列表摘要（SessionScope.cwd），**不依赖服务端是否
+       已加载** —— 带上它，这一帧就能出数据。
+       注意这不是「猜仓库」：它是宿主声明的本会话目录，与「随便取一个活跃
+       会话的 cwd」有本质区别（后者会在多项目并行时指向别人的仓库）。 */
+    var scopeCwd = null;
+    if (props.scope !== undefined && props.scope !== null && typeof props.scope.cwd === 'string') {
+      scopeCwd = props.scope.cwd;
+    } else if (typeof props.cwd === 'string') {
+      scopeCwd = props.cwd;
+    }
     var src = '/agent-notes/ui?session=' + encodeURIComponent(String(sessionId ?? ''));
+    if (scopeCwd !== null && scopeCwd !== '') src += '&cwd=' + encodeURIComponent(scopeCwd);
 
     /* `data-conversation-composer-overlay` 是宿主认的「本视图自己占满整块」标记。
        带上它，宿主 CSS 会把 .viewArea 变成 flex:1 1 0 + min-height:0 +

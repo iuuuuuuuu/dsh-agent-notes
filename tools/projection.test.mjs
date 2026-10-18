@@ -416,4 +416,38 @@ test('侧边栏宿主：component 必须把宿主 props 转交给看板，iframe
     `iframe src 必须带上 scope.sessionId（实际 ${frame.props.src}）—— `
     + '丢掉 props 时这里会是 ?session= 空串，路由回 409'
   );
+
+  /* cwd 也必须进 src（第二条独立缺陷）：
+     DSH 重启后持久化的 tab 会在会话加载完成前请求，服务端那时拿不到
+     header.cwd，只能显示「暂时读不到」。宿主的 SessionScope.cwd 是会话列表
+     摘要，不依赖服务端加载 —— 前端不把它拼进去，兜底就永远用不上。
+     实测踩过：服务端兜底写好了、前端没接线，症状与没修一样。 */
+  created.length = 0;
+  descriptor.component({
+    ctx: fakeCtx,
+    store: {},
+    scope: { sessionId: 'sess-sidebar-42', cwd: 'D:/WishProject/demo' },
+    tab: { id: 'agent-notes-board', type: 'agent-notes-board' },
+    visible: true
+  });
+  const frameWithCwd = created.find((node) => node.type === 'iframe');
+  assert.ok(frameWithCwd !== undefined, '带 cwd 时也应渲染出 iframe');
+  assert.match(
+    String(frameWithCwd.props.src),
+    /[?&]cwd=D%3A%2FWishProject%2Fdemo(?:&|$)/,
+    `iframe src 必须带上 scope.cwd 且做 URL 编码（实际 ${frameWithCwd.props.src}）—— `
+    + '不带它，会话未加载时看板只能显示「暂时读不到」'
+  );
+
+  /* scope 没给 cwd 时不能凭空造一个，否则等于猜仓库。 */
+  created.length = 0;
+  descriptor.component({
+    ctx: fakeCtx,
+    store: {},
+    scope: { sessionId: 'sess-sidebar-42' },
+    tab: { id: 'agent-notes-board', type: 'agent-notes-board' },
+    visible: true
+  });
+  const frameNoCwd = created.find((node) => node.type === 'iframe');
+  assert.ok(!String(frameNoCwd.props.src).includes('cwd='), 'scope 没有 cwd 时不得凭空拼一个');
 });

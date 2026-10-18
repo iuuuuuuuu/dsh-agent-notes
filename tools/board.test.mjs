@@ -14,9 +14,9 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { injectResponsiveCss, RESPONSIVE_CSS, RESPONSIVE_STYLE_ID } from '../lib/board-responsive.js';
-import { buildBoard, buildBoardFromRoots, parseNote, scanNotes } from '../lib/board.js';
-import { isInside, registerBoardRoutes } from '../lib/board-route.js';
+import { DRAWER_PATCH_ID, injectResponsiveCss, RESPONSIVE_CSS, RESPONSIVE_STYLE_ID } from '../lib/board-responsive.js';
+import { buildBoard, buildBoardFromRoots, buildInlineData, parseNote, scanNotes } from '../lib/board.js';
+import { isInside, registerBoardRoutes, renderNoticePage } from '../lib/board-route.js';
 import { listGitChildren, originOf, resolveNotesRoots } from '../lib/notes.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -210,6 +210,78 @@ test('board-route: 没有 webServer 服务时静默降级，不抛', () => {
   assert.doesNotThrow(() => dispose());
 });
 
+test('board: 小节提取必须取全段落，不能在第一个换行处截断', () => {
+  /* 实测踩过的坑，用户直接看到症状：看板详情页每个小节只有开头一句
+     （比如 Decision 只剩「两件事分开处理。」），看着像模型没写完。
+
+     根因在正则结尾哨兵：原先写 `(?=^##\\s|\\s*$)` 并带 `m` 标志。
+     `\\s` **包含换行符**，配合 `m`（`$` 匹配行尾）后 `\\s*$` 会命中第一行末尾，
+     惰性量词 `*?` 在第一个换行处就停 —— 于是每个小节只抽到第一行。
+
+     正确写法是 `(?![\\s\\S])`：后面再没有任何字符，即真正的字符串结尾，
+     不受 `m` 影响。
+
+     顺带说明：这个缺陷**上游也有**（skills/agent-notes/scripts/build-board.ts
+     里同样的 `(?=^## |\\s*$)`）。那份是 vendored 资产不能手改，所以只在
+     本插件自己的 lib/board.js 修 —— 别以为"和上游一致"就没问题。 */
+  const body = [
+    '# Agent Note: 标题',
+    '',
+    '## Problem',
+    '',
+    '第一段：背景。',
+    '',
+    '第二段：还有更多内容。',
+    '',
+    '## Decision',
+    '',
+    '决策第一段。',
+    '',
+    '决策第二段。',
+    ''
+  ].join('\n');
+  const { dir, root } = makeRepo([
+    { lifecycle: 'implemented', class: 'process', file: '2026-01-01-a.md', body }
+  ]);
+  try {
+    const data = buildInlineData([root]);
+    assert.equal(data.length, 1);
+    const note = data[0];
+    assert.ok(note.problem.includes('第一段'), 'problem 必须含第一段');
+    assert.ok(note.problem.includes('第二段'), `problem 被截断了：${JSON.stringify(note.problem)}`);
+    assert.ok(note.decision.includes('决策第一段'), 'decision 必须含第一段');
+    assert.ok(note.decision.includes('决策第二段'), `decision 被截断了：${JSON.stringify(note.decision)}`);
+    // 不能把下一个小节的标题吞进来。
+    assert.ok(!note.problem.includes('## Decision'), 'problem 不得跨到下一个 ## 小节');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('board: 最后一节（后面没有别的 ##）也要能取全', () => {
+  /* 结尾哨兵的另一个边界：如果小节是全文最后一节，`(?=^##\\s|...)` 里
+     `^##` 分支永不匹配，只能靠结尾分支。写错的话这一节会整段丢失。 */
+  const body = [
+    '# Agent Note: 标题',
+    '',
+    '## Consequences',
+    '',
+    '代价第一段。',
+    '',
+    '代价第二段。'
+  ].join('\n');
+  const { dir, root } = makeRepo([
+    { lifecycle: 'implemented', class: 'process', file: '2026-01-01-b.md', body }
+  ]);
+  try {
+    const note = buildInlineData([root])[0];
+    assert.ok(note.consequences.includes('代价第一段'), '末节第一段必须取到');
+    assert.ok(note.consequences.includes('代价第二段'), `末节被截断：${JSON.stringify(note.consequences)}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('board-route: 会话解析不出笔记根时回 409，不猜一个路径', async () => {
   const handlers = [];
   const ctx = ctxWithWebServer((route) => { handlers.push(route); });
@@ -312,14 +384,20 @@ test('board-route: 正文含 HTML 片段时不得破坏注入的脚本块', asyn
 
     assert.equal(res.statusCode, 200);
     const html = res.body;
-    // 关键断言：注入不得增加 <script 的数量。
+    /* 关键断言：数据注入不得凭空增加 <script 数量。
+       现在比上游多**恰好一个** —— 我们主动注入的抽屉补丁脚本
+       （<script id="agent-notes-drawer-patch">）。多出第二个就说明
+       数据里的 `</script>` 逃逸出来了，那正是 `\u003c` 转义要防的事。 */
     const scriptTags = (html.match(/<script/g) ?? []).length;
     const closeTags = (html.match(/<\/script>/g) ?? []).length;
-    const original = (readFileSync(
+    const upstream = (readFileSync(
       join(ROOT, 'skills', 'agent-notes', 'assets', 'agent-notes-board.html'), 'utf8'
     ).match(/<script/g) ?? []).length;
-    assert.equal(scriptTags, original, `注入后 <script 数量必须不变（${original}），实际 ${scriptTags}`);
-    assert.equal(closeTags, original, `注入后 </script> 数量必须不变（${original}），实际 ${closeTags}`);
+    const expected = upstream + 1;
+    assert.equal(scriptTags, expected, `注入后 <script 应恰好 ${expected} 个（上游 ${upstream} + 补丁 1），实际 ${scriptTags}`);
+    assert.equal(closeTags, expected, `注入后 </script> 应恰好 ${expected} 个，实际 ${closeTags}`);
+    assert.equal((html.match(new RegExp(`id="${DRAWER_PATCH_ID}"`, 'g')) ?? []).length, 1,
+      '补丁脚本必须恰好一个');
 
     // 数据必须能完整解析回来，且正文原样保留。
     const start = html.indexOf('window.__INLINE_DATA__ = ') + 'window.__INLINE_DATA__ = '.length;
@@ -370,8 +448,13 @@ test('board-route: UI 响应里必须带窄屏适配样式，且不破坏上游�
     const headAt = html.lastIndexOf('</head>');
     assert.ok(styleAt !== -1 && styleAt < headAt, '样式必须在 </head> 之前');
 
-    // ③ 关键：注入只能「加」，不能改动上游原有字节。
-    const stripped = html.replace(new RegExp(`<style id="${RESPONSIVE_STYLE_ID}">[\\s\\S]*?</style>\\n?`), '');
+    /* ③ 关键：注入只能「加」，不能改动上游原有字节。
+       剥离**两样**我们自己加的东西再比较：适配样式块、抽屉补丁脚本块。
+       只剥样式的话，补丁脚本会留在里面导致不等 —— 而被改动的上游字节
+       才是这条断言真正要防的。 */
+    const stripped = html
+      .replace(new RegExp(`<style id="${RESPONSIVE_STYLE_ID}">[\\s\\S]*?</style>\\n?`), '')
+      .replace(new RegExp(`<script id="${DRAWER_PATCH_ID}">[\\s\\S]*?</script>\\n?`), '');
     const expected = original.replace(
       'window.__INLINE_DATA__ = null;',
       () => `window.__INLINE_DATA__ = ${JSON.stringify(JSON.parse(
@@ -385,6 +468,21 @@ test('board-route: UI 响应里必须带窄屏适配样式，且不破坏上游�
 
     // ④ 覆盖样式本身必须真的针对窄屏（媒体查询），不能影响宽屏观感。
     assert.match(RESPONSIVE_CSS, /@media \(max-width: 900px\)/);
+
+    /* ⑤ 顶栏子项必须 nowrap —— 这是 2026-10-18 复测发现的真缺陷。
+       第一轮只测 ≤900px，漏掉了 900–1440px：实测 1146px 下 brand-group
+       实际高 51px、deck-tabs 58px，而上游 header 固定 64px —— 也就是说
+       「宽屏」区间同样在逐字竖排。根因不是「窄」，是「子项会折行」。
+       所以 nowrap 必须在**所有断点之外**（全宽度生效），不能塞进媒体查询里。 */
+    const outsideMedia = RESPONSIVE_CSS.split('@media')[0];
+    for (const sel of ['.deck-tab', '.brand-text', 'nav.deck-tabs', '.sync-beacon']) {
+      const re = new RegExp(`${sel.replace('.', '\\.')}\\s*\\{[^}]*white-space:\\s*nowrap`);
+      assert.match(outsideMedia, re, `${sel} 必须在所有断点之外声明 white-space: nowrap`);
+    }
+
+    /* ⑥ 搜索框必须可收缩。写死宽度时实测 760px 处 input 右边缘 767（超出 7px）、
+       360px 处超出 20px —— 全是横向溢出。 */
+    assert.match(RESPONSIVE_CSS, /\.hud-search[^}]*min-width:\s*0/, '搜索框必须允许收缩');
     assert.match(RESPONSIVE_CSS, /@media \(max-width: 720px\)/);
     // 顶栏解除固定高度是修好竖排的关键，钉死它。
     assert.match(
@@ -434,6 +532,103 @@ test('board-route: 解析不出根时 /ui 回可读说明页，不是原始 JSON
   assert.equal(JSON.parse(board.body).reason, 'NO_NOTES_ROOT');
 });
 
+test('board-route: 会话未加载时用前端带来的 cwd 兜底（不显示「暂时读不到」）', async () => {
+  /* 实测复现过的场景：DSH 重启后，浏览器里持久化的「笔记」tab 会在会话
+     加载完成前请求 /agent-notes/ui。那时 sessions.get(id) 返回 undefined，
+     header.cwd 拿不到，看板只能显示「暂时读不到」—— 而用户明明就在那个
+     会话里（截图里的 session id 正是当前会话）。
+     兜底数据是宿主的会话列表摘要 cwd（SessionScope.cwd），不依赖服务端加载。
+     这不是猜仓库：它是宿主声明的本会话目录。 */
+  const dir = mkdtempSync(join(tmpdir(), 'an-cwd-'));
+  const root = join(dir, '.agents', 'notes', 'implemented', 'process');
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, '2026-01-01-a.md'), noteBody('用 cwd 兜底'), 'utf8');
+  try {
+    const handlers = [];
+    const ctx = ctxWithWebServer((route) => { handlers.push(route); });
+    const seen = [];
+    registerBoardRoutes(ctx, {
+      // 会话没加载：模拟 sessions.get() 拿不到 header.cwd
+      notesRootFor: () => undefined,
+      notesRootsForCwd(cwd) { seen.push(cwd); return [join(dir, '.agents', 'notes')]; }
+    });
+    const res = await new Promise((settle) => {
+      const r = {
+        statusCode: 0, body: '',
+        writeHead(code) { this.statusCode = code; },
+        end(body) { this.body = body ?? ''; settle(this); }
+      };
+      handlers[0].handler({
+        method: 'GET',
+        url: `/agent-notes/ui?session=session-abc&cwd=${encodeURIComponent(dir)}`
+      }, r);
+    });
+    assert.equal(res.statusCode, 200, '有 cwd 时不该再回 409');
+    assert.ok(!res.body.includes('笔记看板暂时读不到'), '不该显示说明页');
+    assert.ok(res.body.includes('用 cwd 兜底'), '应真的读到该 cwd 下的笔记');
+    assert.deepEqual(seen, [dir], '应把前端带来的 cwd 原样交给解析器');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('board-route: cwd 兜底必须是绝对路径，也不许抢在会话解析前面', async () => {
+  /* 两条边界：
+     ① 相对路径在不同进程目录下指向别处，等同猜 —— 必须忽略，连解析器都不调；
+     ② 会话能解析时必须以会话为准（本测试里会话返回 /from/session/notes，
+        cwd 解析器一旦被调用就会改变走向，用它来证明优先级）。 */
+  const handlers = [];
+  const ctx = ctxWithWebServer((route) => { handlers.push(route); });
+  let cwdCalls = 0;
+  registerBoardRoutes(ctx, {
+    notesRootFor: () => undefined,
+    notesRootsForCwd() { cwdCalls += 1; return ['/from/cwd/notes']; }
+  });
+  const call = (url) => new Promise((settle) => {
+    const r = {
+      statusCode: 0, body: '',
+      writeHead(code) { this.statusCode = code; },
+      end(body) { this.body = body ?? ''; settle(this); }
+    };
+    handlers[0].handler({ method: 'GET', url }, r);
+  });
+
+  const rel = await call('/agent-notes/board?session=s1&cwd=relative/dir');
+  assert.equal(rel.statusCode, 409, '相对路径不得作为兜底');
+  assert.equal(cwdCalls, 0, '相对路径连解析器都不该调用');
+  assert.equal(JSON.parse(rel.body).reason, 'NO_NOTES_ROOT');
+
+  // 会话能解析时，cwd 不该被用到
+  const handlers2 = [];
+  const ctx2 = ctxWithWebServer((route) => { handlers2.push(route); });
+  let cwdCalls2 = 0;
+  registerBoardRoutes(ctx2, {
+    notesRootFor: () => ['/from/session/notes'],
+    notesRootsForCwd() { cwdCalls2 += 1; return ['/from/cwd/notes']; }
+  });
+  await new Promise((settle) => {
+    const r = {
+      statusCode: 0, body: '',
+      writeHead(code) { this.statusCode = code; },
+      end(body) { this.body = body ?? ''; settle(this); }
+    };
+    handlers2[0].handler({
+      method: 'GET',
+      url: '/agent-notes/board?session=s1&cwd=%2Ffrom%2Fcwd'
+    }, r);
+  });
+  assert.equal(cwdCalls2, 0, '会话能解析时不得走 cwd 兜底');
+});
+
+test('board-route: 说明页会自动重试，用户不必手动刷新', () => {
+  /* 会话加载是几秒内的事。说明页若能自己重试并跳转，用户就完全感知不到
+     这次失败；否则只能看到一张死页面，还得自己知道要刷新。 */
+  const html = renderNoticePage({ reason: 'NO_NOTES_ROOT', hint: 'h', sessionId: 's' });
+  assert.ok(html.includes('setInterval'), '应有定时重试');
+  assert.ok(html.includes('location.replace'), '成功后就地跳进看板');
+  assert.ok(/tries\s*>\s*\d+/.test(html), '必须有次数上限，不能无限重试');
+});
+
 test('board-route: 说明页必须转义会话 id（防注入）', async () => {
   /* 会话 id 来自 URL 查询参数，会原样回显到页面里。不转义的话，
      `?session=<script>...` 就是一个反射型 XSS。虽然 iframe 有 sandbox，
@@ -466,6 +661,38 @@ test('board-responsive: 注入幂等、缺 head 时原样返回（适配层不�
   assert.equal(injectResponsiveCss('<p>x</p>'), '<p>x</p>');
   assert.equal(injectResponsiveCss(''), '');
   assert.equal(injectResponsiveCss(undefined), undefined);
+});
+
+test('board-responsive: 抽屉补丁脚本必须注入，且放在 body 末尾（DOM 已就绪）', () => {
+  /* 两个上游缺陷都只能靠注入层修（asset 是 vendored 的，不能手改）：
+     ① 打开新笔记时不重置 .console-body 的 scrollTop —— 读到一篇底部再开
+        另一篇，会从底部开始显示；
+     ② 抽屉是 position:fixed 浮层，但上游没锁背景滚动 —— 出现内外两层
+        滚动条。
+     ② 用 CSS 的 :has() 就够（见 RESPONSIVE_CSS）；① 必须运行时脚本，
+     所以脚本要能被注入，且必须放在 </body> 之前 —— 它要 querySelector
+     #drawer-console，放 head 里会拿不到节点。 */
+  const page = '<html><head><title>t</title></head><body><aside id="drawer-console"></aside></body></html>';
+  const out = injectResponsiveCss(page);
+  assert.ok(out.includes(`<script id="${DRAWER_PATCH_ID}">`), '补丁脚本必须被注入');
+  const scriptAt = out.indexOf(`id="${DRAWER_PATCH_ID}"`);
+  const bodyEndAt = out.lastIndexOf('</body>');
+  assert.ok(scriptAt > 0 && scriptAt < bodyEndAt, '脚本必须在 </body> 之前（DOM 就绪）');
+  const asideAt = out.indexOf('id="drawer-console"');
+  assert.ok(scriptAt > asideAt, '脚本必须在抽屉节点之后');
+  // 幂等：不能插两次脚本
+  assert.equal((out.match(new RegExp(DRAWER_PATCH_ID, 'g')) ?? []).length, 1);
+  assert.equal(injectResponsiveCss(out), out, '二次注入必须原样返回');
+});
+
+test('board-responsive: 抽屉打开时 html 与 body 都要锁滚动（双层滚动条）', () => {
+  /* 实测：只锁 body 时 documentElement 仍能滚，第二条滚动条依然在
+     （CDP 量到 scrollTop 能设成 400）。视口滚动在不同 UA 下由不同元素
+     承担，所以两个都要设。 */
+  assert.match(RESPONSIVE_CSS, /body:has\(#drawer-console\.open\)[\s\S]{0,80}overflow:\s*hidden/,
+    '抽屉打开时 body 必须锁滚动');
+  assert.match(RESPONSIVE_CSS, /html:has\(#drawer-console\.open\)/,
+    'html 也必须锁 —— 只锁 body 实测挡不住');
 });
 
 test('board-responsive: 数据里提到样式 id 时仍必须注入（不能靠 includes 判重）', () => {
