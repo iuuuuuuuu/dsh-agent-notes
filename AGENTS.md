@@ -34,7 +34,8 @@ npm run notes:gate             # 本仓库笔记门禁（空树/零篇判失败�
 npm run verify                 # 包自检（含双语文档与 dsh 徽标门禁）
 npm run sync:check             # 上游是否有更新
 npm run evidence               # 实机证据（需能找到 DSH；非标准位置设 DSH_DIST）
-npm run check                  # 上面五条串跑（含 notes:gate）
+npm run check                  # 全部纯本地门禁串跑（不需 DSH，提交后跑这个）
+npm run check:full             # check + evidence（需本机 DSH）
 npm run notes:coverage         # 覆盖门禁：该写笔记的改动必须同批带笔记
 npm run hooks:install          # 装 commit-msg 钩子（每个 clone 跑一次）
 npm run sync -- --yes          # 真合并上游（改完必须重跑 check）

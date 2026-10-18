@@ -42,8 +42,22 @@ Owner 反复强调不能出现的那类问题 —— 本地与远端判断不一
 
 新增 `notes:coverage`、`notes:supersession`、`doc:budget`。
 
-唯一保留的差异是 `evidence`：它需要本机安装 DSH（读 `$DSH_DIST` 或从
-`$DSH_HOME` 推断），CI 上没有环境，跑不了。这个差异是**有意且可解释**的。
+**must：`evidence` 从 `check` 里拆出去。**
+`evidence` 需要本机安装 DSH（读 `$DSH_DIST` 或从 `$DSH_HOME` 推断），
+找不到时退出码 2 —— **这个行为本身是对的**（它不伪造证据）。
+但它串在 `check` 的 `&&` 链里，于是在任何没装 DSH 的开发机上
+`npm run check` 永远跑不完。实测本机确认：`check` 退出码 1，卡在 evidence。
+
+所以拆成两个入口：
+
+```sh
+npm run check        # 纯本地，不需要 DSH —— 默认用这个
+npm run check:full   # check + evidence，需要真机 DSH
+```
+
+**must**：拆分不能变成「把 evidence 降级成可选」。
+它仍然是必跑的，只是**由调用方按环境选择**，而不是让一项环境依赖
+拖垮其余全部检查。
 
 **② `check` 里用「最近一次提交」而非暂存区。**
 
@@ -95,6 +109,10 @@ npm run notes:supersession:last  # = --range HEAD~1..HEAD
   它会报 `✖ tools/doc-budget.test.mjs 不存在 —— 文档预算没有故障注入，不可信`。
 - **代价**：`npm run check` 变长（多了 3 项），跑一次更慢。
   这是「本地与远端一致」的必要代价。
+- **代价**：拆成 `check` / `check:full` 之后，**默认那个不含 evidence**。
+  也就是说「跑过 check」不再等于「实机也验证过」。这是有意的取舍：
+  前者在任何机器上都可信，后者只在装了 DSH 的机器上有意义。
+  重访信号：有人以为 `check` 覆盖了实机验证。
 - **代价**：`HEAD~1` 在只有一次提交的仓库里不存在，会退出码 2。
   首提交时 `check` 会失败一次 —— 这个方向是安全的（不会假绿），
   但对新仓库的首次体验不友好。
