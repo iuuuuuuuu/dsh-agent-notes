@@ -5,6 +5,27 @@
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-18
+
+> 版本号说明：`0.4.0` 由 `.github/workflows/upstream-sync.yml` 的自动同步
+> 任务先行占用（该提交只升了 `package.json` 与上游 ref，未含本文件的条目）。
+> 本次改动在其之上，故记为 `0.4.1`。
+
+### 新增
+
+- **笔记变更后看板自动刷新**：上游的自动同步依赖 FileSystem 目录句柄
+  （`Core.dirHandle`），而走服务端注入这条路径永远拿不到句柄 ——
+  `triggerLiveSync()` 第一行 `if (!Core.dirHandle) return` 直接返回，
+  改了笔记页面纹丝不动（实测 `Core.dirHandle === false`）。
+  - 服务端新增 `GET /agent-notes/data`，只返回 `{ revision, notes }`
+  - `revision` 是**内容指纹**（对渲染字段做 sha256），不是篇数也不是 mtime ——
+    只比篇数时改一篇内容察觉不到，只比 mtime 时部分编辑器会保留时间戳
+  - 前端每 4 秒拉一次，变了才调上游的 `ingestDataset()` 重绘；
+    无变化零重绘，用户正在看的滚动位置与打开的抽屉不会跳动
+  - 状态可观测：`window.__agentNotesLive` 暴露 `{ polls, applied, revision, failures }`
+  - **加载后必须立刻探一次**：只等 4 秒周期的话，首次请求拿到的已是最新内容，
+    而「首次只记录不重绘」会把这个变化直接吞掉 —— 表现为「轮询在跑但页面永不更新」
+
 ### 变更
 
 - **合并上游 `72573a5`，删除抽屉的两处冗余注入**
@@ -61,25 +82,6 @@
     `clearInterval`、不可见分支不调 `stop()`、去掉启动门控
   - 顺带修掉一条**潜在假绿**断言：原先 `/clearInterval\(timer\)/` 会匹配到别处的
     同名调用，删掉 `stop()` 里的实现后测试仍绿；改为断言 `stop()` 定义体内确实调了它
-
-- **改了笔记，看板页面不自动更新**：上游**有**自动同步（`focus` 事件 + 5 秒
-  `setInterval`），但 `triggerLiveSync()` 第一行是 `if (!Core.dirHandle) return`，
-  而 `dirHandle` 只在用户手动点「连接本地目录」并用 File System Access API 授权后
-  才有值。侧边栏走服务端注入 `__INLINE_DATA__` 这条路，**永远不设置 dirHandle**，
-  于是两条自动同步全部空转。
-  - 服务端新增 `GET /agent-notes/data`，只返回 `{ revision, notes }`（不重传 76KB HTML）
-  - `revision` 是**内容指纹**（对渲染字段做 sha256），不是篇数也不是 mtime ——
-    只比篇数时改一篇内容察觉不到，正是本次的 bug
-  - 前端每 4 秒拉一次，变了才调上游的 `ingestDataset()` 重绘；无变化零重绘，
-    用户正在看的滚动位置与打开的抽屉不会跳动
-  - **加载后必须立刻探一次**：只等 4 秒周期的话，首次请求拿到的已是最新内容，
-    而「首次只记录不重绘」会把这个变化直接吞掉 —— 表现为「轮询在跑但页面永不更新」，
-    很难从现象分辨
-  - 端点是「当前路径最后一段换成 data」，不能直接拼 `'data'`（会得到
-    `/agent-notes/uidata`，实测 404，轮询静默失效）
-  - 状态可观测：`window.__agentNotesLive` 暴露 `{ polls, applied, revision, failures }`
-  - 故障注入：去掉加载时的首次 `poll()` → 变红；端点改成朴素拼接 → 变红；
-    不调 `ingestDataset` → 变红；`revisionOf` 漏掉某个小节字段 → 变红
 
 ## [0.3.1] - 2026-10-18
 
