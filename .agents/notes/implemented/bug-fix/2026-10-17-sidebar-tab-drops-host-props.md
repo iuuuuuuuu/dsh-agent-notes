@@ -2,6 +2,12 @@
 
 Status: implemented
 
+> 同域：本篇解决**宿主 props 转交**。**解析不出仓库时怎么报**见
+> [2026-10-17-board-409-readable-notice.md](./2026-10-17-board-409-readable-notice.md)，
+> **热更新为什么不靠上游目录句柄**见
+> [2026-10-18-board-live-refresh-on-note-change.md](./2026-10-18-board-live-refresh-on-note-change.md)。
+> 三条都在处理「看板跑在宿主侧边栏里」这个前提带来的边界问题。
+
 ## Problem
 
 接入 dsh-better-sidebar 之后，侧边栏里点开「笔记」tab 显示 `{"error":"no notes root resolvable for this session"}`，整块空白。

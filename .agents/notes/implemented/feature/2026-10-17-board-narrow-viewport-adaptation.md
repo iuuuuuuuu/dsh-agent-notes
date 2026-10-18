@@ -2,6 +2,12 @@
 
 Status: implemented
 
+> 同域：本篇解决**窄屏布局**。**抽屉滚动**见
+> [../bug-fix/2026-10-18-drawer-scroll-and-double-scrollbar.md](../bug-fix/2026-10-18-drawer-scroll-and-double-scrollbar.md)，
+> 上游修好后删掉重复注入的决定见
+> [../simplification/2026-10-18-drop-redundant-drawer-patch-after-upstream-fix.md](../simplification/2026-10-18-drop-redundant-drawer-patch-after-upstream-fix.md)。
+> 三者共用同一条原则：**能注入就不改 vendored 看板**。
+
 ## Problem
 
 看板接进 dsh-better-sidebar 的右侧栏后，小窗口下观感崩了：顶栏的中文被压成**逐字竖排**，品牌、导航、搜索、状态四个子项挤成一列单字，几乎不可读。

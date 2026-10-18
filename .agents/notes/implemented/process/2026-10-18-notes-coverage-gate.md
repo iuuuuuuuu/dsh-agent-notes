@@ -2,6 +2,12 @@
 
 Status: implemented
 
+> 同域三篇，各管一层：本篇查「该写而没写」；
+> [2026-10-17-notes-gate-cli-entry.md](./2026-10-17-notes-gate-cli-entry.md)
+> 管「门禁怎么接进去且不假绿」；
+> [2026-10-18-notes-supersession-check.md](./2026-10-18-notes-supersession-check.md)
+> 管「新笔记与既有笔记的关系」（规则借鉴 deepseek-harness）。
+
 ## Problem
 
 规范写得足够细，连「对 AI 来说写在散文里的规矩等于没有规矩」都写进去了。

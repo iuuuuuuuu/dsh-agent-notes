@@ -2,6 +2,12 @@
 
 Status: implemented
 
+> 同域：本篇的根因是「测试有写盘副作用」，靠 CI 的「测试不得改动工作区」
+> 断言兜住。笔记门禁本身的三层分工见
+> [../process/2026-10-17-notes-gate-cli-entry.md](../process/2026-10-17-notes-gate-cli-entry.md)、
+> [../process/2026-10-18-notes-coverage-gate.md](../process/2026-10-18-notes-coverage-gate.md)、
+> [../process/2026-10-18-notes-supersession-check.md](../process/2026-10-18-notes-supersession-check.md)。
+
 ## Problem
 
 推送 v0.4.1 后 CI 稳定失败，本地**一切全绿**。失败集中在两条：

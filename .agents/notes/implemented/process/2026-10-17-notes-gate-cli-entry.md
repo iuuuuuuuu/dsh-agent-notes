@@ -2,6 +2,11 @@
 
 Status: implemented
 
+> 后续：本篇解决的是「门禁怎么接进去、怎么不假绿」。它**不检查**
+> 「该写而没写」（见 [2026-10-18-notes-coverage-gate.md](./2026-10-18-notes-coverage-gate.md)）
+> 与「新笔记与既有笔记的关系」（见 [2026-10-18-notes-supersession-check.md](./2026-10-18-notes-supersession-check.md)）。
+> 三篇合起来才是完整的笔记纪律。
+
 ## Problem
 
 本仓库的 `AGENTS.md` 早就写明「非平凡改动必须留笔记」，但 `.agents/notes/` 目录此前**并不存在**，三条 vendored 校验脚本也从未接进 `npm run check` 或 CI。规范写在文档里、没有任何东西执行它，等于没有规范。

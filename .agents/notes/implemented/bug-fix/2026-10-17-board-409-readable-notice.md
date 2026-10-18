@@ -2,6 +2,12 @@
 
 Status: implemented
 
+> 同域：本篇解决**解析不出笔记根时报什么**。**看板数据端点的性能**见
+> [../feature/2026-10-18-data-endpoint-perf-git-cache.md](../feature/2026-10-18-data-endpoint-perf-git-cache.md)，
+> **侧边栏 tab 必须转交宿主 props** 见
+> [2026-10-17-sidebar-tab-drops-host-props.md](./2026-10-17-sidebar-tab-drops-host-props.md)。
+> 两条都在处理「看板与会话/仓库的耦合边界」。
+
 ## Problem
 
 同一项目下开多个会话时，侧边栏的「笔记」tab 偶尔整块空白，显示一坨原始 JSON：
