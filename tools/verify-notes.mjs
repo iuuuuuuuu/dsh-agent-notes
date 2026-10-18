@@ -23,6 +23,7 @@
  * 环境变量：
  *   AGENT_NOTE_ROOT  覆盖笔记根（与 vendored 脚本同一变量，供故障注入用）。
  */
+import { spawnSync } from 'node:child_process';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runAllGates } from '../lib/notes.js';
@@ -30,21 +31,69 @@ import { runAllGates } from '../lib/notes.js';
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
 /**
+ * 挑一个「要验哪个仓库」的根。
+ *
+ * ## 为什么不能写死 PACKAGE_ROOT
+ *
+ * 本脚本要能在**任何仓库**里用 —— 那是「脱离 DSH 也能用」的前提。
+ * 实测踩过：脚本被拷到另一个目录后运行，它仍然报告原仓库的 16 篇笔记
+ * （`PACKAGE_ROOT` 永远指向脚本自己所在目录）。于是「在别的仓库里跑」
+ * 这件事**静默地没发生**，而输出看起来完全正常 ——
+ * 这是最难发现的一类错：不是报错，是验错了对象。
+ *
+ * ## 为什么不在找不到笔记树时回退到 PACKAGE_ROOT
+ *
+ * 第一版这样做，结果在「cwd 是另一个仓库但没有 .agents/notes」时
+ * 静默去验了本插件自己的笔记树 —— 报「通过，16 篇」，而那些笔记
+ * 跟当前仓库毫无关系。**回退到别处比报错更危险。**
+ *
+ * 现在的规则：cwd 是 git 仓库根就必须验它（没有笔记树 → 由 runAllGates
+ * 报 NO_NOTES_TREE）；只有 cwd 完全不是仓库时，才验脚本所在的包。
+ *
+ * @returns {string} 仓库根绝对路径。
+ */
+function repoRoot() {
+  const args = process.argv.slice(2);
+  const idx = args.indexOf('--root');
+  if (idx >= 0) {
+    const value = args[idx + 1];
+    if (typeof value !== 'string' || value.trim() === '') {
+      console.error('✖ --root 需要一个路径。');
+      process.exit(2);
+    }
+    return resolve(value.trim());
+  }
+
+  const cwd = process.cwd();
+  /* cwd 是 git 仓库根 → 就是它。哪怕它没有笔记树（那该报 NO_NOTES_TREE，
+     而不是偷偷去验别处）。 */
+  const gitRoot = spawnSync('git', ['rev-parse', '--show-toplevel'], {
+    cwd, encoding: 'utf8', windowsHide: true
+  });
+  if (gitRoot.status === 0) {
+    const top = String(gitRoot.stdout ?? '').trim();
+    if (top !== '') return top;
+  }
+  return PACKAGE_ROOT;
+}
+
+/**
  * 解析笔记根。
  *
  * 与 `lib/notes.js` 的 `resolveNotesRoot` 同一优先级：显式 > `$AGENT_NOTE_ROOT`
- * > `<cwd>/.agents/notes`。此处 cwd 钉在仓库根，确保从任意子目录调用都验同一棵树。
+ * > `<root>/.agents/notes`。
  *
+ * @param {string} root 仓库根。
  * @returns {string} 笔记根绝对路径。
  */
-function notesRoot() {
+function notesRoot(root) {
   const env = process.env.AGENT_NOTE_ROOT;
   if (typeof env === 'string' && env.trim() !== '') return resolve(env.trim());
-  return resolve(PACKAGE_ROOT, '.agents', 'notes');
+  return resolve(root, '.agents', 'notes');
 }
 
-const root = notesRoot();
-const result = await runAllGates({ cwd: PACKAGE_ROOT, notesRoot: root });
+const root = repoRoot();
+const result = await runAllGates({ cwd: root, notesRoot: notesRoot(root) });
 
 for (const entry of result.results) {
   if (entry.passed) {

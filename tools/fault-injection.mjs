@@ -276,7 +276,8 @@ try {
     ['覆盖门禁', 'notes-coverage.test.mjs'],
     ['supersession 检查', 'notes-supersession.test.mjs'],
     ['文档预算', 'doc-budget.test.mjs'],
-    ['归档入口', 'archive-note.test.mjs']
+    ['归档入口', 'archive-note.test.mjs'],
+    ['脱离 DSH 的跨仓库可用性', 'standalone.test.mjs']
   ]) {
     const full = join(PACKAGE_ROOT, 'tools', file);
     if (!existsSync(full)) {
