@@ -264,14 +264,19 @@ try {
   expectGreen('format 复原', 'verify-agent-note-format.ts', work);
   expectGreen('archived 复原', 'verify-archived-agent-notes.ts', work);
 
-  /* 覆盖门禁与 supersession 检查的自证。
-     它们的三组故障注入在各自的 test 文件里，由 npm test 执行。
+  /* 每道新门禁的自证。
+     它们的故障注入在各自的 test 文件里，由 npm test 执行。
      这里断言那些测试文件确实存在 —— 否则有人删掉它们，
-     总门禁会静默失去这层覆盖而仍然报绿。 */
-  console.log('\n[自证] 覆盖门禁与 supersession 检查必须带各自的故障注入');
+     总门禁会静默失去这层覆盖而仍然报绿。
+
+     must：新增门禁时必须在这里登记。忘了登记，总门禁会继续报绿，
+     而那道门禁的故障注入其实已经没人跑了。 */
+  console.log('\n[自证] 每道新门禁都必须带自己的故障注入');
   for (const [label, file] of [
     ['覆盖门禁', 'notes-coverage.test.mjs'],
-    ['supersession 检查', 'notes-supersession.test.mjs']
+    ['supersession 检查', 'notes-supersession.test.mjs'],
+    ['文档预算', 'doc-budget.test.mjs'],
+    ['归档入口', 'archive-note.test.mjs']
   ]) {
     const full = join(PACKAGE_ROOT, 'tools', file);
     if (!existsSync(full)) {
