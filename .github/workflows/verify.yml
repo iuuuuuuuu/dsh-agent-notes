@@ -57,6 +57,29 @@ jobs:
       - name: 行为测试
         run: npm test
 
+      - name: 定位写到 vendored 的测试（并行 + 记录时序）
+        if: always()
+        run: |
+          # 已知：测试前 bb76d4d → 测试后 0e6628c，且逐文件串行、
+          # 两组最小并行都干净 —— 只有「全部并行」时才发生。
+          # 用 inotify 抓到写入时刻，同时把每个测试文件的开始/结束时间打出来，
+          # 时间窗对得上就能确定是哪个文件（及其子进程）。
+          git checkout -- skills/agent-notes 2>/dev/null || true
+          echo "== 起止时间基线 =="
+          date -u +%H:%M:%S.%N
+          ( command -v inotifywait >/dev/null && \
+            inotifywait -m -e modify,create,moved_to --timefmt '%H:%M:%S' \
+              --format '%T %w%f' skills/agent-notes 2>/dev/null | \
+            while read -r line; do echo "WRITE $line"; done ) &
+          WATCH=$!
+          sleep 1
+          npm test 2>&1 | grep -E "^(not ok|ok) " | head -0 || true
+          echo "npm test 结束: $(date -u +%H:%M:%S.%N)"
+          sleep 1
+          kill $WATCH 2>/dev/null || true
+          echo "== 最终摘要 =="
+          sha256sum skills/agent-notes/SKILL.md
+
       - name: 逐文件定位污染源
         if: always()
         run: |
