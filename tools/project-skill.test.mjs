@@ -85,7 +85,15 @@ test('project-skill: 项目多出来的文件不算落后，且不会被删', ()
     writeFileSync(extra, '# 项目自己的东西\n', 'utf8');
 
     const info = inspectProjectSkillCopy(dir);
-    assert.equal(info.behind, false, '多出文件不算落后');
+    /* 失败时把具体差异打出来。这条测试在 CI 上偶发失败过：
+       behind=true 意味着「内置副本与刚拷出来的项目副本不一致」——
+       而 makeProject 是 cpSync 自同一目录，正常绝不该不一致。
+       真出现时，第一现场信息（哪些文件不同）比一句断言值有用得多。 */
+    assert.equal(
+      info.behind, false,
+      `多出文件不算落后。changed=${JSON.stringify(info.changed)} `
+        + `missing=${JSON.stringify(info.missing)} extra=${JSON.stringify(info.extra)}`
+    );
     assert.ok(info.extra.includes('references/local-only.md'), '应记进 extra');
 
     syncProjectSkillCopy(dir, {});

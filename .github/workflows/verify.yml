@@ -58,6 +58,7 @@ jobs:
         run: npm test
 
       - name: 测试后的 vendored 摘要
+        if: always()
         run: |
           echo "== 测试后 =="
           sha256sum skills/agent-notes/SKILL.md
