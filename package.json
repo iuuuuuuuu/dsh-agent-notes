@@ -64,6 +64,8 @@
     "verify": "node tools/verify-plugin.mjs",
     "gate:fault-injection": "node tools/fault-injection.mjs",
     "notes:gate": "node tools/verify-notes.mjs",
+    "notes:coverage": "node tools/notes-coverage.mjs",
+    "hooks:install": "node tools/install-hooks.mjs",
     "evidence": "node tools/live-evidence.mjs",
     "check": "npm run verify && npm run notes:gate && npm test && npm run gate:fault-injection && npm run evidence",
     "sync:latest": "node tools/sync-upstream.mjs --latest"

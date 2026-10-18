@@ -264,6 +264,19 @@ try {
   expectGreen('format 复原', 'verify-agent-note-format.ts', work);
   expectGreen('archived 复原', 'verify-archived-agent-notes.ts', work);
 
+  /* 覆盖门禁（「该写而没写」）的自证。
+     它的三组故障注入在 tools/notes-coverage.test.mjs 里（恒通过、恒有笔记、
+     「查不到」返回 0），由 npm test 执行。这里断言那条测试文件确实存在 ——
+     否则有人删掉它，总门禁会静默失去这层覆盖而仍然报绿。 */
+  console.log('\n[自证] 覆盖门禁必须带自己的故障注入');
+  const coverageTest = join(PACKAGE_ROOT, 'tools', 'notes-coverage.test.mjs');
+  if (!existsSync(coverageTest)) {
+    console.error('  ✖ tools/notes-coverage.test.mjs 不存在 —— 覆盖门禁没有故障注入，不可信');
+    failures += 1;
+  } else {
+    console.log('  ✔ 覆盖门禁的故障注入在 tools/notes-coverage.test.mjs（由 npm test 执行）');
+  }
+
   if (failures > 0) {
     console.error(`\n故障注入未通过：${failures} 项。门禁不可信，先修门禁。`);
     process.exit(1);

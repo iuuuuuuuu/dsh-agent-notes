@@ -35,6 +35,8 @@ npm run verify                 # 包自检（含双语文档与 dsh 徽标门禁
 npm run sync:check             # 上游是否有更新
 npm run evidence               # 实机证据（需能找到 DSH；非标准位置设 DSH_DIST）
 npm run check                  # 上面五条串跑（含 notes:gate）
+npm run notes:coverage         # 覆盖门禁：该写笔记的改动必须同批带笔记
+npm run hooks:install          # 装 commit-msg 钩子（每个 clone 跑一次）
 npm run sync -- --yes          # 真合并上游（改完必须重跑 check）
 ```
 
@@ -71,6 +73,40 @@ node skills/agent-notes/scripts/verify-archived-agent-notes.ts
 要点：备选方案必写且**先写它最强的理由再否定**；`implemented` 的
 `## Decision` 用现在时；收益与代价都写；一篇笔记不得被改写成另一个决定
 （理由翻转就新开一篇并互链）。
+
+### 覆盖门禁：拦住「该写而没写」
+
+上面 `notes:gate` 的三条只验**已写笔记的格式**，对「改了代码却一篇没写」
+完全无感。本仓库连续 5 次改 `.github/workflows/verify.yml` 一篇没写，
+就是这么漏掉的 —— 当时在修紧急 CI 故障，注意力全在「让它绿」上，
+而「这次要不要留笔记」需要主动回想规范，多轮对话里必被挤掉。
+
+所以有第二道门禁，判定口径是**路径白名单**（不猜语义，只认路径）：
+
+| 命中即要求笔记 | 说明 |
+|---|---|
+| `lib/`、`tools/`、`.github/`、`skills/agent-notes/` | 行为 / 工具链 / 流程 / vendored |
+
+豁免（规范里的「机械改动严禁立笔记」）：`CHANGELOG.md`、`package.json`、
+`upstream.json`、`tools/upstream-manifest.json`。
+
+```sh
+npm run notes:coverage    # 查暂存区（钩子用的也是它）
+```
+
+**确实不需要笔记时**，在提交信息里加一行非空理由（空理由会被拒）：
+
+```
+Note-Skip: 只改了注释，无行为变化
+```
+
+双层挂载：本地 `commit-msg` 钩子（`npm run hooks:install` 装一次）给即时反馈，
+CI 是权威那道 —— 因为实测 `git commit --no-verify` 能绕过本地钩子。
+钩子挂 `commit-msg` 而非 `pre-commit`，是因为 `pre-commit` 阶段本次提交
+信息还不存在，读不到 `Note-Skip`，会把合法出口堵死。
+
+详细的取舍（为什么不用 husky、为什么保留 `Note-Skip` 口子、白名单的失效面）
+见 [.agents/notes/implemented/process/2026-10-18-notes-coverage-gate.md](.agents/notes/implemented/process/2026-10-18-notes-coverage-gate.md)。
 
 ## 上游
 

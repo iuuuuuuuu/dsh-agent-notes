@@ -27,7 +27,11 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 是笔记覆盖门禁需要的：它要拿 base sha 做 diff，
+      # 默认的 depth 1 拿不到上一个 commit，门禁会退化成「查不到」而报 2。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
@@ -45,6 +49,28 @@ jobs:
 
       - name: 笔记门禁
         run: npm run notes:gate
+
+      # 覆盖门禁：该写笔记的改动必须同批带笔记。
+      #
+      # 上面那条 notes:gate 只验「已写的笔记格式对不对」，从不检查
+      # 「该写而没写」—— 本仓库连续 5 次改 CI 流程却一篇没写，就是这么漏的。
+      #
+      # 本地有 commit-msg 钩子先拦一道，但钩子可被 --no-verify 绕过，
+      # 所以远端这一道才是权威（实测 --no-verify 确实能绕过本地钩子）。
+      #
+      # 取 base sha：push 事件用 before（上一个 HEAD），PR 用 base.sha，
+      # 手动触发没有 base 就退化成只查 HEAD 这一个提交。
+      - name: 笔记覆盖门禁
+        env:
+          NOTES_COVERAGE_BASE: ${{ github.event.before || github.event.pull_request.base.sha || '' }}
+        run: |
+          if [ -z "$NOTES_COVERAGE_BASE" ] || \
+             [ "$NOTES_COVERAGE_BASE" = "0000000000000000000000000000000000000000" ]; then
+            echo "没有可用的 base sha，改为只检查 HEAD 这一个提交。"
+            node tools/notes-coverage.mjs --range HEAD~1..HEAD
+          else
+            node tools/notes-coverage.mjs --range "$NOTES_COVERAGE_BASE..HEAD"
+          fi
 
       # 跑测试前后各打一次摘要，并在测试后**断言 vendored 目录没被改**。
       #
