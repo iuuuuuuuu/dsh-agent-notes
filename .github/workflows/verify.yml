@@ -57,6 +57,20 @@ jobs:
       - name: 行为测试
         run: npm test
 
+      - name: 逐文件定位污染源
+        if: always()
+        run: |
+          # 已经确认：测试前 SKILL.md 是 bb76d4d（与清单一致），
+          # 测试后变成 0e6628c（旧版），即 npm test 期间真实副本被改写。
+          # 这里逐个测试文件单独跑，每跑完一个就记一次摘要，
+          # 第一个让摘要变了的文件就是污染源。
+          for f in tools/*.test.mjs; do
+            git checkout -- skills/agent-notes 2>/dev/null || true
+            node --test "$f" >/dev/null 2>&1 || true
+            SUM=$(sha256sum skills/agent-notes/SKILL.md | cut -c1-16)
+            echo "$(basename "$f") -> $SUM"
+          done
+
       - name: 测试后的 vendored 摘要
         if: always()
         run: |
