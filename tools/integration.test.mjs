@@ -21,6 +21,14 @@ import { test } from 'node:test';
 
 import { apply as applyPlugin } from '../lib/index.js';
 
+/** mount 造出来的技能沙箱，进程退出时统一删除。 */
+const SKILL_SANDBOXES = [];
+process.on('exit', () => {
+  for (const dir of SKILL_SANDBOXES) {
+    try { rmSync(dir, { recursive: true, force: true }); } catch { /* 清理失败不影响结论 */ }
+  }
+});
+
 /**
  * 取真实的 Cordis `Context`。
  *
@@ -100,6 +108,17 @@ function createHost() {
  */
 function mount(options) {
   const { ctx, mode } = createHost();
+  /* 自更新目标必须指到沙箱（实测踩过，代价极高）：
+     apply() 里 scheduleSkillUpdate 是 fire-and-forget，默认目标是**真实的**
+     skills/agent-notes。CI 上曾因此把刚检出的新版 vendored 文件覆盖成旧版
+     （本仓库的 .synced-version 未被 git 跟踪，全新 clone 没有它 → 快速路径
+     失效 → 真去拉 jsDelivr @main 的 21 个文件；而推送瞬间 CDN 上的 @main
+     仍指向上一个 commit），导致后续 sync-upstream 的 --check 报「变更 6」。
+     这里每个测试一份沙箱，不依赖时序巧合。 */
+  const skillSandbox = mkdtempSync(join(tmpdir(), 'an-int-skill-'));
+  /* 进程退出时统一清理：这些沙箱是 mount 内部造出来的，测试拿不到它，
+     没法各自 finally 删；攒到退出时删，避免 /tmp 里堆垃圾。 */
+  SKILL_SANDBOXES.push(skillSandbox);
   const registered = {
     providers: [],
     tools: [],
@@ -188,8 +207,12 @@ function mount(options) {
         if (index >= 0) current.splice(index, 1);
       };
     };
-    applyPlugin(ctx, { stateFile: options.stateFile, ...(options.config ?? { enabled: true }) });
-    return { ctx, registered, mode };
+    applyPlugin(ctx, {
+      stateFile: options.stateFile,
+      skillDir: skillSandbox,
+      ...(options.config ?? { enabled: true })
+    });
+    return { ctx, registered, mode, skillSandbox };
   }
 
   // 承接器模式：把服务直接挂到 ctx 上，并提供 inject / effect / on 的同语义实现。
@@ -209,8 +232,12 @@ function mount(options) {
     registered.listeners.set(event, list);
     return () => {};
   };
-  applyPlugin(ctx, { stateFile: options.stateFile, ...(options.config ?? { enabled: true }) });
-  return { ctx, registered, mode };
+  applyPlugin(ctx, {
+    stateFile: options.stateFile,
+    skillDir: skillSandbox,
+    ...(options.config ?? { enabled: true })
+  });
+  return { ctx, registered, mode, skillSandbox };
 }
 
 /**

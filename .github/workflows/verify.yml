@@ -46,8 +46,15 @@ jobs:
       - name: 笔记门禁
         run: npm run notes:gate
 
-      # 跑测试前后各打一次摘要：用来定位「是否有测试在后台改写 vendored 副本」。
-      # 这次是排查手段，成本几毫秒，留着当下次同类问题的仪表。
+      # 跑测试前后各打一次摘要，并在测试后**断言 vendored 目录没被改**。
+      #
+      # 这不是临时排查残留，是针对一类真实缺陷的永久门禁：
+      # 测试跑的是插件真实代码，任何 fire-and-forget 的副作用（如
+      # scheduleSkillUpdate 拉远端覆盖技能副本）都可能在测试结束后仍在写盘。
+      # 实测发生过：CI 检出后 vendored 是新的，跑完 npm test 变成旧的，
+      # 随后的 sync-upstream --check 报「变更 6」整片变红 —— 而本地因为
+      # .synced-version 存在、CDN 也已是新版，从不复现，极难查。
+      # 把「测试不得改动工作区」变成显式断言，下次一眼就能看见。
       - name: 测试前的 vendored 摘要
         run: |
           echo "== 测试前 =="
@@ -57,62 +64,18 @@ jobs:
       - name: 行为测试
         run: npm test
 
-      - name: 定位写到 vendored 的测试（并行 + 记录时序）
-        if: always()
-        run: |
-          # 已知：测试前 bb76d4d → 测试后 0e6628c，且逐文件串行、
-          # 两组最小并行都干净 —— 只有「全部并行」时才发生。
-          # 用 inotify 抓到写入时刻，同时把每个测试文件的开始/结束时间打出来，
-          # 时间窗对得上就能确定是哪个文件（及其子进程）。
-          git checkout -- skills/agent-notes 2>/dev/null || true
-          echo "== 起止时间基线 =="
-          date -u +%H:%M:%S.%N
-          ( command -v inotifywait >/dev/null && \
-            inotifywait -m -e modify,create,moved_to --timefmt '%H:%M:%S' \
-              --format '%T %w%f' skills/agent-notes 2>/dev/null | \
-            while read -r line; do echo "WRITE $line"; done ) &
-          WATCH=$!
-          sleep 1
-          npm test 2>&1 | grep -E "^(not ok|ok) " | head -0 || true
-          echo "npm test 结束: $(date -u +%H:%M:%S.%N)"
-          sleep 1
-          kill $WATCH 2>/dev/null || true
-          echo "== 最终摘要 =="
-          sha256sum skills/agent-notes/SKILL.md
-
-      - name: 逐文件定位污染源
-        if: always()
-        run: |
-          # 已经确认：测试前 SKILL.md 是 bb76d4d（与清单一致），
-          # 测试后变成 0e6628c（旧版），即 npm test 期间真实副本被改写。
-          # 这里逐个测试文件单独跑，每跑完一个就记一次摘要，
-          # 第一个让摘要变了的文件就是污染源。
-          for f in tools/*.test.mjs; do
-            git checkout -- skills/agent-notes 2>/dev/null || true
-            node --test "$f" >/dev/null 2>&1 || true
-            SUM=$(sha256sum skills/agent-notes/SKILL.md | cut -c1-16)
-            echo "$(basename "$f") -> $SUM"
-          done
-          echo "== 上面全部干净的话，说明是并行竞态；再验最小组合 =="
-          git checkout -- skills/agent-notes 2>/dev/null || true
-          node --test tools/self-update.test.mjs tools/project-skill.test.mjs >/dev/null 2>&1 || true
-          echo "self-update + project-skill 并行 -> $(sha256sum skills/agent-notes/SKILL.md | cut -c1-16)"
-          git checkout -- skills/agent-notes 2>/dev/null || true
-          node --test tools/self-update.test.mjs tools/sync-upstream.test.mjs >/dev/null 2>&1 || true
-          echo "self-update + sync-upstream 并行 -> $(sha256sum skills/agent-notes/SKILL.md | cut -c1-16)"
-          echo "== 谁在测试期间写过这个文件：看 mtime =="
-          git checkout -- skills/agent-notes 2>/dev/null || true
-          npm test >/dev/null 2>&1 || true
-          stat -c '%y %n' skills/agent-notes/SKILL.md || true
-
-      - name: 测试后的 vendored 摘要
+      - name: 测试不得改动工作区
         if: always()
         run: |
           echo "== 测试后 =="
           sha256sum skills/agent-notes/SKILL.md
-          echo "== git 视角的改动 =="
-          git status --porcelain || true
-          git --no-pager diff --stat || true
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::测试改动了工作区 —— 说明有测试把副作用写到了真实目录。"
+            git --no-pager diff --stat
+            git --no-pager diff
+            exit 1
+          fi
+          echo "✔ 工作区干净，测试没有写到真实目录"
 
       - name: 故障注入
         run: npm run gate:fault-injection

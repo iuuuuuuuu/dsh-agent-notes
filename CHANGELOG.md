@@ -5,6 +5,27 @@
 
 ## [Unreleased]
 
+### 修复
+
+- **`npm test` 会改写真实的 `skills/agent-notes`，导致 CI 必红而本地全绿**
+  - 现象：CI 报 `--check` 失败「相同 15｜变更 6」，且那 6 个文件正是刚合并的，
+    行数还是合并前的值；本地 `npm test`、干净 clone、`sync:check` 全绿
+  - 根因：`apply()` 里 `scheduleSkillUpdate()` 是 fire-and-forget 且**不传
+    `targetDir`**，默认目标就是真实 `skills/agent-notes`；而
+    `integration.test.mjs` 真的调用了 `applyPlugin`，等于跑一次真实自更新
+  - 本地断链、CI 打通是两个差异叠加：仓库里未被 git 跟踪的
+    `skills/agent-notes/.synced-version` 让本地走「版本相同」快速路径什么都不拉；
+    CI 全新 clone 没有它 → 全量拉 21 个文件，而推送瞬间 jsDelivr 上 `@main`
+    仍指向上一个 commit → 旧内容覆盖刚检出的新版
+  - 修法：`apply()` 接受 `config.skillDir` 并透传为 `targetDir`（生产不传，
+    行为不变）；`integration.test.mjs` 每个 `mount()` 开一个技能沙箱；
+    `self-update.test.mjs` 的「立即返回」测试同样补上 `targetDir`
+  - CI 新增永久门禁**测试不得改动工作区**：`npm test` 后断言
+    `git status --porcelain` 为空，非空打出完整 diff 并 `exit 1`
+  - 故障注入确认（非推断）：传 `skillDir` → `bb76d4d` 保持新版；去掉注入
+    且移走 `.synced-version` 模拟 CI → `0e6628c` 被覆盖成旧版，
+    与 CI 报的 6 个文件、旧摘要逐字吻合
+
 ## [0.4.1] - 2026-10-18
 
 > 版本号说明：`0.4.0` 由 `.github/workflows/upstream-sync.yml` 的自动同步
