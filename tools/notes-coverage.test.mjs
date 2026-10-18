@@ -485,6 +485,57 @@ test('notes-coverage: 嵌套的流程清单项不该被报未归类（.github / 
   }
 });
 
+test('notes-coverage: 中文路径必须被识别（git 默认会转义它们）', () => {
+  /* 实测发现的真缺陷，不是理论风险：
+     不带 `-z` 时 git 把非 ASCII 路径转义成 `"lib/\344\270\255\346\226\207.js"`
+     并加引号 ⇒ `startsWith('lib/')` 失败 ⇒ **中文路径的源码改动被静默放行**。
+
+     这条 flag 是我照着 deepseek-harness 的 change-scope.ts 补的。
+     我最初判定它「不必要」，理由写的是「我没能构造出受影响的场景」——
+     那是错误的判据：防御性 flag 的价值恰恰在于防那些罕见的配置，
+     而这条一测就发现是真会踩到的。 */
+  const dir = makeRepoWithGate();
+  try {
+    mkdirSync(join(dir, 'lib'), { recursive: true });
+    writeFileSync(join(dir, 'lib', '中文模块.js'), 'export const a = 1;\n', 'utf8');
+    writeFileSync(join(dir, 'lib', '有 空格.js'), 'export const b = 2;\n', 'utf8');
+    /* 刻意不放双引号：Windows 文件名不允许 `"`，测试会 ENOENT。
+       中文 + 空格已经能覆盖 git 的路径转义问题（非 ASCII 触发 C 风格转义）。 */
+    execFileSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+
+    const r = spawnSync(NODE, [join(dir, 'tools', 'notes-coverage.mjs')], {
+      cwd: dir, encoding: 'utf8', windowsHide: true, env: { ...process.env }
+    });
+    assert.equal(r.status, 1, `中文/空格/引号路径的源码改动必须被拦下，实际 exit=${r.status}`);
+    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+    assert.match(out, /中文模块\.js/, '诊断里必须出现原始中文路径（不能被转义）');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes-coverage: 中文路径的笔记同样算「带了笔记」', () => {
+  /* 反向：笔记文件名也可能是中文。若路径被转义，
+     `startsWith('.agents/notes/')` 与 `endsWith('.md')` 都会失败 ⇒
+     人会看到「明明写了笔记却被拦」。 */
+  const dir = makeRepoWithGate();
+  try {
+    mkdirSync(join(dir, 'lib'), { recursive: true });
+    writeFileSync(join(dir, 'lib', '中文模块.js'), 'export const a = 1;\n', 'utf8');
+    mkdirSync(join(dir, '.agents', 'notes', 'implemented', 'process'), { recursive: true });
+    writeFileSync(join(dir, '.agents', 'notes', 'implemented', 'process', '2026-01-01-中文笔记.md'),
+      '# Agent Note: 中文\n\nStatus: implemented\n', 'utf8');
+    execFileSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+
+    const r = spawnSync(NODE, [join(dir, 'tools', 'notes-coverage.mjs')], {
+      cwd: dir, encoding: 'utf8', windowsHide: true, env: { ...process.env }
+    });
+    assert.equal(r.status, 0, `中文文件名的笔记必须被认作带了笔记，实际 exit=${r.status}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('notes-coverage: 配置文件可覆盖自动检测', () => {
   /* 自动检测不是万能的（比如把源码放在名字奇怪、暂时只有非源码文件的目录里）。
      这时用 .agents/notes-coverage.json 显式声明 —— 但**整体替换**而非叠加，
