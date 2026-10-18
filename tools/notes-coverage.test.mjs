@@ -536,6 +536,54 @@ test('notes-coverage: 中文路径的笔记同样算「带了笔记」', () => {
   }
 });
 
+test('notes-coverage: 仓库根目录的源码文件也必须受管', () => {
+  /* 实测确认的静默漏检：`detectSourceDirs` 只按「顶层目录」分组，
+     根目录下的文件不属于任何目录，于是 `index.js` / `main.py`
+     **完全不被识别为源码**。
+
+     单文件项目（`index.js` + `package.json`）很常见 —— 在那种仓库里
+     改代码不写笔记会被静默放行。 */
+  const dir = makeRepoWithGate();
+  try {
+    writeFileSync(join(dir, 'index.js'), 'export const x = 1;\n', 'utf8');
+    writeFileSync(join(dir, 'main.py'), 'print(1)\n', 'utf8');
+    execFileSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+    execFileSync('git', ['commit', '-q', '-m', 'add root sources'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+
+    writeFileSync(join(dir, 'index.js'), 'export const x = 2;\n', 'utf8');
+    execFileSync('git', ['add', 'index.js'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+
+    const r = spawnSync(NODE, [join(dir, 'tools', 'notes-coverage.mjs')], {
+      cwd: dir, encoding: 'utf8', windowsHide: true, env: { ...process.env }
+    });
+    assert.equal(r.status, 1, `根目录源码文件改动必须被拦下，实际 exit=${r.status}`);
+    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+    assert.match(out, /index\.js/, '必须点名 index.js');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes-coverage: 根目录的非源码文件不受管', () => {
+  /* 反向：根目录的 README、LICENSE 不该被误判成源码 ——
+     否则每改一次文档都要写笔记，噪音会让人绕过门禁。 */
+  const dir = makeRepoWithGate();
+  try {
+    for (const name of ['README.md', 'LICENSE']) {
+      writeFileSync(join(dir, name), '# x\n', 'utf8');
+    }
+    execFileSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+    execFileSync('git', ['commit', '-q', '-m', 'add docs'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+
+    writeFileSync(join(dir, 'README.md'), '# x\n\nmore\n', 'utf8');
+    execFileSync('git', ['add', 'README.md'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+
+    assert.equal(gateIn(dir), 0, '根目录文档改动不该要求笔记');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('notes-coverage: 配置文件可覆盖自动检测', () => {
   /* 自动检测不是万能的（比如把源码放在名字奇怪、暂时只有非源码文件的目录里）。
      这时用 .agents/notes-coverage.json 显式声明 —— 但**整体替换**而非叠加，

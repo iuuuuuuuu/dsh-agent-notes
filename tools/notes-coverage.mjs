@@ -424,7 +424,34 @@ function isManaged(path, rules) {
   if (PROCESS_FILES.includes(path)) return true;
   if (hitDirEntry(path, PROCESS_FILES)) return true;
   if (MANIFEST_FILES.includes(path)) return true;
+  /* 根目录的源码文件（单文件项目常见）：index.js、main.py… */
+  if ((rules.rootSourceFiles ?? []).includes(path)) return true;
   return rules.sourceDirs.some((dir) => path.startsWith(`${dir}/`));
+}
+
+/**
+ * 仓库**根目录**下、直接被 git 跟踪的源码文件。
+ *
+ * 单文件项目（`index.js` + `package.json`、`main.py`、`app.rb`）很常见，
+ * 而它们不属于任何「顶层目录」，`detectSourceDirs()` 看不见。
+ * 实测确认过这个洞：只改根目录的 `index.js`，门禁报
+ * 「改动未命中受管路径」并放行 —— 那是一个**完全静默的漏检**。
+ *
+ * 这里把它们单独收出来，按「文件」而非「目录」受管。
+ *
+ * @param {string[]} trackedFiles 仓库里被 git 跟踪的文件（相对路径）。
+ * @returns {string[]} 根目录源码文件名（去重、排序）。
+ */
+function detectRootSourceFiles(trackedFiles) {
+  const hit = new Set();
+  for (const path of trackedFiles) {
+    /* 只收根目录的：路径里没有 `/`。 */
+    if (path.includes('/')) continue;
+    const dot = path.lastIndexOf('.');
+    if (dot < 0) continue;
+    if (SOURCE_EXTENSIONS.includes(path.slice(dot).toLowerCase())) hit.add(path);
+  }
+  return [...hit].sort();
 }
 
 /**
@@ -614,6 +641,7 @@ if (config === undefined) {
 
 /* 生效规则：配置整体替换默认值；源码目录不配则自动检测。 */
 let detected = [];
+let rootSourceFiles = [];
 if (config.sourceDirs === undefined) {
   const listed = git(['ls-files']);
   if (!listed.ok) {
@@ -621,11 +649,15 @@ if (config.sourceDirs === undefined) {
     console.error('  这不是「已合规」—— 本次检查无效，退出码 2。');
     process.exit(2);
   }
-  detected = detectSourceDirs(splitLines(listed.out));
+  const tracked = splitLines(listed.out);
+  detected = detectSourceDirs(tracked);
+  /* 根目录的源码文件不属于任何顶层目录，单独收 —— 单文件项目很常见。 */
+  rootSourceFiles = detectRootSourceFiles(tracked);
 }
 const noteDirs = config.noteDirs ?? ['.agents/notes'];
 const rules = {
   sourceDirs: config.sourceDirs ?? detected,
+  rootSourceFiles,
   exemptFiles: [...DEFAULT_EXEMPT_FILES, ...(config.exemptFiles ?? [])],
   managedFiles: config.managedFiles ?? [],
   noteDirs

@@ -114,15 +114,46 @@ test('doc-budget: 清单损坏 → 退出码 2', () => {
   }
 });
 
-test('doc-budget: --update 把当前值写回清单', () => {
-  const dir = makeRepo({ 'AGENTS.md': 5 });
+test('doc-budget: --update 只在超预算时放宽，绝不收紧', () => {
+  /* 实测踩过的陷阱：原实现无条件把预算设成当前值，于是 2100 → 2080，
+     余量归零 —— 再加一个字就红。而它的提示写着「放宽预算需要有理由」，
+     叫「放宽」实际做「收紧到极限」，使用者会以为自己在松绑。 */
+  const dir = makeRepo({ 'AGENTS.md': 100 });
+  try {
+    writeFileSync(join(dir, 'AGENTS.md'), '短文档', 'utf8');
+    assert.equal(run(dir, ['--update']).code, 0, '--update 应成功退出');
+    const after = JSON.parse(readFileSync(join(dir, 'tools', 'doc-budget.json'), 'utf8'));
+    assert.equal(after.budgets['AGENTS.md'], 100, '在预算内时不得收紧（必须保持 100，不能变成 3）');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('doc-budget: --update 在超预算时把预算提到当前值', () => {
+  const dir = makeRepo({ 'AGENTS.md': 3 });
   try {
     writeFileSync(join(dir, 'AGENTS.md'), '十个字符的文档内容', 'utf8');
+    assert.equal(run(dir).code, 1, '前置：应超预算');
     assert.equal(run(dir, ['--update']).code, 0, '--update 应成功');
     const after = JSON.parse(readFileSync(join(dir, 'tools', 'doc-budget.json'), 'utf8'));
-    assert.equal(after.budgets['AGENTS.md'], 9, '应写回实际计数（9 个中文字符）');
-    /* 写回之后再检查应当绿 —— 证明 --update 真的放宽了预算。 */
+    assert.equal(after.budgets['AGENTS.md'], 9, '应放宽到当前值 9');
     assert.equal(run(dir).code, 0, '放宽后应通过');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('doc-budget: --update 不动未超预算的文件', () => {
+  /* 一次放宽不该顺手把别的文件也收紧 —— 那会让「我放宽 A」意外
+     把 B 的余量清零，下次改 B 就莫名其妙红了。 */
+  const dir = makeRepo({ 'A.md': 100, 'B.md': 2 });
+  try {
+    writeFileSync(join(dir, 'A.md'), '短', 'utf8');
+    writeFileSync(join(dir, 'B.md'), '五个字符内容', 'utf8');
+    assert.equal(run(dir, ['--update']).code, 0, '--update 应成功');
+    const after = JSON.parse(readFileSync(join(dir, 'tools', 'doc-budget.json'), 'utf8'));
+    assert.equal(after.budgets['A.md'], 100, 'A 在预算内，不得被改动');
+    assert.equal(after.budgets['B.md'], 6, 'B 超预算，应放宽到 6');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

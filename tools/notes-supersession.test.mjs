@@ -108,6 +108,41 @@ test('supersession: 用相对链接指向既有笔记 → 通过', () => {
   }
 });
 
+test('supersession: markdown 的三种合法链接写法都要认', () => {
+  /* 实测确认过：原正则只认 `[a](b.md)`，漏掉后两种合法写法 ——
+     于是「写了链接却被判没有」，而提示让人去加链接，他明明已经加了。
+     这类误报最伤信任：人会开始怀疑门禁在乱报。 */
+  const forms = [
+    ['普通', '[2026-01-01-old.md](2026-01-01-old.md)'],
+    ['尖括号包裹（路径含空格时必须这样写）', '[x](<2026-01-01-old.md>)'],
+    ['带标题', '[x](2026-01-01-old.md "旧笔记")'],
+    ['带锚点', '[x](2026-01-01-old.md#problem)']
+  ];
+  for (const [label, link] of forms) {
+    const dir = makeRepo();
+    try {
+      stageNote(dir, '.agents/notes/implemented/process/2026-02-01-new.md',
+        `# Agent Note: new\n\nStatus: implemented\n\n见 ${link}。\n`);
+      assert.equal(run(dir).code, 0, `${label} 的写法应被认作相对链接`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
+test('supersession: 外部 URL 不算「与既有笔记的关系」', () => {
+  /* 反向：链接到外网不该被当成「查过既有笔记」。
+     否则一句 `见 [文档](https://example.com/x.md)` 就能过门禁。 */
+  const dir = makeRepo();
+  try {
+    stageNote(dir, '.agents/notes/implemented/process/2026-02-01-new.md',
+      '# Agent Note: new\n\nStatus: implemented\n\n见 [外部](https://example.com/x.md)。\n');
+    assert.equal(run(dir).code, 1, '外部 URL 不能充当与既有笔记的关系');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('supersession: Independent 声明带理由 → 通过', () => {
   const dir = makeRepo();
   try {

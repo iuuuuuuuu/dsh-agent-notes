@@ -109,13 +109,31 @@ for (const [file, limit] of Object.entries(budgets)) {
 const over = rows.filter((row) => row.status !== 'ok').length;
 
 if (update) {
+  /* 只**放宽**，绝不收紧。
+     实测踩过的陷阱：原实现无条件把预算设成当前值，于是 2100 → 2080，
+     余量归零 —— 再加一个字就红。而它的提示写着「放宽预算需要有理由」，
+     叫「放宽」实际做「收紧到极限」，使用者会以为自己在松绑。
+     现在只有真正超预算的文件才被提到当前值；其余原样保留。 */
   const next = { ...budgets };
+  const raised = [];
   for (const row of rows) {
-    if (row.actual !== undefined) next[row.file] = row.actual;
+    if (row.actual === undefined) continue;
+    if (row.actual > row.limit) {
+      next[row.file] = row.actual;
+      raised.push(`${row.file}: ${row.limit} → ${row.actual}`);
+    }
   }
+
+  if (raised.length === 0) {
+    console.log('没有文件超出预算，无需放宽。');
+    console.log('（--update 只放宽，不会把预算收紧到当前值 —— 那会让余量归零。）');
+    process.exit(0);
+  }
+
   writeFileSync(MANIFEST, `${JSON.stringify({ budgets: next }, null, 2)}\n`, 'utf8');
-  console.log('已把当前字数写回 tools/doc-budget.json。');
-  console.log('⚠ 放宽预算需要有理由 —— 它存在的意义就是让「再加一句」成为一次取舍。');
+  console.log('已放宽以下预算：');
+  for (const line of raised) console.log(`  ${line}`);
+  console.log('⚠ 放宽需要有理由 —— 它存在的意义就是让「再加一句」成为一次取舍。');
   process.exit(0);
 }
 
