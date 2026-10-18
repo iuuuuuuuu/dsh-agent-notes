@@ -81,18 +81,24 @@ node skills/agent-notes/scripts/verify-archived-agent-notes.ts
 就是这么漏掉的 —— 当时在修紧急 CI 故障，注意力全在「让它绿」上，
 而「这次要不要留笔记」需要主动回想规范，多轮对话里必被挤掉。
 
-所以有第二道门禁，判定口径是**路径白名单**（不猜语义，只认路径）：
+所以有第二道门禁，判定口径是**自动检测仓库结构**（不写死任何路径）：
 
-| 命中即要求笔记 | 说明 |
+| 受管 | 说明 |
 |---|---|
-| `lib/`、`tools/`、`.github/`、`skills/agent-notes/` | 行为 / 工具链 / 流程 / vendored |
-| `AGENTS.md`、`CLAUDE.md` | 流程规范本身（改了它就是改规则） |
+| 含源码后缀的顶层目录 | 自动检测：目录里有 `.dart`/`.rs`/`.go`/`.ts`… 就算源码 |
+| 仓库根清单（`pubspec.yaml`、`Cargo.toml`、`go.mod`…）| 改依赖约束/工具链 |
+| `AGENTS.md`、`CLAUDE.md`、`.github/workflows/` | 流程规范本身 |
 
-豁免（规范里的「机械改动严禁立笔记」）：`CHANGELOG.md`、`package.json`、
-`upstream.json`、`tools/upstream-manifest.json`。
+豁免：`docs/`（计划与工作日志是**过程**，不是**决策**；纳入会让笔记树迅速
+注水）、锁文件、`package.json`（日常发布只改版本号，属机械改动）。
 
-白名单之外的新顶层目录（如以后的 `apps/`）会打一条 `⚠` 提示，因为白名单
-只能覆盖已想到的路径 —— 它不会自动失声，但也不会自动生效，看到就该补清单。
+需要额外声明时，在仓库根加 `.agents/notes-coverage.json`：
+
+```json
+{ "sourceDirs": ["odd-dir"], "exemptFiles": ["some.json"], "managedFiles": ["foo.yaml"] }
+```
+
+检测不出来的目录会打 `⚠` 提示，不会静默放行。
 
 ```sh
 npm run notes:coverage    # 查暂存区（钩子用的也是它）

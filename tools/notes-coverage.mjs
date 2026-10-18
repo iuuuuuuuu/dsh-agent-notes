@@ -44,9 +44,10 @@
  *
  * ## 用法
  *
- *   node tools/notes-coverage.mjs                 # 检查暂存区（pre-commit 用）
- *   node tools/notes-coverage.mjs --range A..B    # 检查提交区间（CI 用）
- *   node tools/notes-coverage.mjs --staged        # 显式指定暂存区
+ *   node <脚本路径>                      # 检查暂存区（提交钩子用）
+ *   node <脚本路径> --range A..B         # 检查提交区间（CI 用）
+ *   node <脚本路径> --config <file>      # 显式指定配置（默认读仓库根的
+ *                                        #   .agents/notes-coverage.json）
  *
  * 环境变量：
  *   NOTES_COVERAGE_BASE   与 --range 等价（CI 里传 base sha 更方便）
@@ -55,47 +56,116 @@
  * **2 也必须算失败** —— 「查不到」绝不能当成「没问题」。
  */
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 
 /**
- * 命中即要求配笔记的路径**前缀**（目录）。
+ * 默认的「受管路径」判定：**靠仓库自身的结构自动推断，不写死任何路径**。
  *
- * 顺序无关，逐个前缀判断是否命中。
+ * 为什么必须自动推断：这道门禁要装进各种各样的仓库 —— Node、Flutter+Rust、
+ * 纯脚本仓、多语言 monorepo。把 `lib/`、`tools/` 写死只对某一个仓库成立，
+ * 换到 `src/`、`app/`、`crates/`、`packages/` 就静默失效，而那正是
+ * 「看起来有门禁、其实没在管」的最坏形态。
+ *
+ * 推断依据是**仓库里存在的文件**，不是猜测：
+ *
+ * 1. **源码目录**：顶层目录下若存在常见源码后缀的文件，视为源码目录
+ *    （`lib/`、`src/`、`app/`、`crates/`、`packages/` 等都会被认出来）。
+ * 2. **配置文件**：仓库根的清单/配置（`package.json`、`pubspec.yaml`、
+ *    `Cargo.toml`、`go.mod`…）改动属于工具链变更。
+ * 3. **流程文件**：`AGENTS.md` / `CLAUDE.md` / `.github/` 定义规则本身。
+ * 4. **文档目录**：`docs/` 下的**计划与工作日志**不算决策笔记的替代品，
+ *    所以默认**不**要求笔记（见 EXEMPT_PREFIXES），否则每天的计划更新
+ *    都会被逼着立一篇，噪音立刻淹掉真信号。
+ *
+ * 这个默认值可以被配置文件覆盖（见 loadConfig），覆盖时**整体替换**而不是
+ * 叠加 —— 半叠加最容易产生「我以为配了、其实没配」的错觉。
  */
-const MANAGED_PREFIXES = Object.freeze([
-  'lib/',
-  'tools/',
-  '.github/',
-  'skills/agent-notes/'
+const DEFAULT_SOURCE_DIR_HINTS = Object.freeze([
+  'lib', 'src', 'app', 'apps', 'packages', 'crates', 'core',
+  'test', 'tests', 'spec', 'scripts', 'tools', 'bin',
+  'android', 'ios', 'macos', 'windows', 'linux', 'web'
 ]);
 
 /**
- * 命中即要求配笔记的**单个文件**。
+ * 常见源码文件后缀。用来判断某个顶层目录里到底有没有代码。
  *
- * `AGENTS.md` 必须在这里：它定义了「什么算非平凡改动」，改它就是改流程。
- * 而 `.github/` 在白名单里、`AGENTS.md` 却不在，是没道理的 ——
- * 两者都是「围着代码转的流程」，只覆盖一半等于给流程改动留了后门
- * （实测确认：改 AGENTS.md 原先不要求任何笔记）。
- *
- * `README*.md` 故意不在：那是面向使用者的说明，改文档不属于非平凡改动。
+ * 刻意包含非 JS 生态：这道门禁要在 Flutter/Dart、Rust、Go、Kotlin 仓库里工作。
  */
-const MANAGED_FILES = Object.freeze([
+const SOURCE_EXTENSIONS = Object.freeze([
+  '.dart', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs',
+  '.rs', '.go', '.kt', '.java', '.swift', '.c', '.cc', '.cpp', '.h', '.hpp',
+  '.cs', '.rb', '.php', '.py', '.scala', '.ex', '.exs', '.lua', '.sh'
+]);
+
+/**
+ * 仓库根上的清单/配置文件：改了它们等于改工具链或依赖约束。
+ *
+ * **但不包含 `package.json`**：那是版本号与依赖清单，日常发布只改版本号，
+ * 属于规范明令「严禁立笔记」的机械改动。把它无条件受管会让每次发版
+ * 都被逼着写一篇注水笔记 —— 实测确认这是通用化第一版引入的回归。
+ *
+ * 判断依据是「这个文件一改，行为/架构/契约会变吗」：
+ *   `pubspec.yaml` 的依赖约束、`Cargo.toml` 的 feature 会影响构建结果 → 受管
+ *   `package.json` 的 `version` 字段 → 不受管
+ * 若某个仓库确实希望 `package.json` 也受管，在 `.agents/notes-coverage.json`
+ * 里用 `exemptFiles` 反过来控制并不方便，所以更好的做法是允许
+ * `managedFiles` 配置（见 loadConfig）。
+ */
+const MANIFEST_FILES = Object.freeze([
+  'pnpm-workspace.yaml', 'tsconfig.json',
+  'pubspec.yaml',
+  'Cargo.toml',
+  'go.mod',
+  'pyproject.toml', 'requirements.txt', 'setup.py',
+  'build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts',
+  'Podfile', 'Gemfile', 'composer.json', 'CMakeLists.txt'
+]);
+
+/**
+ * 流程文件：定义「什么算改动」的规则本身。改它必须解释。
+ */
+const PROCESS_FILES = Object.freeze([
   'AGENTS.md',
-  'CLAUDE.md'
+  'CLAUDE.md',
+  '.github/workflows'
 ]);
 
 /**
- * 受管路径内的豁免项（精确匹配）。
+ * 明确**不要求**笔记的路径前缀。
  *
- * 只豁免**机械产物**：同步清单是 `sync-upstream` 写出来的哈希表，
+ * `docs/` 是主要一条：本类仓库习惯把计划、工作日志、排查记录写在
+ * `docs/notes/` 下，那是**过程**不是**决策**。若把 docs 也纳入受管，
+ * 每天的计划更新都会被逼着立一篇决策笔记，几天之内整个笔记树就被注水，
+ * 人开始用 `--no-verify`，门禁等于废掉。
+ *
+ * 这条判断有实测依据：在 sourin-flutter-spike 里统计最近 30 次提交，
+ * 只有 2 次带笔记，但其中大部分是 `docs(round-66): ...` 改计划文件 ——
+ * 那些本来就不该立决策笔记。真正漏的是改了 `lib/` 却没记的那几次。
+ */
+const EXEMPT_PREFIXES = Object.freeze([
+  '.agents/',
+  'docs/',
+  '.probe/',
+  'node_modules/',
+  'vendor/',
+  'third_party/'
+]);
+
+/**
+ * 受管路径内的豁免项（精确匹配）—— 各仓库可通过配置追加。
+ *
+ * 只豁免**机械产物**：例如某个同步工具写出来的哈希清单，
  * 为它写笔记是纯噪音。
  *
- * 注意这里**只放生成物**，不放源文件 —— `tools/sync-upstream.mjs` 是工具链
- * 源码，改它必须写笔记。（我第一版把它误放进来，等于给「改门禁不写笔记」
- * 留了后门，正是本门禁要堵的那个洞。）
+ * 注意这里**只放生成物，不放源码** —— 我第一版把 `tools/sync-upstream.mjs`
+ * 误放进来，等于给「改门禁不写笔记」留了后门，正是本门禁要堵的那个洞。
  */
-const EXEMPT_EXACT = Object.freeze([
-  'tools/upstream-manifest.json'
+const DEFAULT_EXEMPT_FILES = Object.freeze([
+  'package-lock.json',
+  'pnpm-lock.yaml',
+  'yarn.lock',
+  'pubspec.lock'
 ]);
 
 /**
@@ -197,58 +267,134 @@ function statusLines(text) {
 /**
  * 判断某个路径是否要求配笔记。
  *
+ * 判定顺序（先否后肯，避免豁免表被前面的规则绕过）：
+ *   1. 显式豁免的精确文件（生成物、锁文件）→ 不要求
+ *   2. 豁免前缀（`.agents/`、`docs/` 等）→ 不要求
+ *   3. 流程文件（`AGENTS.md`、`.github/workflows`…）→ 要求
+ *   4. 仓库根清单（`pubspec.yaml`、`Cargo.toml`…）→ 要求
+ *   5. 检测出的源码目录下的文件 → 要求
+ *   6. 其余 → 不要求
+ *
  * @param {string} path 仓库相对路径。
+ * @param {{exemptFiles: string[], sourceDirs: string[]}} rules 生效规则。
  * @returns {boolean} 是否受管。
  */
-function isManaged(path) {
-  if (EXEMPT_EXACT.includes(path)) return false;
-  if (MANAGED_FILES.includes(path)) return true;
-  return MANAGED_PREFIXES.some((prefix) => path.startsWith(prefix));
+function isManaged(path, rules) {
+  if (rules.exemptFiles.includes(path)) return false;
+  if (EXEMPT_PREFIXES.some((prefix) => path.startsWith(prefix))) return false;
+  if (rules.managedFiles.includes(path)) return true;
+  if (PROCESS_FILES.includes(path)) return true;
+  if (PROCESS_FILES.some((entry) => entry.endsWith('/') && path.startsWith(entry))) return true;
+  if (MANIFEST_FILES.includes(path)) return true;
+  return rules.sourceDirs.some((dir) => path.startsWith(`${dir}/`));
+}
+
+/**
+ * 推断仓库里哪些顶层目录是「源码目录」。
+ *
+ * 判据是**目录里真有代码**，而不是目录名像不像。做法：对 `git ls-files`
+ * 的输出按顶层目录分组，看是否存在常见源码后缀的文件。
+ *
+ * 为什么不用「目录名在白名单里」这种简单判断：那要求门禁知道每个仓库的
+ * 目录习惯（Flutter 用 `lib/`、Rust 用 `crates/`、monorepo 用 `packages/`），
+ * 等于把仓库知识写死进工具。用「有没有代码」判定是语言无关的。
+ *
+ * @param {string[]} trackedFiles 仓库里被 git 跟踪的文件（相对路径）。
+ * @returns {string[]} 源码目录名列表（不含尾斜杠）。
+ */
+function detectSourceDirs(trackedFiles) {
+  const hit = new Set();
+  for (const path of trackedFiles) {
+    const slash = path.indexOf('/');
+    if (slash <= 0) continue;
+    const top = path.slice(0, slash);
+    if (hit.has(top)) continue;
+    /* 只认「顶层目录」本身，不再往下递归：子目录里的代码归属顶层。 */
+    const dot = path.lastIndexOf('.');
+    if (dot < 0) continue;
+    const ext = path.slice(dot).toLowerCase();
+    if (SOURCE_EXTENSIONS.includes(ext)) hit.add(top);
+  }
+  return [...hit].sort();
+}
+
+/**
+ * 读取可选配置。
+ *
+ * 优先级：`--config <file>` > `<仓库根>/.agents/notes-coverage.json` > 默认。
+ *
+ * 配置里能覆盖的三项（都是**整体替换**，不是追加）：
+ *   sourceDirs   源码目录（不写则自动检测）
+ *   exemptFiles  额外豁免的精确文件
+ *   noteDirs     笔记所在目录（默认 `.agents/notes`）
+ *
+ * 为什么整体替换：半叠加最容易产生「我以为配了、其实没配」的错觉，
+ * 而门禁类工具最怕的就是这种模糊状态。
+ *
+ * 配置读不出来时**明确失败**（退出码 2），不静默退回默认 ——
+ * 那会让人以为配置生效了而其实没有。
+ *
+ * @param {string} repoRoot 仓库根。
+ * @param {string[]} argv 命令行参数。
+ * @returns {{config: object|undefined, error?: string}} 配置或错误。
+ */
+function loadConfig(repoRoot, argv) {
+  const flag = argv.indexOf('--config');
+  const explicit = flag >= 0 ? argv[flag + 1] : undefined;
+  const implicit = join(repoRoot, '.agents', 'notes-coverage.json');
+  const file = typeof explicit === 'string' && explicit !== ''
+    ? resolve(repoRoot, explicit)
+    : (existsSync(implicit) ? implicit : undefined);
+  if (file === undefined) return { config: {} };
+
+  let raw;
+  try {
+    raw = JSON.parse(readFileSync(file, 'utf8'));
+  } catch (error) {
+    return { config: undefined, error: `读取配置 ${file} 失败：${error.message}` };
+  }
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return { config: undefined, error: `配置 ${file} 必须是一个 JSON 对象。` };
+  }
+  const config = { path: file };
+  for (const key of ['sourceDirs', 'exemptFiles', 'managedFiles', 'noteDirs']) {
+    if (raw[key] === undefined) continue;
+    if (!Array.isArray(raw[key]) || raw[key].some((v) => typeof v !== 'string')) {
+      return { config: undefined, error: `配置项 ${key} 必须是字符串数组。` };
+    }
+    config[key] = raw[key];
+  }
+  return { config };
 }
 
 /**
  * 找出「顶层目录」里的未归类项。
  *
- * 白名单**只能覆盖你想到的路径**，这是它的根本局限：以后引入 `apps/`、
- * `packages/`、`src/` 之类的新顶层目录时，门禁会对那个目录**静默失效** ——
- * 不报错、不提示，照常打印「未命中受管路径」。实测确认过。
+ * 自动检测能覆盖大多数情况，但它仍可能漏：例如一个**新出现的**顶层目录，
+ * 里面暂时只有一个 README（没有源码后缀），于是没被认成源码目录，
+ * 之后往里加代码就静默不受管。
  *
- * 我最初把它写成「已知代价，靠人记得改清单」。这个判定不可靠：
- * 靠人记得，正是这道门禁要治的病。
- *
- * 所以改成主动发现：从改动路径里抽出顶层目录，凡是既不在白名单、
- * 也不在忽略表里的，打一条警告。**不失败**（那会误报太多），
- * 但会出现在 CI 日志和本地输出里 —— 至少不再无声无息。
+ * 所以额外做一次显式报告：从本次改动路径里抽顶层目录，凡既不是已检测出的
+ * 源码目录、也不在豁免前缀里的，打一条警告。**不失败**（避免误报淹没真问题），
+ * 但必须出现在输出里 —— 至少不再无声无息。
  *
  * @param {string[]} paths 本次改动的仓库相对路径。
+ * @param {{sourceDirs: string[]}} rules 生效规则。
  * @returns {string[]} 未归类的顶层目录名（去重、已排序）。
  */
-function unclassifiedTopDirs(paths) {
+function unclassifiedTopDirs(paths, rules) {
   const out = new Set();
   for (const path of paths) {
     const slash = path.indexOf('/');
-    /* 只看目录下的文件；顶层散文件由 MANAGED_FILES / 忽略表管。 */
+    /* 只看目录下的文件；顶层散文件由 PROCESS_FILES / MANIFEST_FILES 管。 */
     if (slash <= 0) continue;
     const top = path.slice(0, slash);
-    if (MANAGED_PREFIXES.some((prefix) => prefix === `${top}/`)) continue;
-    if (IGNORED_TOP_DIRS.includes(top)) continue;
+    if (rules.sourceDirs.includes(top)) continue;
+    if (EXEMPT_PREFIXES.some((prefix) => prefix === `${top}/`)) continue;
     out.add(top);
   }
   return [...out].sort();
 }
-
-/**
- * 已知不需要笔记的顶层目录。
- *
- * 判断标准是「放进去不会掩盖真实缺陷」：笔记自身、临时产物、依赖。
- * 这里**不是**用来图省事的地方 —— 往里加东西等于给那个目录永久免检。
- */
-const IGNORED_TOP_DIRS = Object.freeze([
-  '.agents',
-  '.probe',
-  '.git',
-  'node_modules'
-]);
 
 /**
  * 从提交信息里找放行标记。
@@ -285,7 +431,8 @@ function pendingCommitMessage() {
   }
 }
 
-const { files, label, reason } = collectFiles(process.argv.slice(2));
+const argvAll = process.argv.slice(2);
+const { files, label, reason } = collectFiles(argvAll);
 
 if (files === undefined) {
   console.error('✖ 无法判定本次改动是否配了笔记。');
@@ -294,20 +441,51 @@ if (files === undefined) {
   process.exit(2);
 }
 
-const managed = files.filter(isManaged);
-const hasNote = files.some((path) => path.startsWith('.agents/notes/') && path.endsWith('.md'));
+/* 仓库根：git 说了算，不靠脚本自己在哪。这样同一份脚本能装进任何仓库。 */
+const repoRootResult = git(['rev-parse', '--show-toplevel']);
+const repoRoot = repoRootResult.ok ? repoRootResult.out.trim() : process.cwd();
+
+const { config, error: configError } = loadConfig(repoRoot, argvAll);
+if (config === undefined) {
+  console.error('✖ 配置文件读不出来，本次检查无效。');
+  console.error(`  ${configError}`);
+  console.error('  不以默认值继续 —— 那会让人以为配置生效了而其实没有。退出码 2。');
+  process.exit(2);
+}
+
+/* 生效规则：配置整体替换默认值；源码目录不配则自动检测。 */
+let detected = [];
+if (config.sourceDirs === undefined) {
+  const listed = git(['ls-files']);
+  if (!listed.ok) {
+    console.error('✖ 读不到仓库文件列表（git ls-files 失败），无法推断源码目录。');
+    console.error('  这不是「已合规」—— 本次检查无效，退出码 2。');
+    process.exit(2);
+  }
+  detected = detectSourceDirs(splitLines(listed.out));
+}
+const rules = {
+  sourceDirs: config.sourceDirs ?? detected,
+  exemptFiles: [...DEFAULT_EXEMPT_FILES, ...(config.exemptFiles ?? [])],
+  managedFiles: config.managedFiles ?? []
+};
+const noteDir = (config.noteDirs ?? ['.agents/notes'])[0] ?? '.agents/notes';
+
+const managed = files.filter((path) => isManaged(path, rules));
+const hasNote = files.some((path) => path.startsWith(`${noteDir.replace(/\/$/, '')}/`) && path.endsWith('.md'));
 
 /**
  * 报告未归类的顶层目录（不失败，只提示）。
  *
- * 白名单的根本局限是「只覆盖你想到的路径」。这里至少让新出现的顶层目录
- * 在日志里露一面，而不是被静默放行。
+ * 自动检测能覆盖大多数情况，但仍可能漏：新出现的顶层目录若暂时没有源码
+ * 文件，就不算源码目录，之后往里加代码会静默不受管。这里让它露一面。
  */
 function warnUnclassified() {
-  const stray = unclassifiedTopDirs(files);
+  const stray = unclassifiedTopDirs(files, rules);
   if (stray.length === 0) return;
-  console.error(`⚠ 以下顶层目录不在受管清单里，本次未检查：${stray.join('、')}`);
-  console.error('  若它们属于源码/工具链，请加入 tools/notes-coverage.mjs 的 MANAGED_PREFIXES，');
+  console.error(`⚠ 以下顶层目录没被识别为受管，本次未检查：${stray.join('、')}`);
+  console.error('  若它们属于源码/工具链，在仓库根加 .agents/notes-coverage.json：');
+  console.error('    { "sourceDirs": ["你的目录", ...] }');
   console.error('  否则那个目录会一直被静默放行。');
 }
 

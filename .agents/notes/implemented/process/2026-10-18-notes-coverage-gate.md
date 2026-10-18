@@ -44,31 +44,53 @@ becacfc test: 拆开 CI 自检步骤并加 vendored 摘要仪表...
 新增独立的覆盖门禁 `tools/notes-coverage.mjs`，并**双层挂载**：
 本地 `commit-msg` 钩子 + CI 步骤。
 
-**① 判定口径：路径白名单，命中即要求同批带笔记。**
+**① 判定口径：自动检测仓库结构，不写死任何路径。**
 
-受管目录：`lib/`、`tools/`、`.github/`、`skills/agent-notes/`。
-受管单文件：`AGENTS.md`、`CLAUDE.md`。
+第一版把 `lib/`、`tools/`、`.github/` 写死在清单里。那**只对一个仓库成立** ——
+换到 Flutter 仓库（代码在 `lib/` 和 `rust/`）、Go 仓库（`cmd/`、`internal/`）、
+monorepo（`packages/`）就静默失效。而「看起来有门禁、其实没在管」是比没有门禁
+更坏的形态。
 
-**must**：`AGENTS.md` 必须受管。它定义了「什么算非平凡改动」，改它就是改流程 ——
-和 `.github/` 属于同一类。第一版只把 `.github/` 放进白名单、`AGENTS.md` 却没放，
-实测确认改它不要求任何笔记，这是逻辑矛盾。
+现在的判据是**仓库自己的结构**，不是仓库的名字：
 
-显式豁免（机械产物）：`tools/upstream-manifest.json`、`CHANGELOG.md`、
-`package.json`、`upstream.json` 等。依据是规范里「机械改动严禁立笔记」，
-为版本号/清单摘要写笔记是纯噪音。
+1. **源码目录自动检测**：对 `git ls-files` 的输出按顶层目录分组，凡是含有
+   常见源码后缀（`.dart`/`.ts`/`.rs`/`.go`/`.kt`/`.swift`/`.c`/`.py`…）的
+   目录，一律算受管。语言无关，换技术栈不用改脚本。
+   实测：本插件检测出 `lib, skills, src, tools`；
+   Flutter 仓库检测出 `.agents, android, lib, macos, rust, scripts, test, tools, windows`。
+2. **仓库根清单**：`pubspec.yaml`、`Cargo.toml`、`go.mod`、`build.gradle`…
+   改了等于改工具链或依赖约束。
+3. **流程文件**：`AGENTS.md`、`CLAUDE.md`、`.github/workflows/`。
+4. **`docs/` 显式豁免**（见下）。
+5. **可配置**：仓库根 `.agents/notes-coverage.json` 可覆盖 `sourceDirs` /
+   `exemptFiles` / `managedFiles`，**整体替换**而非叠加。
+
+**must**：`docs/` 必须豁免，且理由要写清楚。
+本类仓库习惯把计划、工作日志、排查记录写在 `docs/notes/` 下 —— 那是**过程**
+不是**决策**。实测数据支撑：某 Flutter 仓库最近 30 次提交只有 2 次带笔记，
+但其中大多数是 `docs(round-66): 改计划文件`，那些本来就不该立决策笔记；
+真正漏的只有改了 `lib/` 的那三次。若把 `docs/` 也纳入受管，每天的计划更新
+都会被逼着立一篇决策笔记，几天内笔记树就被注水，人开始用 `--no-verify`，
+门禁等于废掉。
+
+**must**：`package.json` **不**默认受管。日常发布只改版本号，属于规范明令
+「严禁立笔记」的机械改动。这是通用化第一版引入的回归（把 `package.json`
+放进 `MANIFEST_FILES` 后，每次发版都被要求写笔记），实测抓到后改成
+「清单文件里排除 `package.json`，需要时用 `managedFiles` 显式加」。
+
+显式豁免（机械产物）：锁文件（`package-lock.json`、`pnpm-lock.yaml`、
+`yarn.lock`、`pubspec.lock`）等。依据是规范里「机械改动严禁立笔记」。
 
 **must**：豁免只放**生成物**，绝不放源码。第一版我误把
 `tools/sync-upstream.mjs` 放进豁免表 —— 那等于给「改门禁不写笔记」
 留了后门，正是本门禁要堵的洞。已删。
 
-**must：白名单之外的新顶层目录必须显式报警。**
-白名单的根本局限是**只覆盖你想到的路径**。以后引入 `apps/`、`packages/`
-之类的新顶层目录时，门禁对那个目录**静默失效** —— 实测确认：退出码 0、
-无任何提示。我最初把它写成「已知代价，靠人记得改清单」，但**靠人记得
-正是这道门禁要治的病**，这个判定站不住。
-现在改成从改动路径里抽顶层目录，凡既不在白名单也不在
-`IGNORED_TOP_DIRS` 的，打一条 `⚠` 警告并说明怎么修。**不失败**（避免误报
-淹没真问题），但必须出现在输出里，不再无声无息。
+**must：检测不出来时显式报警，不静默放行。**
+自动检测能覆盖大多数情况，但仍可能漏：新出现的顶层目录若暂时只有非源码
+文件（纯数据、纯文档），就不算源码目录，之后往里加代码会静默不受管。
+所以从改动路径抽顶层目录，凡既不是已检测出的源码目录、也不在豁免前缀里的，
+打 `⚠` 并说明用 `.agents/notes-coverage.json` 怎么修。**不失败**（避免误报
+淹没真问题），但必须出现在输出里。
 
 **② 合法出口：提交信息里 `Note-Skip: <理由>`，理由必须非空。**
 
@@ -203,8 +225,24 @@ node --test tools/notes-coverage.test.mjs   # 6 项
 | 把 `lastCommitMessage` 回退加回去（后门 2 复活） | 1 项红 |
 | `AGENTS.md` 移出 `MANAGED_FILES` | 1 项红 |
 | 去掉未归类目录警告（`stray = []`） | 1 项红 |
+| `detectSourceDirs()` 恒返回空 | 6 项红 |
+| 忽略配置文件（不读 `.agents/notes-coverage.json`） | 1 项红 |
+| `package.json` 移回 `MANIFEST_FILES`（通用化回归） | 1 项红 |
 
-七组覆盖了门禁的拦截分支、放行分支与覆盖面边界，证明它不是恒绿。
+九组覆盖了门禁的拦截分支、放行分支、自动检测与配置路径，证明它不是恒绿。
+
+**真实仓库验证（Flutter + Rust 双栈，非本插件）**：
+把同一份脚本装进一个 Flutter 仓库（代码在 `lib/` Dart + `rust/` Rust +
+`test/` + `scripts/`），不做任何仓库专属配置，四个场景全部符合预期：
+
+| 场景 | 结果 |
+|---|---|
+| 改 `docs/`（工作日志） | 通过 |
+| 改 `lib/*.dart` 无笔记 | 拦下 |
+| 改 `lib/*.dart` + 同批笔记 | 通过 |
+| 改 `rust/**/*.rs` 无笔记（跨语言） | 拦下 |
+
+这是「通用」而非「只对本仓库有效」的实证。
 
 **注意第 4、5 组的第一次尝试是无效注入**：我最初用 `require()` 在 ESM 里
 造故障，脚本直接崩溃而不是「静默放行」，测试红了但红的理由不对。

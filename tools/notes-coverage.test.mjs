@@ -281,22 +281,88 @@ test('notes-coverage: 改 AGENTS.md 也要求笔记', () => {
 });
 
 test('notes-coverage: 未归类的顶层目录要显式警告，不能静默放行', () => {
-  /* 白名单的根本局限：只覆盖你想到的路径。以后引入 apps/ 之类的顶层目录时，
-     门禁会对它静默失效 —— 实测确认过（退出码 0、无任何提示）。
-     我最初把它写成「已知代价，靠人记得改清单」，但靠人记得正是这道门禁要治的病。
-     现在改成至少报警：不失败（避免误报），但必须出现在输出里。 */
+  /* 通用化之后，源码目录是**自动检测**出来的（看目录里有没有常见源码后缀），
+     所以 apps/ 这类含代码的目录会被正常识别、正常要求笔记。
+     真正需要警告的是「检测不出来」的情况：目录里暂时只有非源码文件
+     （纯数据、纯文档），于是不算源码目录 —— 之后往里加代码就会静默不受管。 */
   const dir = makeRepoWithGate();
   try {
-    mkdirSync(join(dir, 'apps'), { recursive: true });
-    writeFileSync(join(dir, 'apps', 'new.mjs'), 'export const x = 1;\n', 'utf8');
-    execFileSync('git', ['add', 'apps'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+    mkdirSync(join(dir, 'weird'), { recursive: true });
+    writeFileSync(join(dir, 'weird', 'notes.txt'), 'pure data\n', 'utf8');
+    execFileSync('git', ['add', 'weird'], { cwd: dir, encoding: 'utf8', windowsHide: true });
 
     const r = spawnSync(NODE, [join(dir, 'tools', 'notes-coverage.mjs')], {
       cwd: dir, encoding: 'utf8', windowsHide: true, env: { ...process.env }
     });
     const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
-    assert.match(out, /apps/, '必须点名出现在输出里');
-    assert.match(out, /不在受管清单|MANAGED_PREFIXES/, '必须告诉人怎么修');
+    assert.match(out, /weird/, '必须点名出现在输出里');
+    assert.match(out, /notes-coverage\.json|sourceDirs/, '必须告诉人怎么修');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes-coverage: 源码目录靠仓库结构自动检测，不写死语言', () => {
+  /* 通用性的核心：同一份脚本要能装进任何技术栈的仓库。
+     这里造三种语言标志，验证检测不依赖任何仓库专属配置。 */
+  const dir = makeRepo();
+  try {
+    const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true });
+    mkdirSync(join(dir, 'tools'), { recursive: true });
+    copyFileSync(SCRIPT, join(dir, 'tools', 'notes-coverage.mjs'));
+
+    /* Dart / Rust / Go 三栈各一个文件，分属三个目录。 */
+    mkdirSync(join(dir, 'lib'), { recursive: true });
+    writeFileSync(join(dir, 'lib', 'main.dart'), 'void main() {}\n', 'utf8');
+    mkdirSync(join(dir, 'crates'), { recursive: true });
+    writeFileSync(join(dir, 'crates', 'lib.rs'), 'pub fn f() {}\n', 'utf8');
+    mkdirSync(join(dir, 'cmd'), { recursive: true });
+    writeFileSync(join(dir, 'cmd', 'main.go'), 'package main\n', 'utf8');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'init');
+
+    for (const rel of ['lib/main.dart', 'crates/lib.rs', 'cmd/main.go']) {
+      writeFileSync(join(dir, rel), `// touched ${rel}\n`, 'utf8');
+    }
+    git('add', '-A');
+
+    const r = spawnSync(NODE, [join(dir, 'tools', 'notes-coverage.mjs')], {
+      cwd: dir, encoding: 'utf8', windowsHide: true, env: { ...process.env }
+    });
+    assert.equal(r.status, 1, `三种语言的源码目录都必须被识别为受管，实际 exit=${r.status}`);
+    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+    for (const p of ['lib/main.dart', 'crates/lib.rs', 'cmd/main.go']) {
+      assert.match(out, new RegExp(p.replace('/', '\\/')), `必须点名 ${p}`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes-coverage: 配置文件可覆盖自动检测', () => {
+  /* 自动检测不是万能的（比如把源码放在名字奇怪、暂时只有非源码文件的目录里）。
+     这时用 .agents/notes-coverage.json 显式声明 —— 但**整体替换**而非叠加，
+     避免「我以为配了、其实没配」的模糊状态。 */
+  const dir = makeRepo();
+  try {
+    const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true });
+    mkdirSync(join(dir, 'tools'), { recursive: true });
+    copyFileSync(SCRIPT, join(dir, 'tools', 'notes-coverage.mjs'));
+    mkdirSync(join(dir, 'odd'), { recursive: true });
+    writeFileSync(join(dir, 'odd', 'thing.txt'), 'not source\n', 'utf8');
+    mkdirSync(join(dir, '.agents'), { recursive: true });
+    writeFileSync(join(dir, '.agents', 'notes-coverage.json'),
+      JSON.stringify({ sourceDirs: ['odd'] }), 'utf8');
+    git('add', '-A');
+    git('commit', '-q', '-m', 'init');
+
+    writeFileSync(join(dir, 'odd', 'thing.txt'), 'changed\n', 'utf8');
+    git('add', '-A');
+
+    const r = spawnSync(NODE, [join(dir, 'tools', 'notes-coverage.mjs')], {
+      cwd: dir, encoding: 'utf8', windowsHide: true, env: { ...process.env }
+    });
+    assert.equal(r.status, 1, `配置里声明的目录必须受管，实际 exit=${r.status}`);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
