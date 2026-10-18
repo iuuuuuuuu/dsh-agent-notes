@@ -448,10 +448,16 @@ function unclassifiedTopDirs(paths, rules) {
     if (slash <= 0) continue;
     const top = path.slice(0, slash);
     if (rules.sourceDirs.includes(top)) continue;
-    /* 已经由流程文件/配置显式受管的目录，不算「未归类」——
-       第一版漏了这条判断，于是 .githooks 明明已在 PROCESS_FILES 里，
-       仍会被报「没被识别为受管」，属于噪音误报。 */
-    if (hitDirEntry(`${top}/`, PROCESS_FILES)) continue;
+    /* 已经由流程文件/配置显式受管的目录，不算「未归类」。
+       注意清单项可能是**嵌套**的（`.github/workflows/`、`.agents/notes-scripts/`），
+       而这里的 `top` 只是顶层段（`.github`、`.agents`）。只做前缀匹配会漏 ——
+       实测踩过两次：先 `.agents/notes`，再 `.github/workflows`，
+       都出现「明明受管却被报未归类」的噪音误报。
+       所以两段都比：整条命中或顶层段命中都算已归类。 */
+    if (PROCESS_FILES.some((entry) => {
+      const norm = entry.endsWith('/') ? entry : `${entry}/`;
+      return norm === `${top}/` || norm.startsWith(`${top}/`);
+    })) continue;
     if (rules.managedFiles.some((entry) => entry === `${top}/` || entry.startsWith(`${top}/`))) continue;
     if (EXEMPT_PREFIXES.some((prefix) => prefix === `${top}/`)) continue;
     /* 笔记目录可能是嵌套的（默认 `.agents/notes`），要比**顶层段**而非全路径：

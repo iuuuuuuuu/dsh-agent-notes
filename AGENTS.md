@@ -118,6 +118,44 @@ CI 是权威那道 —— 因为实测 `git commit --no-verify` 能绕过本地�
 详细的取舍（为什么不用 husky、为什么保留 `Note-Skip` 口子、白名单的失效面）
 见 [.agents/notes/implemented/process/2026-10-18-notes-coverage-gate.md](.agents/notes/implemented/process/2026-10-18-notes-coverage-gate.md)。
 
+### Supersession 检查：新笔记必须声明与既有笔记的关系
+
+规则借鉴 `deepseek-ai/deepseek-harness` 的 `.agents/notes/AGENTS.md`：
+
+> **Every new Agent Note triggers a supersession check.**
+
+写新笔记前要搜既有笔记树，判定「完全取代 / 部分取代 / 无关」。本插件
+把其中可机械化的最低要求做成门禁 —— 新增笔记必须满足其一：
+
+1. 正文里有指向既有笔记的**相对链接**；
+2. 正文声明 `Independent: <理由>`（理由非空，表示确实无关）；
+3. 它本身在 `proposed/` 或 `rejected/`（还没成为已落地的决定，豁免）。
+
+```sh
+npm run notes:supersession    # 查暂存区新增的笔记
+```
+
+为什么不做「语义判重」：判断两篇讲的是不是同一个决定需要理解内容，
+做不到可靠，硬做会产出大量误报，而误报的门禁会被绕过。
+所以只做可机械验证的最低要求 —— `Independent:` 那一行把
+「我查过了」变成**可验证的动作**：写理由这件事本身会促使人真去查一遍。
+
+### 改写历史必须用 `--force-with-lease`
+
+同样来自 `deepseek-harness` 的硬规则：**`--force` 永不允许。**
+
+```sh
+# 改写前先记录远端当前 OID
+git fetch origin
+OID=$(git rev-parse origin/<branch>)
+# 用 lease 推送：若远端已被别人更新，推送会中止而不是覆盖
+git push --force-with-lease=<branch>:$OID origin <branch>
+```
+
+裸 `--force` 会静默覆盖别人的提交，而失败方向不可逆 ——
+被覆盖的提交若没有别处留存就直接丢了。`--force-with-lease` 把
+「我知道远端当时是什么」变成一个必须显式给出的前提。
+
 ## 上游
 
 本插件内容提炼自 `czm15053/write-notes-like-deepseek`（MIT），

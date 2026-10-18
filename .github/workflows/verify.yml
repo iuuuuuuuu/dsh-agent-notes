@@ -72,6 +72,28 @@ jobs:
             node tools/notes-coverage.mjs --range "$NOTES_COVERAGE_BASE..HEAD"
           fi
 
+      # supersession 检查：新增笔记必须声明与既有笔记的关系。
+      #
+      # 规则借鉴 deepseek-ai/deepseek-harness 的 .agents/notes/AGENTS.md：
+      #   Every new Agent Note triggers a supersession check.
+      #
+      # 本仓库原先完全没有这个机制 —— 实测 11 篇笔记只有 3 篇有互链。
+      # 不是作者懒，而是没有任何东西提醒他去看。笔记越多，重复的决定
+      # 与已过期的结论就越多，而没有人会发现这一行。
+      #
+      # 只查 base..HEAD 里**新增**的笔记（修改既有笔记本来就有归属）。
+      - name: supersession 检查
+        env:
+          NOTES_SUPERSESSION_BASE: ${{ github.event.before || github.event.pull_request.base.sha || '' }}
+        run: |
+          if [ -z "$NOTES_SUPERSESSION_BASE" ] || \
+             [ "$NOTES_SUPERSESSION_BASE" = "0000000000000000000000000000000000000000" ]; then
+            echo "没有可用的 base sha，改为只检查 HEAD 这一个提交。"
+            node tools/notes-supersession.mjs --range HEAD~1..HEAD
+          else
+            node tools/notes-supersession.mjs --range "$NOTES_SUPERSESSION_BASE..HEAD"
+          fi
+
       # 跑测试前后各打一次摘要，并在测试后**断言 vendored 目录没被改**。
       #
       # 这不是临时排查残留，是针对一类真实缺陷的永久门禁：

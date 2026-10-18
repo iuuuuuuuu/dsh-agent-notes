@@ -460,6 +460,31 @@ test('notes-coverage: 区间里每个提交都能用自己的 Note-Skip 放行',
   }
 });
 
+test('notes-coverage: 嵌套的流程清单项不该被报未归类（.github / .agents）', () => {
+  /* 实测踩过两次同类误报：PROCESS_FILES 里写的是嵌套路径
+     （`.github/workflows/`、`.agents/notes-scripts/`），而警告判断用的是
+     顶层段（`.github`、`.agents`）。只做整条比较就会「明明受管却报未归类」。
+     一条总在误报的门禁，人会开始无视它的全部输出。 */
+  const dir = makeRepoWithGate();
+  try {
+    mkdirSync(join(dir, '.github', 'workflows'), { recursive: true });
+    writeFileSync(join(dir, '.github', 'workflows', 'ci.yml'), 'name: ci\n', 'utf8');
+    mkdirSync(join(dir, '.agents', 'notes', 'implemented', 'process'), { recursive: true });
+    writeFileSync(join(dir, '.agents', 'notes', 'implemented', 'process', '2026-01-01-a.md'),
+      '# Agent Note: a\n\nStatus: implemented\n', 'utf8');
+    execFileSync('git', ['add', '-A'], { cwd: dir, encoding: 'utf8', windowsHide: true });
+
+    const r = spawnSync(NODE, [join(dir, 'tools', 'notes-coverage.mjs')], {
+      cwd: dir, encoding: 'utf8', windowsHide: true, env: { ...process.env }
+    });
+    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+    assert.doesNotMatch(out, /没被识别为受管/,
+      `.github/workflows 与 .agents/notes 都已在清单里，不该报未归类：\n${out}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('notes-coverage: 配置文件可覆盖自动检测', () => {
   /* 自动检测不是万能的（比如把源码放在名字奇怪、暂时只有非源码文件的目录里）。
      这时用 .agents/notes-coverage.json 显式声明 —— 但**整体替换**而非叠加，

@@ -264,17 +264,22 @@ try {
   expectGreen('format 复原', 'verify-agent-note-format.ts', work);
   expectGreen('archived 复原', 'verify-archived-agent-notes.ts', work);
 
-  /* 覆盖门禁（「该写而没写」）的自证。
-     它的三组故障注入在 tools/notes-coverage.test.mjs 里（恒通过、恒有笔记、
-     「查不到」返回 0），由 npm test 执行。这里断言那条测试文件确实存在 ——
-     否则有人删掉它，总门禁会静默失去这层覆盖而仍然报绿。 */
-  console.log('\n[自证] 覆盖门禁必须带自己的故障注入');
-  const coverageTest = join(PACKAGE_ROOT, 'tools', 'notes-coverage.test.mjs');
-  if (!existsSync(coverageTest)) {
-    console.error('  ✖ tools/notes-coverage.test.mjs 不存在 —— 覆盖门禁没有故障注入，不可信');
-    failures += 1;
-  } else {
-    console.log('  ✔ 覆盖门禁的故障注入在 tools/notes-coverage.test.mjs（由 npm test 执行）');
+  /* 覆盖门禁与 supersession 检查的自证。
+     它们的三组故障注入在各自的 test 文件里，由 npm test 执行。
+     这里断言那些测试文件确实存在 —— 否则有人删掉它们，
+     总门禁会静默失去这层覆盖而仍然报绿。 */
+  console.log('\n[自证] 覆盖门禁与 supersession 检查必须带各自的故障注入');
+  for (const [label, file] of [
+    ['覆盖门禁', 'notes-coverage.test.mjs'],
+    ['supersession 检查', 'notes-supersession.test.mjs']
+  ]) {
+    const full = join(PACKAGE_ROOT, 'tools', file);
+    if (!existsSync(full)) {
+      console.error(`  ✖ tools/${file} 不存在 —— ${label}没有故障注入，不可信`);
+      failures += 1;
+    } else {
+      console.log(`  ✔ ${label}的故障注入在 tools/${file}（由 npm test 执行）`);
+    }
   }
 
   if (failures > 0) {

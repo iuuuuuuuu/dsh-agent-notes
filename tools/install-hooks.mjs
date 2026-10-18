@@ -94,9 +94,15 @@ if (undo) {
 const hookBody = `#!/bin/sh
 # 由 tools/install-hooks.mjs 生成，请勿手改（改那个脚本）。
 #
-# 覆盖门禁：该写笔记的改动必须同批带笔记。详见 tools/notes-coverage.mjs。
+# 两道检查，任一失败即拦下：
+#   1. 覆盖门禁 —— 该写笔记的改动必须同批带笔记（tools/notes-coverage.mjs）
+#   2. supersession 检查 —— 新增笔记必须声明与既有笔记的关系
+#      （tools/notes-supersession.mjs，规则借鉴 deepseek-harness）
+#
 # 紧急情况可 \`git commit --no-verify\` 跳过 —— 但 CI 会再查一次。
-exec node tools/notes-coverage.mjs --message-file "$1"
+set -e
+node tools/notes-coverage.mjs --message-file "$1"
+node tools/notes-supersession.mjs
 `;
 
 if (!existsSync(HOOKS_DIR)) mkdirSync(HOOKS_DIR, { recursive: true });
