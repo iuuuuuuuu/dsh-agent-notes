@@ -16,8 +16,8 @@ import { fileURLToPath } from 'node:url';
 
 import { DRAWER_PATCH_ID, injectResponsiveCss, RESPONSIVE_CSS, RESPONSIVE_STYLE_ID } from '../lib/board-responsive.js';
 import { buildBoard, buildBoardFromRoots, buildInlineData, parseNote, scanNotes } from '../lib/board.js';
-import { isInside, registerBoardRoutes, renderNoticePage, revisionOf } from '../lib/board-route.js';
-import { listGitChildren, originOf, resolveNotesRoots } from '../lib/notes.js';
+import { firstLines, isInside, registerBoardRoutes, renderNoticePage, revisionOf } from '../lib/board-route.js';
+import { clearGitProbeCache, listGitChildren, originOf, resolveNotesRoots } from '../lib/notes.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
 
@@ -663,36 +663,38 @@ test('board-responsive: 注入幂等、缺 head 时原样返回（适配层不�
   assert.equal(injectResponsiveCss(undefined), undefined);
 });
 
-test('board-responsive: 抽屉补丁脚本必须注入，且放在 body 末尾（DOM 已就绪）', () => {
-  /* 两个上游缺陷都只能靠注入层修（asset 是 vendored 的，不能手改）：
-     ① 打开新笔记时不重置 .console-body 的 scrollTop —— 读到一篇底部再开
-        另一篇，会从底部开始显示；
-     ② 抽屉是 position:fixed 浮层，但上游没锁背景滚动 —— 出现内外两层
-        滚动条。
-     ② 用 CSS 的 :has() 就够（见 RESPONSIVE_CSS）；① 必须运行时脚本，
-     所以脚本要能被注入，且必须放在 </body> 之前 —— 它要 querySelector
-     #drawer-console，放 head 里会拿不到节点。 */
+test('board-responsive: 补丁脚本必须注入，且放在 body 末尾（DOM 已就绪）', () => {
+  /* 补丁脚本现在只做一件事：热更新轮询。它必须放在 </body> 之前 ——
+     脚本里要读 location 与调 window.ingestDataset，放 head 里拿不到上游
+     刚定义好的函数。 */
   const page = '<html><head><title>t</title></head><body><aside id="drawer-console"></aside></body></html>';
   const out = injectResponsiveCss(page);
   assert.ok(out.includes(`<script id="${DRAWER_PATCH_ID}">`), '补丁脚本必须被注入');
   const scriptAt = out.indexOf(`id="${DRAWER_PATCH_ID}"`);
   const bodyEndAt = out.lastIndexOf('</body>');
   assert.ok(scriptAt > 0 && scriptAt < bodyEndAt, '脚本必须在 </body> 之前（DOM 就绪）');
-  const asideAt = out.indexOf('id="drawer-console"');
-  assert.ok(scriptAt > asideAt, '脚本必须在抽屉节点之后');
   // 幂等：不能插两次脚本
   assert.equal((out.match(new RegExp(DRAWER_PATCH_ID, 'g')) ?? []).length, 1);
   assert.equal(injectResponsiveCss(out), out, '二次注入必须原样返回');
 });
 
-test('board-responsive: 抽屉打开时 html 与 body 都要锁滚动（双层滚动条）', () => {
-  /* 实测：只锁 body 时 documentElement 仍能滚，第二条滚动条依然在
-     （CDP 量到 scrollTop 能设成 400）。视口滚动在不同 UA 下由不同元素
-     承担，所以两个都要设。 */
-  assert.match(RESPONSIVE_CSS, /body:has\(#drawer-console\.open\)[\s\S]{0,80}overflow:\s*hidden/,
-    '抽屉打开时 body 必须锁滚动');
-  assert.match(RESPONSIVE_CSS, /html:has\(#drawer-console\.open\)/,
-    'html 也必须锁 —— 只锁 body 实测挡不住');
+test('board-responsive: 抽屉滚动修复已由上游提供，注入层不得再重复一份', () => {
+  /* 上游 commit 72573a5 修好了两件事：
+       ① openConsole() 里加 `scrollTop = 0`（打开新笔记从头开始）；
+       ② CSS 加 `body:has(#drawer-console.open), html:has(...) { overflow: hidden }`
+          （锁背景滚动，消除双层滚动条）。
+     本插件此前在注入层补过同样两处。上游修好后，实测把注入层完全剥离，
+     抽屉行为依然正确 —— 说明重复实现已是纯冗余，故删除。
+
+     这条测试**防止冗余悄悄长回来**：两份等效代码长期并存会漂移，
+     改一处忘另一处时没人知道哪份在生效。若将来上游又回退这两处修复，
+     应当新开决策笔记重新引入，而不是在这里悄悄加回来。 */
+  assert.doesNotMatch(RESPONSIVE_CSS, /#drawer-console\.open[\s\S]{0,80}overflow:\s*hidden/,
+    '注入层不应再重复上游的锁滚动规则');
+  const page = '<html><head></head><body><aside id="drawer-console"></aside></body></html>';
+  const out = injectResponsiveCss(page);
+  assert.doesNotMatch(out, /MutationObserver/, '注入层不应再用 MutationObserver 补 scrollTop');
+  assert.doesNotMatch(out, /\.scrollTop\s*=\s*0/, '注入层不应再补 scrollTop 归零');
 });
 
 test('board-route: /data 端点返回数据 + revision，且 revision 随内容变化', async () => {
@@ -726,6 +728,21 @@ test('board-route: /data 端点返回数据 + revision，且 revision 随内容�
     // 同内容两次：指纹必须一致（否则页面会无谓重绘）
     const again = JSON.parse((await call('/agent-notes/data?session=x')).body);
     assert.equal(again.revision, p1.revision, '内容没变时 revision 必须稳定');
+
+    /* 端点必须真的应用了 rawBody 瘦身 —— 只测 firstLines 单元不够。
+       故障注入实测过：把端点里的 firstLines(...) 改回 note.rawBody，
+       仅测单元的断言仍然全绿，这是假绿。 */
+    const note = p1.notes[0];
+    assert.ok(typeof note.rawBody === 'string' && note.rawBody.length > 0, 'rawBody 字段必须仍在');
+    const rawLineCount = note.rawBody.split('\n').length;
+    assert.ok(
+      rawLineCount <= 3,
+      `端点返回的 rawBody 必须被截成前 3 行（实际 ${rawLineCount} 行）—— 否则负载瘦身没生效`
+    );
+    /* crux 依赖第 3 行：截断后仍要能取到 Status 行。 */
+    assert.match(note.rawBody.split('\n')[2] ?? '', /^Status:/, '第 3 行必须仍是 Status 行（crux 依赖它）');
+    /* 四小节出自其它字段，必须完整保留，不能被瘦身波及。 */
+    assert.ok(note.decision.length > 0, 'decision 不能受 rawBody 瘦身影响');
 
     // 改**内容**（不是篇数）：指纹必须变
     const file = join(root, 'implemented', 'process', '2026-01-01-a.md');
@@ -781,9 +798,90 @@ test('board-responsive: 热更新脚本必须轮询 /data，并调用上游 inge
   assert.match(js, /replace\(\/\[\^\/\]\*\$\/, 'data'\)/, '端点应从当前路径推导，不能直接拼 data');
   assert.match(js, /setInterval\(poll,/, '必须有轮询');
   assert.match(js, /window\.ingestDataset\(/, '必须调上游的 ingestDataset');
-  assert.match(js, /document\.hidden/, '页面不可见时应跳过请求');
-  /* 加载后立刻探一次：体现在 IIFE 末尾直接调用 poll()。 */
-  assert.match(js, /\n\s*poll\(\);\s*\n/, '页面加载后必须立刻探一次（否则首次变化被吞）');
+  assert.match(js, /document\.hidden/, '整页不可见时应跳过请求');
+  /* 加载后立刻探一次：体现在启动分支里直接调用 poll()。 */
+  assert.match(js, /\bpoll\(\);/, '页面加载后必须立刻探一次（否则首次变化被吞）');
+});
+
+test('board-responsive: 轮询必须按「是否真的渲染」门控，不能只看 document.hidden', () => {
+  /* 实测踩过的性能坑：看板跑在侧边栏的 iframe 里。宿主把 iframe 的容器设为
+     display:none（用户切到别的 tab）之后，iframe 内部的 document.hidden
+     **仍然是 false** —— 它反映的是整个浏览器窗口是否可见，不是这个 iframe
+     是否被渲染。于是「只看 document.hidden」等于没挡：用户切走后仍每 4 秒
+     拉一次 100KB、服务端仍做一次全盘扫描（实测单次 78ms、响应 100402 字节）。
+     实测 12 秒隐藏期内 polls 从 2 涨到 5。
+
+     修法用 IntersectionObserver 盯 body：由浏览器在渲染树层面判定，
+     iframe 被隐藏时给 isIntersecting=false。实测三态都准。
+     隐藏期间停掉定时器，恢复时立刻补探一次。 */
+  const page = '<html><head></head><body><aside id="drawer-console"></aside></body></html>';
+  const out = injectResponsiveCss(page);
+  const i = out.indexOf(`id="${DRAWER_PATCH_ID}"`);
+  const js = out.slice(i, out.indexOf('</script>', i));
+
+  assert.match(js, /new IntersectionObserver\(/, '必须用 IntersectionObserver 判断是否真的可见');
+  assert.match(js, /io\.observe\(document\.body\)/, '应观察 body（iframe 被隐藏时 body 会退出交叉）');
+  /* 隐藏时要真的停表，否则只是少发请求、定时器仍空转。
+     断言 stop() 的**定义体**里确实调了 clearInterval —— 只搜 clearInterval
+     会被别处的注释或另一处调用蒙混过去（故障注入实测：把 stop 里的
+     clearInterval 删掉，宽松的正则仍能匹配到，测试不变红）。 */
+  assert.match(js, /function stop\(\) \{[\s\S]{0,200}clearInterval\(timer\);[\s\S]{0,120}\}/,
+    'stop() 内必须真的 clearInterval，否则定时器仍在空转');
+  /* 恢复可见要立刻补探，别等下一个周期（隐藏期间的变更不能漏）。 */
+  assert.match(js, /if \(visible\) \{[\s\S]{0,120}start\(\);[\s\S]{0,120}poll\(\);/, '恢复可见时应立刻补探一次');
+  /* 不可见分支必须调 stop()。 */
+  assert.match(js, /\} else \{\s*stop\(\);\s*\}/, '不可见时必须调 stop() 停掉定时器');
+  /* 启动分支也要受门控：不可见时不该先把定时器建起来。 */
+  assert.match(js, /if \(visible && !document\.hidden\) \{/, '启动时也要按可见性决定是否开始轮询');
+});
+
+test('board-route: /data 的 rawBody 只保留前 3 行（负载瘦身，但 crux 仍可取）', () => {
+  /* 实测：8 篇笔记时响应体 115815 字节，其中 rawBody 占 53%。而看板对 rawBody
+     的全部用法只有一处 —— `(n.rawBody||'').split('\n')[2]`，取第 3 行做
+     rejected 笔记的 crux。所以整篇原文是纯浪费。
+
+     边界必须守住：截断后第 3 行要一模一样（crux 依赖它），且四小节不能受影响
+     （它们出自不同字段，本来就完整）。 */
+  const body = '# Agent Note: 标题\n\nStatus: rejected — 否决理由\n\n## Problem\n\n很长的正文……';
+  assert.equal(firstLines(body, 3), '# Agent Note: 标题\n\nStatus: rejected — 否决理由');
+  // crux 取第 3 行：截断前后必须一致
+  assert.equal(firstLines(body, 3).split('\n')[2], body.split('\n')[2]);
+  // 行数不足时原样返回（内容本来就短，不该被改）
+  assert.equal(firstLines('a\nb', 3), 'a\nb');
+  // 非字符串原样返回，不能把 undefined 变成字符串
+  assert.equal(firstLines(undefined, 3), undefined);
+  assert.equal(firstLines(null, 3), null);
+  assert.equal(firstLines('', 3), '');
+});
+
+test('notes: git 探测有缓存，且只缓存成功结果（TTL 到期会重探）', () => {
+  /* 实测：`spawnSync('git', …)` 在 Windows 单次 73–76ms，比读文件慢三百多倍。
+     `/data` 每次都走根解析 → TTFB 88ms 里业务逻辑只占 3ms，其余全是 fork。
+     加缓存后 TTFB 降到 5ms 量级。
+
+     这条测试守住三件事：
+       ① 重复调用不再 fork（同参数第二次应命中缓存）；
+       ② 失败结果**不缓存** —— 否则一次瞬时故障会变成持续的「找不到根」；
+       ③ 缓存有 TTL —— 永久缓存会让新建的 worktree 一直不出现（静默漏数据）。
+     直接量「第二次是否更快」太脆，改为行为断言 + 源码常量断言。 */
+  clearGitProbeCache();
+
+  // 失败结果不缓存：每次都要真的去问 git，结果仍是明确的 undefined
+  assert.equal(originOf('D:/__definitely_not_a_repo__'), undefined);
+  assert.equal(originOf('D:/__definitely_not_a_repo__'), undefined);
+
+  // 成功结果可缓存：本仓库有 origin 时，重复调用必须一致
+  const real = originOf(ROOT);
+  if (typeof real === 'string') {
+    assert.equal(originOf(ROOT), real, '同参数重复调用应返回同一结果');
+  }
+
+  // TTL 必须是存在的正数常量 —— 永久缓存是明确的错，用源码断言钉住。
+  const src = readFileSync(join(ROOT, 'lib', 'notes.js'), 'utf8');
+  const m = /GIT_PROBE_TTL_MS\s*=\s*([0-9_]+)/.exec(src);
+  assert.ok(m !== null, '必须定义 GIT_PROBE_TTL_MS');
+  const ttl = Number(m[1].replace(/_/g, ''));
+  assert.ok(ttl > 0 && ttl <= 60_000, `TTL 应是合理的短时间（实际 ${ttl}ms）`);
 });
 
 test('board-responsive: 数据里提到样式 id 时仍必须注入（不能靠 includes 判重）', () => {

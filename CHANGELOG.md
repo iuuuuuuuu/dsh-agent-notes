@@ -5,7 +5,62 @@
 
 ## [Unreleased]
 
+### 变更
+
+- **合并上游 `72573a5`，删除抽屉的两处冗余注入**
+  - 上游已修好我们提的两个 issue：锁背景滚动 CSS（与我们的写法逐字相同）
+    与 `openConsole()` 里的 `scrollTop = 0`
+  - 删除前做了剥离实验：用 CDP `Fetch.fulfillRequest` 拦掉注入层再测，
+    抽屉行为依然正确（滚到底 → 开第二篇 `scrollTop: 0`、`html/body` 均 `overflow: hidden`），
+    证明上游修复单独就够
+  - 保留一条**反向**测试，防止冗余悄悄长回来：两份等效实现长期并存必然漂移，
+    改一处忘另一处时没人知道哪份在生效
+  - 注入层现在只剩热更新轮询（上游没有对应能力）
+  - 上游其余改动：`extractSection` 采纳了我们 issue #9 的修法
+    （`(?=^## |(?![\s\S]))`）、笔记正文要求简体中文、备选方案允许写「无」、
+    归档校验跳过 `AGENTS.md`/`manifest.json`、日期排序加 id 兜底保证稳定
+  - 顺带修掉一个合并后遗症：`tools/sync-upstream.mjs` 的 `defaultRef` 是写死的
+    常量，`--auto` 合并后只更新 `upstream.json` 不回来改它，导致 `--check`
+    拿旧 ref 比新清单报假漂移。改为优先读 `upstream.json` 的记录，常量降为兜底
+
 ### 修复
+
+- **`/data` 轮询单次 88ms / 115KB —— 瓶颈是 git 子进程，不是文件 I/O**
+  - 最初以为是「每次重新扫盘读文件」，实测证伪：扫目录 + 读全部 md + 解析
+    一共只要 **2.96ms**，四阶段合计 **3.21ms**，而 TTFB 是 88ms
+  - TTFB ≈ 总耗时（88.24 vs 88.39）→ 时间全花在发出首字节**之前**
+  - 根因：`lib/notes.js` 每次根解析都 `spawnSync` 两个 git 子进程 ——
+    `git remote get-url origin` **76ms**、`git worktree list --porcelain`
+    **73ms**；对照 `statSync` 5 个文件只要 **0.22ms/轮**。git fork 比文件
+    I/O 慢三百多倍。容器目录场景还会放大：每个子仓库各 fork 一次
+  - **修法一**：给 `originOf` / `listWorktrees` 加 10 秒 TTL 缓存。
+    只缓存**成功**结果（把空结果记住会把一次瞬时故障放大成持续的「找不到根」）；
+    不能永久缓存（新建 worktree 会静默不出现，比慢更糟）
+  - **修法二**：`/data` 的 `rawBody` 只发前 3 行。它占响应体 **53%**，
+    而看板对它的全部用法只有一处 —— 取第 3 行做 rejected 笔记的 crux
+    （抽屉正文另走 `/note` 现读文件）。保留字段名与语义，上游代码无需改动
+  - 实测：TTFB **88.24 → 5.13ms（17 倍）**、响应体 **115815 → 53487 字节（−54%）**
+  - 故障注入三组全红：端点不截断 `rawBody`、只截 2 行（crux 丢 Status）、
+    TTL 改成永久
+  - 修掉一条**假绿**：最初只测 `firstLines` 单元，把端点改回 `note.rawBody`
+    后测试仍全绿（单元函数没变，变的是「端点有没有用它」）；
+    补上驱动真实响应的断言后才真红
+
+- **热更新轮询在侧边栏切走后仍在跑**（性能问题）：原本用
+  `if (document.hidden) return` 节流，但看板跑在侧边栏的 **iframe** 里 ——
+  宿主把 iframe 容器设为 `display:none` 后，iframe 内部的 `document.hidden`
+  **仍是 `false`**（它反映的是整个浏览器窗口是否可见，不是这个 iframe
+  是否被渲染）。实测隐藏 12 秒期间 `polls` 从 2 涨到 5，即仍在每 4 秒拉
+  一次 **100402 字节**、服务端仍在做全盘扫描（单次 74–82ms）。
+  - 改用 `IntersectionObserver` 观察 `document.body`，渲染树层面判定是否真的可见；
+    隐藏时 `clearInterval` 真停表，恢复时立刻补探一次
+  - 实测：隐藏 12 秒 `polls` 3 → 3（零请求）、恢复后 3 → 4（立刻补探）；
+    可见时响应速度不变（仍是 4 秒）
+  - `document.hidden` 保留作双保险（整页 hidden 时 IO 未必回调），两者覆盖场景不同
+  - 故障注入四组全红：退回只看 `document.hidden`、删掉 `stop()` 里的
+    `clearInterval`、不可见分支不调 `stop()`、去掉启动门控
+  - 顺带修掉一条**潜在假绿**断言：原先 `/clearInterval\(timer\)/` 会匹配到别处的
+    同名调用，删掉 `stop()` 里的实现后测试仍绿；改为断言 `stop()` 定义体内确实调了它
 
 - **改了笔记，看板页面不自动更新**：上游**有**自动同步（`focus` 事件 + 5 秒
   `setInterval`），但 `triggerLiveSync()` 第一行是 `if (!Core.dirHandle) return`，

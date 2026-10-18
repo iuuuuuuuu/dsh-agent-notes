@@ -78,5 +78,10 @@ node .probe/drawer-scroll.mjs            # CDP 真机：滚动位置 + 双层滚
 
 CDP 实测脚本流程：打开第 1 篇 → `scrollTop` 设到底 → 关闭 → 打开第 2 篇 → 断言 `scrollTop === 0`；再断言抽屉打开时 `html/body` 的 `overflow` 均为 `hidden` 且 `canUserScrollBg === false`。
 
+> **后续（2026-10-18，同日）**：上游 commit `72573a5` 已修好这两个缺陷，
+> 修法与本笔记的建议一致。注入层的两段补丁随之成为纯冗余，已删除 ——
+> 见 [../simplification/2026-10-18-drop-redundant-drawer-patch-after-upstream-fix.md](../simplification/2026-10-18-drop-redundant-drawer-patch-after-upstream-fix.md)。
+> 本笔记保留为「当时为什么这么修」的记录；当前实现**不再**包含这两段。
+
 上游 issue：
 - https://github.com/czm15053/write-notes-like-deepseek/issues/10

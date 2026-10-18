@@ -68,8 +68,38 @@ const UPSTREAM = {
   /** GitHub API 用 owner/repo；与上面 URL 同源，改一处必须同步另一处。 */
   slug: 'czm15053/write-notes-like-deepseek',
   pathPrefix: 'skills/write-notes-like-deepseek',
-  defaultRef: '0e8200c0f80d37a1c75e585a65b35401ae198462'
+  /**
+   * 兜底 ref：仅在 `upstream.json` 不存在或读不出 `ref` 时使用。
+   *
+   * **正常情况下这个值不参与判断** —— `resolveDefaultRef()` 会优先读
+   * `upstream.json` 里记录的 ref。原因（实测踩过）：`--auto` 合并后只更新
+   * `upstream.json` 与 manifest，**不会回来改这个常量**；于是 `--check`
+   * 拿旧常量去比对新清单，必然报「变更 6」的假漂移，两条门禁测试直接变红。
+   * 把 ref 收进数据文件（upstream.json 本身就是「上次同步到哪」的记录），
+   * 合并即自动同步，不必再记得手改常量。
+   */
+  fallbackRef: '72573a5b179de7798bbb7c4aeacdc0df6bf62439'
 };
+
+/**
+ * 解析默认 ref：优先 `upstream.json` 的记录，读不到才用常量兜底。
+ *
+ * @returns {string} 上游 commit 或分支名。
+ */
+function resolveDefaultRef() {
+  try {
+    const file = join(PACKAGE_ROOT, 'upstream.json');
+    if (existsSync(file)) {
+      const recorded = JSON.parse(readFileSync(file, 'utf8'));
+      if (typeof recorded?.ref === 'string' && recorded.ref.trim() !== '') {
+        return recorded.ref.trim();
+      }
+    }
+  } catch {
+    /* 读不出来就走兜底，不在这里报错 —— 调用方本来就有「取不到要明确失败」的处理。 */
+  }
+  return UPSTREAM.fallbackRef;
+}
 
 /**
  * 判断内置副本是否落后于上游默认分支。
@@ -209,7 +239,7 @@ async function collectPaths(ref) {
 
 /** 解析命令行参数。 */
 function parseArgs(argv) {
-  const args = { check: false, yes: false, latest: false, auto: false, branch: 'main', ref: UPSTREAM.defaultRef };
+  const args = { check: false, yes: false, latest: false, auto: false, branch: 'main', ref: resolveDefaultRef() };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--check') args.check = true;

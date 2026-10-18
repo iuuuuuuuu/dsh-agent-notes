@@ -58,6 +58,12 @@ if (window.__INLINE_DATA__ && window.__INLINE_DATA__.length) {
 
 `must`：页面不可见时跳过请求（`document.hidden`），别让后台 tab 空转。
 
+> **后续（2026-10-18，同日）**：上面这条判据**不够**。实测发现 iframe 被宿主
+> `display:none` 之后 `document.hidden` 仍是 `false`，轮询照跑不误。
+> 已改用 `IntersectionObserver` 按「是否真的渲染」门控，见
+> [2026-10-18-poll-only-when-rendered.md](2026-10-18-poll-only-when-rendered.md)。
+> 本笔记保留轮询机制本身的记录；可见性判据以新笔记为准。
+
 **可观测性**：脚本把 `{ polls, applied, revision, failures, error }` 挂到 `window.__agentNotesLive`。排查「热更新没生效」时先看这里 —— `polls` 不涨说明轮询没跑，`polls` 涨但 `applied` 不涨说明指纹没变或首次吞掉了。
 
 ## Alternatives considered
