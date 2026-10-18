@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 
 import { DRAWER_PATCH_ID, injectResponsiveCss, RESPONSIVE_CSS, RESPONSIVE_STYLE_ID } from '../lib/board-responsive.js';
 import { buildBoard, buildBoardFromRoots, buildInlineData, parseNote, scanNotes } from '../lib/board.js';
-import { isInside, registerBoardRoutes, renderNoticePage } from '../lib/board-route.js';
+import { isInside, registerBoardRoutes, renderNoticePage, revisionOf } from '../lib/board-route.js';
 import { listGitChildren, originOf, resolveNotesRoots } from '../lib/notes.js';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -693,6 +693,97 @@ test('board-responsive: 抽屉打开时 html 与 body 都要锁滚动（双层�
     '抽屉打开时 body 必须锁滚动');
   assert.match(RESPONSIVE_CSS, /html:has\(#drawer-console\.open\)/,
     'html 也必须锁 —— 只锁 body 实测挡不住');
+});
+
+test('board-route: /data 端点返回数据 + revision，且 revision 随内容变化', async () => {
+  /* 这条端点是热更新的数据源。上游自己的自动同步依赖 FileSystem 目录句柄
+     （Core.dirHandle），而走服务端注入这条路永远拿不到句柄 —— 实测
+     triggerLiveSync 第一行 `if (!Core.dirHandle) return` 直接返回，
+     改了笔记页面纹丝不动。所以刷新得由本插件补，端点必须在。
+     同时 revision 必须真能反映**内容**变化，否则页面比对不出来。 */
+  const { dir, root } = makeRepo([
+    { lifecycle: 'implemented', class: 'process', file: '2026-01-01-a.md', body: noteBody('原始标题') }
+  ]);
+  const handlers = [];
+  const ctx = ctxWithWebServer((route) => { handlers.push(route); });
+  const call = (url) => new Promise((settle) => {
+    const r = {
+      statusCode: 0, body: '',
+      writeHead(code) { this.statusCode = code; },
+      end(body) { this.body = body ?? ''; settle(this); }
+    };
+    handlers[0].handler({ method: 'GET', url }, r);
+  });
+  try {
+    registerBoardRoutes(ctx, { notesRootFor: () => root });
+    const first = await call('/agent-notes/data?session=x');
+    assert.equal(first.statusCode, 200);
+    const p1 = JSON.parse(first.body);
+    assert.ok(Array.isArray(p1.notes) && p1.notes.length === 1, '应返回笔记数据');
+    assert.equal(typeof p1.revision, 'string');
+    assert.ok(p1.revision.length >= 8, 'revision 应是有长度的指纹');
+
+    // 同内容两次：指纹必须一致（否则页面会无谓重绘）
+    const again = JSON.parse((await call('/agent-notes/data?session=x')).body);
+    assert.equal(again.revision, p1.revision, '内容没变时 revision 必须稳定');
+
+    // 改**内容**（不是篇数）：指纹必须变
+    const file = join(root, 'implemented', 'process', '2026-01-01-a.md');
+    writeFileSync(file, noteBody('改过的标题'), 'utf8');
+    const changed = JSON.parse((await call('/agent-notes/data?session=x')).body);
+    assert.notEqual(changed.revision, p1.revision, '内容变化时 revision 必须变');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('board-route: revision 只比篇数会漏掉内容修改（回归）', () => {
+  /* 曾经最容易写错的版本是「按篇数 + mtime 判变化」：
+     - 只比篇数：改一篇内容、篇数不变 → 察觉不到（正是本次要修的 bug）；
+     - 只比 mtime：部分编辑器保留 mtime，改了内容却看不出。
+     这里直接钉住「篇数相同但内容不同 → 指纹必须不同」。 */
+  const base = [{
+    id: 'a', title: 't', status: 'implemented', date: '2026-01-01',
+    lifecycle: 'implemented', cls: 'process',
+    problem: 'p1', decision: 'd1', alternatives: 'a1', consequences: 'c1', outLinks: []
+  }];
+  const same = [{ ...base[0] }];
+  const edited = [{ ...base[0], decision: 'd2' }];
+  assert.equal(revisionOf(base), revisionOf(same), '完全相同的输入必须同一指纹');
+  assert.notEqual(revisionOf(base), revisionOf(edited), 'decision 变了必须换指纹 —— 只比篇数会漏掉');
+  /* 四个小节**逐个**都要进指纹。只把其中一个算进去的话，
+     改别的小节就察觉不到 —— 用逐字段断言钉住，别让某个字段被漏掉。 */
+  for (const field of ['problem', 'decision', 'alternatives', 'consequences']) {
+    const changed = [{ ...base[0], [field]: '改过了' }];
+    assert.notEqual(
+      revisionOf(base), revisionOf(changed),
+      `${field} 必须计入指纹，否则只改这一节时页面不会更新`
+    );
+  }
+  // 只有引用关系变也要能察觉（因果图谱会跟着变）
+  const relinked = [{ ...base[0], outLinks: ['b'] }];
+  assert.notEqual(revisionOf(base), revisionOf(relinked), 'outLinks 变了必须换指纹');
+});
+
+test('board-responsive: 热更新脚本必须轮询 /data，并调用上游 ingestDataset', () => {
+  /* 三个关键点，任一遗漏都会让「改笔记后页面不更新」复现：
+     ① 端点由当前路径推导（不能直接拼 'data'，实测会得到 /agent-notes/uidata 404）；
+     ② 必须在页面加载后立刻探一次 —— 否则首个 4 秒周期拿到的已经是最新内容，
+        而「首次只记录不重绘」会把这次变化直接吞掉（实测踩过）；
+     ③ 必须调上游的 ingestDataset，而不是自己重画，否则引用计数/排序/四个视图
+        各自为政。 */
+  const page = '<html><head></head><body><aside id="drawer-console"></aside></body></html>';
+  const out = injectResponsiveCss(page);
+  const i = out.indexOf(`id="${DRAWER_PATCH_ID}"`);
+  assert.ok(i > 0, '补丁脚本必须存在');
+  const js = out.slice(i, out.indexOf('</script>', i));
+
+  assert.match(js, /replace\(\/\[\^\/\]\*\$\/, 'data'\)/, '端点应从当前路径推导，不能直接拼 data');
+  assert.match(js, /setInterval\(poll,/, '必须有轮询');
+  assert.match(js, /window\.ingestDataset\(/, '必须调上游的 ingestDataset');
+  assert.match(js, /document\.hidden/, '页面不可见时应跳过请求');
+  /* 加载后立刻探一次：体现在 IIFE 末尾直接调用 poll()。 */
+  assert.match(js, /\n\s*poll\(\);\s*\n/, '页面加载后必须立刻探一次（否则首次变化被吞）');
 });
 
 test('board-responsive: 数据里提到样式 id 时仍必须注入（不能靠 includes 判重）', () => {

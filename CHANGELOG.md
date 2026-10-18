@@ -3,6 +3,29 @@
 本文件记录对使用者有影响的变更。格式对齐 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### 修复
+
+- **改了笔记，看板页面不自动更新**：上游**有**自动同步（`focus` 事件 + 5 秒
+  `setInterval`），但 `triggerLiveSync()` 第一行是 `if (!Core.dirHandle) return`，
+  而 `dirHandle` 只在用户手动点「连接本地目录」并用 File System Access API 授权后
+  才有值。侧边栏走服务端注入 `__INLINE_DATA__` 这条路，**永远不设置 dirHandle**，
+  于是两条自动同步全部空转。
+  - 服务端新增 `GET /agent-notes/data`，只返回 `{ revision, notes }`（不重传 76KB HTML）
+  - `revision` 是**内容指纹**（对渲染字段做 sha256），不是篇数也不是 mtime ——
+    只比篇数时改一篇内容察觉不到，正是本次的 bug
+  - 前端每 4 秒拉一次，变了才调上游的 `ingestDataset()` 重绘；无变化零重绘，
+    用户正在看的滚动位置与打开的抽屉不会跳动
+  - **加载后必须立刻探一次**：只等 4 秒周期的话，首次请求拿到的已是最新内容，
+    而「首次只记录不重绘」会把这个变化直接吞掉 —— 表现为「轮询在跑但页面永不更新」，
+    很难从现象分辨
+  - 端点是「当前路径最后一段换成 data」，不能直接拼 `'data'`（会得到
+    `/agent-notes/uidata`，实测 404，轮询静默失效）
+  - 状态可观测：`window.__agentNotesLive` 暴露 `{ polls, applied, revision, failures }`
+  - 故障注入：去掉加载时的首次 `poll()` → 变红；端点改成朴素拼接 → 变红；
+    不调 `ingestDataset` → 变红；`revisionOf` 漏掉某个小节字段 → 变红
+
 ## [0.3.1] - 2026-10-18
 
 ### 修复
@@ -51,8 +74,6 @@
   - 说明页自动重试：每 2.5s 探一次，成功就地跳进看板，上限 30s
   - 优先级不可反：会话能解析时必须以会话为准（多开同项目时前端 cwd 可能是旧的）
   - 故障注入：撤掉兜底调用 → 变红；去掉绝对路径校验 → 变红；去掉前端拼接 → 变红
-
-## [Unreleased]
 
 ## [0.3.0] - 2026-10-17
 
