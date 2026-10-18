@@ -5,7 +5,50 @@
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-18
+
+### 新增
+
+- **三道笔记纪律门禁，全部借鉴 `deepseek-ai/deepseek-harness` 的实践**
+  - 规则来源：DSH 的 `.agents/notes/AGENTS.md`、`scripts/change-scope.ts`、
+    `scripts/doc-budgets.manifest.json`、`skills/dsh-pre-push-checks`
+
+- **`notes:coverage` —— 拦住「该写而没写」**
+  - 既有的 `notes:gate` 三条脚本只验**已写笔记的格式**，对「改了代码却
+    一篇没写」完全无感。本仓库连续 5 次改 CI 流程一篇没写，就是这么漏的
+  - 判定口径**自动检测仓库结构**（看目录里有没有 `.dart`/`.rs`/`.go`/`.ts`…），
+    不写死任何路径 —— 换技术栈不用改脚本
+  - 实测：本插件检测出 `lib, skills, src, tools`；某 Flutter 仓库检测出
+    `android, lib, macos, rust, scripts, test, tools, windows`
+  - `docs/` 故意豁免：那是计划与排查记录（**过程**），不是决策（**结论**）
+  - **区间模式逐提交检查**：合并看会让一个笔记掩护其余所有漏记，
+    而那正是批量 push 的常见形态
+  - 检测不出来的目录打 `⚠` 提示，不静默放行
+
+- **`notes:supersession` —— 新笔记必须声明与既有笔记的关系**
+  - DSH 规则：**Every new Agent Note triggers a supersession check.**
+    本仓库原先完全没有，实测 11 篇笔记只有 3 篇有互链
+  - 三种合法路径：相对链接 / `Independent: <非空理由>` / `proposed`·`rejected` 豁免
+  - 不做语义判重（需要理解内容，做不到可靠；误报的门禁会被绕过）；
+    `Independent:` 那一行把「我查过了」从口头声明变成**可验证的动作**
+
+- **`doc:budget` —— 文档字数预算**
+  - DSH 给 7 个文件设了字数上限。本仓库 `AGENTS.md` 在一天内从 148 词涨到
+    275 词，而没有任何东西阻止它继续吸收「顺便补一句」
+  - 中文按**字**计、英文按**词**计（`wc -w` 对中文低估约 7 倍）
+  - 预算刻意贴近当前值，只留几十的余量 —— 留太多等于没设
+
+- **`hooks:install` 现在装两道检查**：覆盖门禁 + supersession 检查
+
 ### 修复
+
+- **门禁的 git 调用缺 `-z`，中文路径静默逃检**
+  - 不带 `-z` 时 git 把非 ASCII 路径转义成 `"lib/\344\270\255\346\226\207.js"`
+    并加引号 ⇒ `startsWith('lib/')` 失败 ⇒ **中文路径的源码改动静默放行**
+  - 反向也坏：中文文件名的笔记会被认为「没带笔记」
+  - 同时补齐 `--no-ext-diff` / `--no-textconv` / `--no-renames` /
+    `--ignore-submodules=none` / `maxBuffer: 64MB`
+  - 这条是我先前误判「不必要」后经用户提醒重新实测发现的
 
 - **`npm test` 会改写真实的 `skills/agent-notes`，导致 CI 必红而本地全绿**
   - 现象：CI 报 `--check` 失败「相同 15｜变更 6」，且那 6 个文件正是刚合并的，
