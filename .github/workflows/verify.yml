@@ -94,6 +94,19 @@ jobs:
             node tools/notes-supersession.mjs --range "$NOTES_SUPERSESSION_BASE..HEAD"
           fi
 
+      # 文档预算：AGENTS.md / README 的字数上限。
+      #
+      # 借鉴 deepseek-harness 的 doc-budgets.manifest.json。理由不是「简洁好看」，
+      # 而是这些文件每次改动都会吸收一句「顺便补上」，而没有任何东西阻止它们
+      # 增长 —— 实测本仓库 AGENTS.md 在一天内从 148 词涨到 275 词。
+      # 没有上限时它会变成没人读完、也没人敢删的长文（删它需要判断哪些还成立，
+      # 成本高到没人做）。预算把「该不该加这一句」从模糊自觉变成一次明确取舍。
+      #
+      # ★ 预算刻意贴近当前值（只留几十的余量）：下一次「顺便补一句」就会触发。
+      # ★ 中文按字计、英文按词计 —— 按 `wc -w` 会严重低估中文文档的增长。
+      - name: 文档预算
+        run: npm run doc:budget
+
       # 跑测试前后各打一次摘要，并在测试后**断言 vendored 目录没被改**。
       #
       # 这不是临时排查残留，是针对一类真实缺陷的永久门禁：
