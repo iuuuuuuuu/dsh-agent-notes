@@ -213,13 +213,23 @@ test('self-update: 部分文件拉不到时整批放弃，不留半套', async (
 test('self-update: scheduleSkillUpdate 立即返回（不阻塞启动）', async () => {
   /* 最关键的契约：apply 里 fire-and-forget，启动不能被网络拖慢。
      用永远 pending 的 fetch，并断言返回值类型 ——
-     光测耗时抓不到，因为不 await 就永远 0ms。 */
+     光测耗时抓不到，因为不 await 就永远 0ms。
+
+     **必须传隔离的 targetDir**：
+     原先这里调 `scheduleSkillUpdate({})`，不传 targetDir，于是它默认把
+     真实的 `skills/agent-notes` 当目标。虽然 `updateSkillCopy` 是
+     fire-and-forget、测试在 `finally` 里也还原了 fetch，但在「第一个请求
+     已经返回、后续请求尚未发出」这类时序下，后台任务仍可能带着真实 fetch
+     继续跑，进而 renameSync 覆盖真实工作区的 vendored 文件。
+     传 targetDir 到沙箱是这类「后台写盘」测试应有的防御：
+     不依赖时序巧合，也就不用去赌它不会发生。 */
+  const box = makeSandbox();
   const realFetch = globalThis.fetch;
   globalThis.fetch = () => new Promise(() => { /* 永不 resolve */ });
   try {
     const { scheduleSkillUpdate } = await import('../lib/self-update.js');
     const started = Date.now();
-    const returned = scheduleSkillUpdate({});
+    const returned = scheduleSkillUpdate({ targetDir: box.target });
     const elapsed = Date.now() - started;
     assert.equal(
       returned, undefined,
@@ -227,8 +237,13 @@ test('self-update: scheduleSkillUpdate 立即返回（不阻塞启动）', async
         + `实际返回 ${Object.prototype.toString.call(returned)}`
     );
     assert.ok(elapsed < 100, `必须立即返回，实际耗时 ${elapsed}ms`);
+    /* 沙箱内容不得被改动：fetch 永不 resolve，什么都没拉下来。 */
+    const before = snapshot(box.target);
+    await new Promise((resolve) => { setTimeout(resolve, 120); });
+    assert.deepEqual(snapshot(box.target), before, '后台任务不该写入任何内容');
   } finally {
     globalThis.fetch = realFetch;
+    rmSync(box.dir, { recursive: true, force: true });
   }
 });
 

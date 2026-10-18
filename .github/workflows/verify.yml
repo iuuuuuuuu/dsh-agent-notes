@@ -37,8 +37,36 @@ jobs:
       # 客户端 bundle 同步、投影与命令名一致性，然后跑测试与故障注入。
       # notes:gate 单独列出来：三条 vendored 脚本在空集合上 exit 0，
       # 外壳负责把「没有可验对象」判成失败（见 .agents/notes 里那篇 process 笔记）。
-      - name: 自检
-        run: npm run verify && npm run notes:gate && npm test && npm run gate:fault-injection
+      #
+      # 拆成多步（不是一条 &&）：CI 曾出现「本地全绿、CI 报 vendored 文件是旧版」，
+      # 拆开后哪一步让摘要变了在日志里一目了然，不必再靠猜。
+      - name: 包自检
+        run: npm run verify
+
+      - name: 笔记门禁
+        run: npm run notes:gate
+
+      # 跑测试前后各打一次摘要：用来定位「是否有测试在后台改写 vendored 副本」。
+      # 这次是排查手段，成本几毫秒，留着当下次同类问题的仪表。
+      - name: 测试前的 vendored 摘要
+        run: |
+          echo "== 测试前 =="
+          sha256sum skills/agent-notes/SKILL.md
+          node -e "const m=require('./tools/upstream-manifest.json');console.log('清单记录:', m.files['SKILL.md'])"
+
+      - name: 行为测试
+        run: npm test
+
+      - name: 测试后的 vendored 摘要
+        run: |
+          echo "== 测试后 =="
+          sha256sum skills/agent-notes/SKILL.md
+          echo "== git 视角的改动 =="
+          git status --porcelain || true
+          git --no-pager diff --stat || true
+
+      - name: 故障注入
+        run: npm run gate:fault-injection
 
   upstream-drift:
     runs-on: ubuntu-latest
