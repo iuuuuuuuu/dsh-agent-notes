@@ -1,6 +1,7 @@
 # Agent Note: 上游修好了抽屉缺陷，删掉注入层的重复实现
 
 Status: implemented
+Archived: 2026-10-19
 
 ## Problem
 

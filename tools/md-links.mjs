@@ -45,6 +45,26 @@ const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
  *
  * 刻意**不含** `skills/agent-notes/`：那是 vendored 上游内容，手改会被哈希
  * 门禁拦下。它内部的链接由上游负责，本仓库无权也不该修。
+ *
+ * ## 归档笔记作为「源」被排除（但指向它们的链接仍检查）
+ *
+ * 与上游 `verify-md-links.ts` 对齐（它用 `isArchivedAgentNotePath` 做同样的
+ * 排除，注释写明「Archived notes are excluded as sources, but links to them
+ * remain checked」）。
+ *
+ * **为什么要排除**：归档会把 `implemented/<class>/x.md` 移到
+ * `archived/<class>/x.md` —— 深度不变、只有 lifecycle 段变了。所以笔记里
+ * 原先的 `../bug-fix/y.md` 归档后会解析成 `archived/bug-fix/y.md`，而 `y.md`
+ * 还在 `implemented/` —— **断链**。
+ *
+ * 实测规模：待归档笔记的出向链接 63 条里 **60 条（95%）会断**。而归档后
+ * **不能再改归档文件**（封印机制：`--write` 只封未封的，已封的改了就报
+ * `seal mismatch`）。所以这不是「忘了修」，而是**设计上无法事后修**。
+ *
+ * 把归档笔记排除出「源」，等于承认「封存内容的内部链接会随时间腐化」——
+ * 这是**有意的取舍**，不是漏洞：归档笔记是历史快照，不是活文档。
+ *
+ * 但**指向**归档笔记的链接必须继续检查 —— 那是活文档里的引用，断了要修。
  */
 function collectDocuments() {
   const files = [];
@@ -56,7 +76,7 @@ function collectDocuments() {
     if (statSync(full).isFile()) files.push(name);
   }
 
-  /* 笔记树：递归收集。 */
+  /* 笔记树：递归收集，跳过归档区。 */
   const walk = (relDir) => {
     const full = join(PACKAGE_ROOT, relDir);
     if (!existsSync(full)) return;
@@ -64,8 +84,13 @@ function collectDocuments() {
       const childRel = `${relDir}/${name}`;
       const childFull = join(PACKAGE_ROOT, childRel);
       const info = statSync(childFull);
-      if (info.isDirectory()) walk(childRel);
-      else if (name.endsWith('.md')) files.push(childRel.split(sep).join('/'));
+      if (info.isDirectory()) {
+        /* 归档区不作为校验源（理由见上方）。 */
+        if (relDir === '.agents/notes' && name === 'archived') continue;
+        walk(childRel);
+      } else if (name.endsWith('.md')) {
+        files.push(childRel.split(sep).join('/'));
+      }
     }
   };
   walk('.agents/notes');
