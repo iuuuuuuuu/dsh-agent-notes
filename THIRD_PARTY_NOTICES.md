@@ -44,5 +44,5 @@
 
 ## 3. 本插件自身
 
-`dsh-agent-notes` 以 MIT 发布，版权归 dsh-agent-notes contributors，
+`@iuuuuuuuu/agent-notes` 以 MIT 发布，版权归 dsh-agent-notes contributors，
 全文见 [LICENSE](LICENSE)。
