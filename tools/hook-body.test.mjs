@@ -23,7 +23,7 @@
  * 完整笔记树等等，代价远大于收益，而对照组失败还会被误读成「钩子不对」。
  */
 import { strict as assert } from 'node:assert';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
@@ -43,6 +43,21 @@ test('hook: 正文以 sh 的 shebang 开头', () => {
   assert.match(HOOK_BODY, /^#!\/bin\/sh/, '必须用 sh 的 shebang');
   assert.match(HOOK_BODY, /^set -e$/m,
     '必须 set -e —— 否则第一道失败后仍会继续跑完并返回 0');
+});
+
+test('hook: 已安装的 .githooks/commit-msg 必须与源一致（生成物不得漂移）', () => {
+  /* .githooks/commit-msg 是生成物。实测踩过：改了源、提交了、合并了，
+     而**已安装的钩子还是旧版** —— 没有任何门禁发现。
+     这与「门禁没人跑」是同一种病：改动生效了吗？没人验证。 */
+  const installed = join(ROOT, '.githooks', 'commit-msg');
+  assert.ok(existsSync(installed),
+    '.githooks/commit-msg 应当被提交（这样 clone 后 hooks:install 才能幂等）');
+
+  const actual = readFileSync(installed, 'utf8').replace(/\r\n/g, '\n');
+  const expected = HOOK_BODY.replace(/\r\n/g, '\n');
+  assert.equal(actual, expected,
+    '已安装的钩子与 tools/hook-body.mjs 不一致 —— 跑 npm run hooks:install 重新生成。'
+    + '（生成物漂移时，钩子跑的是旧门禁，而所有测试都看着新的那份。）');
 });
 
 test('hook: 每条命令都指向真实存在的脚本（路径写错=门禁静默失效）', () => {
