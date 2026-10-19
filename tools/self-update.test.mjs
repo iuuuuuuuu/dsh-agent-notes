@@ -225,7 +225,16 @@ test('self-update: scheduleSkillUpdate 立即返回（不阻塞启动）', async
      不依赖时序巧合，也就不用去赌它不会发生。 */
   const box = makeSandbox();
   const realFetch = globalThis.fetch;
-  globalThis.fetch = () => new Promise(() => { /* 永不 resolve */ });
+  /* 用一个**可被外部收口**的挂起 Promise，而不是永不 resolve 的那种：
+     后者会让后台任务一直持有 box.target，而 finally 里的 rmSync 已经把
+     目录删了 —— 后台任务随后可能在别处留下 ENOENT。
+     实测偶发过两次（`cp ENOENT ...\.agents\skills\agent-notes` 与一次
+     self-update 用例失败），根因都是这种「测试结束了，后台还在跑」。 */
+  let settle;
+  const pendingFetch = new Promise((resolve, reject) => {
+    settle = { resolve, reject };
+  });
+  globalThis.fetch = () => pendingFetch;
   try {
     const { scheduleSkillUpdate } = await import('../lib/self-update.js');
     const started = Date.now();
@@ -237,10 +246,15 @@ test('self-update: scheduleSkillUpdate 立即返回（不阻塞启动）', async
         + `实际返回 ${Object.prototype.toString.call(returned)}`
     );
     assert.ok(elapsed < 100, `必须立即返回，实际耗时 ${elapsed}ms`);
-    /* 沙箱内容不得被改动：fetch 永不 resolve，什么都没拉下来。 */
+    /* 沙箱内容不得被改动：fetch 挂起，什么都没拉下来。 */
     const before = snapshot(box.target);
     await new Promise((resolve) => { setTimeout(resolve, 120); });
     assert.deepEqual(snapshot(box.target), before, '后台任务不该写入任何内容');
+
+    /* 收口：让后台那个 updateSkillCopy 拿到明确失败而结束，再等它走完
+       catch。不做这一步，它会带着 box.target 活到 rmSync 之后。 */
+    settle.reject(new Error('测试收口：模拟远端不可达'));
+    await new Promise((resolve) => { setTimeout(resolve, 80); });
   } finally {
     globalThis.fetch = realFetch;
     rmSync(box.dir, { recursive: true, force: true });

@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 import {
   BUNDLED_SKILL_DIR,
@@ -24,6 +24,12 @@ import { POLICY_MARKERS, buildPolicyText } from '../lib/policy.js';
 function makeProject() {
   const dir = mkdtempSync(join(tmpdir(), 'an-proj-'));
   const target = join(dir, PROJECT_SKILL_REL);
+  /* 必须先建父目录：`cpSync` **不会**为深层目标递归创建父级，路径中间的
+     `.agents/skills/` 不存在时它会直接 ENOENT。
+     本机常年通过、实测偶发红过一次
+     （`cp ENOENT ...\an-proj-xxx\.agents\skills\agent-notes`）——
+     这类「本机能过」的缺陷最难查，所以显式补上。 */
+  mkdirSync(dirname(target), { recursive: true });
   cpSync(BUNDLED_SKILL_DIR, target, { recursive: true });
   return { dir, target };
 }

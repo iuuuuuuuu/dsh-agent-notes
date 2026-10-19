@@ -1,0 +1,203 @@
+/**
+ * 校验仓库内 Markdown 的**相对链接**是否都指向真实存在的文件。
+ *
+ * ## 为什么需要
+ *
+ * 本仓库有 5 个顶层文档 + 23 篇笔记，它们互相引用（README ↔ README.en、
+ * AGENTS → 笔记、笔记 → 笔记、THIRD_PARTY_NOTICES → LICENSE）。
+ *
+ * 笔记门禁（`verify-agent-note-tree.ts`）只验**笔记之间**的链接，
+ * `tools/verify-plugin.mjs` 只验**双语文档与徽标存在**。两者都不管
+ * 「README 指向的那个文件还在不在」。实测这类断链最容易在两种时候出现：
+ *
+ *   - 归档 / 删除一篇笔记时，入站链接没人修；
+ *   - 重命名文件后，只改了正文里的说法，忘了改链接。
+ *
+ * 上游 `deepseek-ai/deepseek-harness` 用 `scripts/verify-md-links.ts`
+ * 覆盖这件事（依赖 mdast 做 AST 解析，还校验 `#fragment` 锚点）。
+ *
+ * ## 为什么不用 mdast
+ *
+ * 本仓库的链接形态很简单：行内链接 `[文字](目标)` 与图片 `![alt](目标)`。
+ * 用 mdast 要引入一棵依赖树（以及它的 GFM 扩展）才能覆盖同样的事，
+ * 而收益只有「极端边缘情况更准」——例如链接出现在代码块里要不要跳过。
+ * 这一点用「跳过围栏代码块」的轻量扫描就能处理，见 `stripCodeFences`。
+ *
+ * **不做 `#fragment` 锚点校验**：本仓库当前零处使用锚点链接（实测 grep）。
+ * 为不存在的需求增加「标题转 slug」这套逻辑，是纯粹的复杂度 —— 而它一旦
+ * 实现得与渲染器不一致，就会产出误报。这条记在重访信号里：等到真的用上
+ * 锚点时再加，那时应以实际渲染器（GitHub）的 slug 规则为准。
+ *
+ * ## 用法
+ *
+ * ```sh
+ * npm run md:links          # 校验
+ * ```
+ */
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { dirname, join, relative, resolve, sep } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+/**
+ * 需要校验的 Markdown 文件（相对仓库根）。
+ *
+ * 刻意**不含** `skills/agent-notes/`：那是 vendored 上游内容，手改会被哈希
+ * 门禁拦下。它内部的链接由上游负责，本仓库无权也不该修。
+ */
+function collectDocuments() {
+  const files = [];
+
+  /* 顶层文档。 */
+  for (const name of readdirSync(PACKAGE_ROOT)) {
+    if (!name.endsWith('.md')) continue;
+    const full = join(PACKAGE_ROOT, name);
+    if (statSync(full).isFile()) files.push(name);
+  }
+
+  /* 笔记树：递归收集。 */
+  const walk = (relDir) => {
+    const full = join(PACKAGE_ROOT, relDir);
+    if (!existsSync(full)) return;
+    for (const name of readdirSync(full)) {
+      const childRel = `${relDir}/${name}`;
+      const childFull = join(PACKAGE_ROOT, childRel);
+      const info = statSync(childFull);
+      if (info.isDirectory()) walk(childRel);
+      else if (name.endsWith('.md')) files.push(childRel.split(sep).join('/'));
+    }
+  };
+  walk('.agents/notes');
+
+  return files.sort();
+}
+
+/**
+ * 把围栏代码块与行内代码替换成等长空白。
+ *
+ * 为什么保留长度：替换成等长空白后，报错时给出的行列位置仍然对应原文，
+ * 不必做位置换算。
+ *
+ * 为什么要跳过：文档里常有「链接长这样」的示例（本仓库的笔记里就有），
+ * 那些不是真链接。不跳过会产生大量误报，而误报多的门禁会被绕过。
+ *
+ * @param {string} text 原文。
+ * @returns {string} 同长度、代码区域已清空的文本。
+ */
+function stripCodeFences(text) {
+  const blank = (s) => s.replace(/[^\n]/g, ' ');
+
+  /* 围栏代码块：``` 或 ~~~ 开头，允许有语言标注。 */
+  let out = text.replace(/(^|\n)(```|~~~)[^\n]*\n[\s\S]*?\n\2[^\n]*(?=\n|$)/g,
+    (whole) => blank(whole));
+
+  /* 行内代码：成对的单反引号（不跨行）。 */
+  out = out.replace(/`[^`\n]*`/g, (whole) => blank(whole));
+
+  return out;
+}
+
+/**
+ * 从一段 Markdown 里抽取所有相对链接目标。
+ *
+ * 支持的形态：
+ *   - `[文字](目标)`、`[文字](目标 "标题")`
+ *   - `[文字](<目标>)`（CommonMark 的尖括号目标，用来含空格）
+ *   - `![alt](目标)`（图片）
+ *
+ * @param {string} text 已去掉代码区域的文本。
+ * @returns {{ target: string, raw: string }[]} 链接目标清单。
+ */
+function extractLinks(text) {
+  const links = [];
+  /* 图片与链接同构，`!` 可有可无。目标部分允许尖括号包裹与可选标题。 */
+  const pattern = /!?\[[^\]]*\]\(\s*(?:<([^>]*)>|([^\s)]+))(?:\s+"[^"]*")?\s*\)/g;
+  let match;
+  while ((match = pattern.exec(text)) !== null) {
+    const target = (match[1] ?? match[2] ?? '').trim();
+    if (target !== '') links.push({ target, raw: match[0] });
+  }
+  return links;
+}
+
+/**
+ * 判断一个链接目标是否需要校验，需要时返回去掉 fragment 的路径部分。
+ *
+ * 跳过：绝对 URL（含协议）、协议相对 URL（`//`）、页内锚点（`#`）、
+ * 纯 mailto/tel。这些都不指向本仓库的文件。
+ *
+ * @param {string} target 链接目标。
+ * @returns {string | null} 相对路径，或 null（不需要校验）。
+ */
+function localPathOf(target) {
+  if (target.startsWith('#')) return null;
+  if (/^[a-z][a-z0-9+.-]*:/i.test(target)) return null;
+  if (target.startsWith('//')) return null;
+  /* fragment 与 query 都不影响文件是否存在。 */
+  const withoutFragment = target.split('#')[0].split('?')[0];
+  if (withoutFragment === '') return null;
+  return withoutFragment;
+}
+
+/**
+ * 执行校验。
+ *
+ * @returns {{ checked: number, links: number, errors: string[] }} 结果。
+ */
+export function verifyMarkdownLinks() {
+  const documents = collectDocuments();
+  const errors = [];
+  let links = 0;
+
+  for (const doc of documents) {
+    const full = join(PACKAGE_ROOT, doc);
+    const text = readFileSync(full, 'utf8');
+    const stripped = stripCodeFences(text);
+    const found = extractLinks(stripped);
+
+    for (const { target } of found) {
+      const local = localPathOf(target);
+      if (local === null) continue;
+      links += 1;
+
+      /* 百分号编码要及时解码：`%E4%B8%AD` 这种写法指向真实存在的中文文件名。 */
+      let decoded = local;
+      try { decoded = decodeURI(local); } catch { /* 非法编码：按原样检查 */ }
+
+      const base = dirname(join(PACKAGE_ROOT, doc));
+      const resolved = resolve(base, decoded);
+
+      /* 目标必须在仓库内：`../../../etc/passwd` 这类穿越路径不算合法文档链接。 */
+      const rel = relative(PACKAGE_ROOT, resolved);
+      if (rel.startsWith('..') || rel.startsWith(sep + '..')) {
+        errors.push(`${doc}: 链接越出仓库范围 -> ${target}`);
+        continue;
+      }
+
+      if (!existsSync(resolved)) {
+        errors.push(`${doc}: 链接目标不存在 -> ${target}`);
+      }
+    }
+  }
+
+  return { checked: documents.length, links, errors };
+}
+
+/* ── CLI ──────────────────────────────────────────────────────────────── */
+
+function main() {
+  const result = verifyMarkdownLinks();
+  if (result.errors.length === 0) {
+    console.log(`Markdown 链接校验通过：${result.checked} 个文档、${result.links} 条相对链接全部可达。`);
+    process.exit(0);
+  }
+  console.error(`Markdown 链接校验失败：${result.errors.length} 处`);
+  for (const error of result.errors) console.error(`  ✖ ${error}`);
+  process.exit(1);
+}
+
+/* 只在被当作脚本直接执行时跑 CLI —— 被 import 时保持纯净，便于测试。 */
+const invokedDirectly = process.argv[1] !== undefined
+  && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
+if (invokedDirectly) main();
