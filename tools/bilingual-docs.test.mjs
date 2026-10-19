@@ -114,6 +114,54 @@ test('bilingual: 代码块数量不同必须报错', () => {
   assert.match(result.errors[0], /代码块数量不一致/, '必须指出代码块对不上');
 });
 
+/* ── 代码块语言标记 ─────────────────────────────────────────────────────
+ *
+ * 为什么加这条：原有检查只比「围栏**数量**」，不比「标记**是什么**」。
+ * 而语言标记（sh / bash / yaml）是**语言无关**的 —— 翻译它没有意义，
+ * 所以两版不一致**一定是真漂移**。
+ *
+ * 实测过三个候选，只有它无歧义：
+ *   · 段落数 / 列表项数：**中英排版惯例本来就不同**（中文把内容排在列表里、
+ *     英文排在正文段落里；中文还有「一格多项」）。翻历史数据发现 30 处
+ *     「差异」全是方法假象 —— 做成门禁会一直红，且红了也没错
+ *   · 代码块内的命令行：命令**相同**但**注释不同**（注释本就该翻译）
+ *   · **围栏语言标记**：完全相同 ✔
+ *
+ * 与 mdast 的关系：这条**替代**了原计划的 mdast 方案 —— 判据就是「围栏行里
+ * 那三个反引号后面跟的词」，它在代码块内容之外，正则不会误吃块内文本。
+ */
+test('bilingual: 代码块语言标记不一致必须判红', () => {
+  const result = withEdits({ en: enBackup.replace('```sh', '```bash') });
+  assert.ok(result.errors.length > 0, '英文版把 sh 改成 bash 必须判红');
+  assert.match(result.errors.join(' '), /语言标记不一致/, '必须点名是语言标记问题');
+});
+
+test('bilingual: 两版同时改语言标记必须放行（对照）', () => {
+  /* 防止上条把门禁写成「只要有围栏就红」。 */
+  const fence = '\n```python\nprint(1)\n```\n';
+  const result = withEdits({ zh: zhBackup + fence, en: enBackup + fence });
+  assert.deepEqual(result.errors, [], `两版同步加围栏必须放行，实际：${result.errors.join('; ')}`);
+});
+
+test('bilingual: 语言标记顺序不同也要判红（集合相同不算过）', () => {
+  /* 顺序也是结构：同样的标记但前后不同，说明两版的示例顺序不一致。 */
+  const firstFence = /\n```sh[\s\S]*?```\n/;
+  const matched = firstFence.exec(enBackup);
+  assert.ok(matched !== null, '英文版应有 sh 围栏可挪动');
+  const moved = enBackup.replace(firstFence, '\n').concat(matched[0]);
+  const result = withEdits({ en: moved });
+  assert.ok(result.errors.length > 0, '围栏顺序不同必须判红');
+});
+
+test('bilingual: 闭合围栏不得被当成开启围栏', () => {
+  /* 开闭成对：第 1、3、5… 个才是开启围栏。若把闭合也算进去，抽出的
+     序列会多出一堆空字符串，比对时噪声大且容易误判。 */
+  const s = structureOf('```sh\na\n```\n\n```yaml\nb\n```\n');
+  assert.deepEqual(s.fenceLangs, ['sh', 'yaml'],
+    '只应取开启围栏的语言标记，实际：' + JSON.stringify(s.fenceLangs));
+  assert.equal(s.fences, 2, '围栏数量仍应是 2');
+});
+
 test('bilingual: 代码块里的 # 注释不得被当成标题', () => {
   /* 这是最容易犯的实现错误：示例里的 shell 注释 `# 安装` 若被数成标题，
      两版注释文字不同就会误报。
