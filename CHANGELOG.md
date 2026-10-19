@@ -3,6 +3,43 @@
 本文件记录对使用者有影响的变更。格式对齐 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+
+## [Unreleased]
+
+### 修复
+
+- **npm 包在 `node_modules` 下门禁跑不起来**
+  - Node 拒绝在 `node_modules` 下剥离类型（实测）：
+    `node node_modules/probe/a.ts` → `ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING`。
+    加 `--experimental-strip-types` **也拦不住** —— 限制在路径本身，不在开关
+  - 而 `skills/agent-notes/scripts/` 下 7 个门禁脚本全是 `.ts`，
+    所以**直接发包 = 交付一个装完就坏的门禁**
+  - ★ 关键：**本地测不出来**。本地仓库不在 `node_modules` 下，跑一切正常；
+    `npm run check` 340/340 全绿，对这个问题完全无感
+
+  - 修法：运行时把 scripts 目录**复制到临时位置再执行**（零转译）。
+    选它而不是预编译 `.js`：
+    · 手写转译实测栽了三次（正则漏 4 类 → 补了仍漏 3 类 → 扫描器误吞括号 0/7）
+    · 官方 `module.stripTypeScriptTypes` 确实 7/7 一次过，
+      **但那是「能不能做」不是「该不该做」** —— 预编译产物要跟着 vendored
+      上游同步重新生成，那是一条新的漏
+    · 复制到 tempdir 天然免疫上游同步
+
+  - ★★ 真正的根因是**一个退格符**（0x08）混进了正则：
+
+        if (!/^Hnode_modules^H/i.test(script)) ...
+
+    语义变成 `/\x08node_modules\x08/` —— **永不匹配**，这个函数一直没生效。
+    `text-integrity` 本来抓得到，是我没在改动后立刻跑 check。
+    而这行若不是**真机验证**（把包装进 node_modules 真跑）永远看不出来：
+    本地走的是「不复制」的**正确分支**，看起来一切正常
+
+  - 真机验证 9 条全过，其中一条是**故障注入的前提确认**：
+    先证明「直接跑确实会失败」，再验「复制后能跑通」
+    —— 否则可能在解一个不存在的问题
+
+    门禁真跑通：`ok: 67 note(s) tree and relative links verified`
+    三个门禁脚本在 `node_modules` 下逐一验过，全部 exit=0
 ## [0.6.0] - 2026-10-19
 
 ### 新增
