@@ -140,6 +140,11 @@ jobs:
       - name: 双语文档结构
         run: npm run docs:bilingual
 
+      # 把双语文档之间「指错语言」的互链改回来（语言切换器那行不动，
+      # 与上游 skipTargets 同口径）。当前仓库零改动 —— 它是防御性完备。
+      - name: 双语互链
+        run: npm run docs:fix-links
+
       - name: 文本完整性
         run: npm run text:integrity
 

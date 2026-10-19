@@ -38,6 +38,8 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { collectRelativeLinks, undefinedReferences } from './markdown-links.mjs';
+
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 /**
@@ -135,15 +137,11 @@ function stripCodeFences(text) {
  * @returns {{ target: string, raw: string }[]} 链接目标清单。
  */
 function extractLinks(text) {
-  const links = [];
-  /* 图片与链接同构，`!` 可有可无。目标部分允许尖括号包裹与可选标题。 */
-  const pattern = /!?\[[^\]]*\]\(\s*(?:<([^>]*)>|([^\s)]+))(?:\s+"[^"]*")?\s*\)/g;
-  let match;
-  while ((match = pattern.exec(text)) !== null) {
-    const target = (match[1] ?? match[2] ?? '').trim();
-    if (target !== '') links.push({ target, raw: match[0] });
-  }
-  return links;
+  /* ★ 改用共用件 `collectRelativeLinks`，它同时认行内式与参考式。
+     各写一份正则的话，口径迟早与 `tools/archive-note.mjs` 分叉 ——
+     就会出现「一个放行一个拦下」。围栏口径分叉过一次，记着。 */
+  return collectRelativeLinks(text)
+    .map((l) => ({ target: l.target, raw: text.slice(l.start, l.end) }));
 }
 
 /**
@@ -201,6 +199,12 @@ export function verifyMarkdownLinks() {
 function verifyOne(full, label, errors, baseRoot = PACKAGE_ROOT) {
   const text = readFileSync(full, 'utf8');
   const stripped = stripCodeFences(text);
+  /* ★ 未定义的参考式引用是坏引用 —— 渲染出来是字面的 `[文字][ref]`。
+     原实现完全看不见这类（它只认 `](目标)` 形式）。 */
+  for (const missing of undefinedReferences(stripped)) {
+    errors.push(`${label}: 参考式引用 [${missing}] 没有对应的定义行`);
+  }
+
   const found = extractLinks(stripped);
   let links = 0;
 

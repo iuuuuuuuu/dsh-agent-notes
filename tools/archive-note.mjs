@@ -57,6 +57,8 @@ import { spawnSync } from 'node:child_process';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { collectRelativeLinks, referencedDefinitions } from './markdown-links.mjs';
+
 /* tools/archive-note.mjs → tools/ → 仓库根。两层 dirname，不是三层。 */
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const UPSTREAM_ARCHIVE = join(
@@ -139,17 +141,34 @@ function rewriteOne(target, fromDir, toDir, notesRoot) {
  * @returns {{ content: string, changed: number }} 改写结果与条数。
  */
 export function rewriteRelativeLinks(content, fromDir, toDir, notesRoot) {
-  let changed = 0;
-  const out = replaceOutsideFences(content, (line) => line.replace(
-    /(!?\[[^\]]*\]\(\s*)(<?)([^)\s>]+)(>?)(\s*(?:"[^"]*")?\s*\))/g,
-    (whole, head, open, target, close, tail) => {
-      const rewritten = rewriteOne(target, fromDir, toDir, notesRoot);
-      if (rewritten === target) return whole;
-      changed += 1;
-      return `${head}${open}${rewritten}${close}${tail}`;
-    }
-  ));
-  return { content: out, changed };
+  /* ★ 改用共用件：它同时认行内式与参考式，且内部已做围栏过滤
+     （`blankOutFences`），所以这里的围栏语义与 md-links 完全一致。
+
+     ★ 只改写**被引用过的**定义（与上游 `translation-links.ts:236-246` 同口径）。
+       未被引用的定义不是链接 —— 可能是历史残留或给别人复制粘贴用的示例，
+       改它就是擅自修改未被使用的内容。
+
+     `collectRelativeLinks` 收全部定义是**故意的**：`md-links` 的职责是
+     「所有路径都要能解析」，孤立定义指向的文件若不存在就该报出来。
+     两个消费方需求不同，所以改写这一侧自己过滤。 */
+  const used = new Set(referencedDefinitions(content).keys());
+  const links = collectRelativeLinks(content)
+    .filter((l) => l.kind !== 'definition'
+      || used.has(String(l.identifier).toLowerCase()));
+
+  /* 从后往前替换 —— 正着改会因偏移移动而越改越偏。 */
+  const edits = [];
+  for (const link of links) {
+    const rewritten = rewriteOne(link.target, fromDir, toDir, notesRoot);
+    if (rewritten === link.target) continue;
+    edits.push({ start: link.start, end: link.end, value: rewritten });
+  }
+
+  let out = content;
+  for (const e of edits.sort((a, b) => b.start - a.start)) {
+    out = out.slice(0, e.start) + e.value + out.slice(e.end);
+  }
+  return { content: out, changed: edits.length };
 }
 
 /**
