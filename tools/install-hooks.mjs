@@ -23,7 +23,7 @@
  * 幂等：重复跑结果一致。
  */
 import { spawnSync } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -59,11 +59,40 @@ function git(args) {
 function isRepoRoot() {
   const result = git(['rev-parse', '--show-toplevel']);
   if (!result.ok) return false;
-  /* Windows 上大小写与斜杠方向都可能不同，末尾还可能多一个分隔符
-     （`new URL('..', import.meta.url)` 的 fileURLToPath 就会留一个）。
-     统一成「正斜杠 + 无尾斜杠 + 小写」再比。 */
-  const normalize = (value) => value.trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+  /* Windows 上路径有四种等价写法，任何一种不一致都会让判定失败：
+       1. 大小写不同（`C:\Users` vs `c:\users`）；
+       2. 斜杠方向不同（`\` vs `/`）；
+       3. 末尾多一个分隔符（`new URL('..', import.meta.url)` 的 fileURLToPath
+          就会留一个）；
+       4. **短路径 vs 长路径**（8.3 形式 `C:\Users\IUUUUU~1\...`）。
+     第 4 种是实测踩到的：`import.meta.url` 在某些环境（实测 `%TEMP%`
+     所在目录）解析出的是短路径，而 `git rev-parse` 给的是长路径，
+     两者字符串永不相等 —— 于是 `npm run hooks:install` 直接退出 2，
+     **钩子装不上，而这条路径没有任何测试**。
+     所以两边都先 realpath 展开：它会把 8.3 形式还原成长路径。
+     realpath 失败（路径不存在、权限不足）时退回原值，比对逻辑照旧。 */
+  const normalize = (value) => expand(value).trim().replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
   return normalize(result.out) === normalize(PACKAGE_ROOT);
+}
+
+/**
+ * 展开真实路径（把 8.3 短路径还原成长路径）。
+ *
+ * @param {string} value 路径。
+ * @returns {string} 展开后的路径；失败时返回原值。
+ */
+function expand(value) {
+  /* 先 native（能展开 8.3 短路径），失败再用 JS 版（某些环境没有 native）。 */
+  try {
+    return realpathSync.native(value);
+  } catch { /* 落下面 */ }
+  try {
+    return realpathSync(value);
+  } catch {
+    /* 目标不存在时 realpath 会抛；那本来就不该是仓库根，
+       但让后续的字符串比对去判定，别在这里直接崩。 */
+    return value;
+  }
 }
 
 const undo = process.argv.includes('--undo');

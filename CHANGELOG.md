@@ -38,6 +38,29 @@
 
 ### 修复
 
+- **`npm run hooks:install` 在部分 Windows 上装不上钩子**
+  - 脚本比对 `git rev-parse --show-toplevel` 与自己的 `PACKAGE_ROOT` 来判定
+    「是否在仓库根」。原有的归一化处理了大小写、斜杠方向、尾随分隔符，
+    **漏了 8.3 短路径**：`import.meta.url` 可能解析出 `C:\Users\IUUUUU~1\...`，
+    而 git 给的是 `C:\Users\iuuuuuuuu\...`，两者永不相等
+  - 后果：在 `%TEMP%` 或用户目录位于 8.3 形式下的 Windows 机器上，安装直接
+    退出 2，**钩子装不上** —— 「该写笔记却没写」这道本地门禁静默消失，
+    只剩 CI 那一道还拦着
+  - 修法：归一化前用 `realpathSync.native` 展开。注意 JS 版 `realpathSync`
+    **不会**展开短路径，只有 `.native` 会（实测）
+  - 本机仓库在 `D:\` 下没有 8.3 形式，所以本地一直正常；是补测试时在
+    `%TEMP%` 下建沙箱才暴露出来
+
+- **并行测试的偶发失败**
+  - `node --test` 各测试文件并行，而 `md-links` / `bilingual-docs` /
+    `notices` / `release-check` 各自在改真实仓库文件（`AGENTS.md`、
+    `README.md`、`upstream.json`、`package.json`）。**门禁自己也是读者** ——
+    测试改写的那几十毫秒里，门禁与其它测试读到的是中间态
+  - 症状极具迷惑性：单独跑某文件全绿，全量跑偶发红（8 次红 2 次）
+  - 修法：真仓库只读不写，测试构造坏输入改走注入（`verifyMarkdownLinksIn`、
+    `verifyBilingual({ read })`、`renderNotices({ read })`、
+    `verifyRelease({ read })`）
+
 - **浏览器端注册状态改记「实际结果」**
   - `syncHost` 原先用「上次想让它怎样」当「实际是什么」：注册抛错时
     `enabled` 已记成 true、`dispose` 仍是 null，此后每次同状态对齐都被早退挡掉
