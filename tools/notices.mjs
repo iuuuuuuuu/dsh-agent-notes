@@ -159,10 +159,10 @@ function devDependencies() {
  *
  * @returns {{ repository: string, url: string, ref: string, path: string, license: string, fileCount: number }} 来源信息。
  */
-function vendoredSource() {
-  const upstream = JSON.parse(readFileSync(join(PACKAGE_ROOT, 'upstream.json'), 'utf8'));
+function vendoredSource(read) {
+  const upstream = JSON.parse(read('upstream.json'));
   const license = requireSpdx(upstream.license, 'upstream.json');
-  const manifest = JSON.parse(readFileSync(join(PACKAGE_ROOT, 'tools', 'upstream-manifest.json'), 'utf8'));
+  const manifest = JSON.parse(read('tools/upstream-manifest.json'));
   const fileCount = Object.keys(manifest.files ?? {}).length;
   return {
     repository: upstream.repository,
@@ -175,24 +175,33 @@ function vendoredSource() {
 }
 
 /**
- * 取本包的 SPDX 许可证。
- *
- * @returns {string} 许可证表达式。
- */
-function ownLicense() {
-  const pkg = JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8'));
-  return requireSpdx(pkg.license, 'package.json');
-}
-
-/**
  * 组装声明全文。
  *
+ * @param {{read?: (name: string) => string}} [options] 选项。
+ *   `read` 按**仓库内的相对文件名**取内容（如 `'upstream.json'`），
+ *   供测试把输入指向内存内容。**真仓库只读不写是硬边界**：`node --test`
+ *   并行跑各个测试文件，测试改写真实 `upstream.json` 会让
+ *   `notices:check` 与其它测试读到改到一半的内容。
  * @returns {string} Markdown 文本。
  */
-export function renderNotices() {
-  const pkg = JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8'));
-  const own = ownLicense();
-  const source = vendoredSource();
+export function renderNotices(options = {}) {
+  /* 形状错误必须显式失败，不许静默退化。
+     `renderNotices(readFn)`（把函数直接当参数传）会让 `options.read` 取到
+     undefined，于是回落到真仓库读取 —— 不报错，但「注入上游许可证」这个
+     意图彻底失效，测试会变成在验真仓库。这是实测踩过的（参数形状与名字
+     对不上时，调用点写起来仍然「像对的」）。 */
+  if (typeof options === 'function') {
+    throw new TypeError(
+      'renderNotices(options) 需要一个对象，形如 { read }。'
+      + '直接把读取函数当参数传会被静默忽略，注入的数据不会生效。'
+    );
+  }
+  const read = options.read ?? ((name) => readFileSync(join(PACKAGE_ROOT, name), 'utf8'));
+  const pkg = JSON.parse(read('package.json'));
+  /* 本包自己的许可证也要过 SPDX 校验：写成 `MIT Foo` 这类脏值会让声明
+     「看起来合规」，而那比没有声明更糟。 */
+  const own = requireSpdx(pkg.license, 'package.json');
+  const source = vendoredSource(read);
   const dev = devDependencies();
 
   const lines = [
@@ -278,11 +287,16 @@ export function writeNotices() {
 /**
  * 校验已提交的声明与当前内容一致。
  *
+ * @param {{read?: (name: string) => string, actual?: string | null}} [options] 选项。
+ *   `read` 透传给 `renderNotices`；`actual` 直接指定「当前已有的内容」，
+ *   供测试注入篡改后的文本而不必写盘。
  * @returns {{ ok: boolean, expected: string, actual: string | null }} 校验结果。
  */
-export function checkNotices() {
-  const expected = renderNotices();
-  const actual = existsSync(OUT) ? readFileSync(OUT, 'utf8') : null;
+export function checkNotices(options = {}) {
+  const expected = renderNotices(options.read === undefined ? {} : { read: options.read });
+  const actual = options.actual !== undefined
+    ? options.actual
+    : (existsSync(OUT) ? readFileSync(OUT, 'utf8') : null);
   return { ok: actual === expected, expected, actual };
 }
 

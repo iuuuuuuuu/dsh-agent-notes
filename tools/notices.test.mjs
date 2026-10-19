@@ -15,8 +15,7 @@
  * 而声明已经没有内容了。所以这里断言的是**内容事实**，不是文件存在。
  */
 import { strict as assert } from 'node:assert';
-import { copyFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
@@ -24,6 +23,34 @@ import { checkNotices, renderNotices } from './notices.mjs';
 
 /** 仓库根（本文件在 tools/ 下）。 */
 const ROOT = join(import.meta.dirname, '..');
+
+const upstreamPath = join(ROOT, 'upstream.json');
+const upstreamBackup = readFileSync(upstreamPath, 'utf8');
+
+/**
+ * 造一个只覆盖 `upstream.json` 的读取器，其余文件仍读真仓库。
+ *
+ * **不写盘**：测试改写真实 `upstream.json` 会让并行跑的其它测试与
+ * `notices:check` 门禁读到改到一半的内容。
+ *
+ * 返回的是 `renderNotices` 的**完整参数对象**（不是裸函数）—— 最初
+ * 返回裸 read 函数，调用点写成 `renderNotices(withUpstream(…))` 恰好也能
+ * 跑（因为 options.read 是 undefined 时会回落到真仓库），于是「改上游
+ * 许可证」这个意图**静默失效**，测试变成了在验真仓库而不是验注入的值。
+ * 返回 `{ read }` 让形状与参数名对齐，传错会立刻炸而不是静默退化。
+ *
+ * @param {Record<string, any>} patch 要合并进 upstream.json 的字段。
+ * @returns {{ read: (name: string) => string }} `renderNotices` 的参数对象。
+ */
+function withUpstream(patch) {
+  const merged = { ...JSON.parse(upstreamBackup), ...patch };
+  if ('license' in patch && patch.license === undefined) delete merged.license;
+  return {
+    read: (name) => (name === 'upstream.json'
+      ? JSON.stringify(merged, null, 2)
+      : readFileSync(join(ROOT, name), 'utf8'))
+  };
+}
 
 test('notices: 生成物必须包含 vendored 上游的来源、commit 与许可证', () => {
   const text = renderNotices();
@@ -84,75 +111,64 @@ test('notices: 提交的 THIRD_PARTY_NOTICES.md 与当前内容一致', () => {
     '已提交的 THIRD_PARTY_NOTICES.md 必须是最新的 —— 否则跑 npm run notices 后提交');
 });
 
-test('notices: 文件被篡改时 check 必须失败', () => {
-  /* 这是门禁存在的意义：声明可以被手改得看起来合规，但内容与事实不符。 */
-  const target = join(ROOT, 'THIRD_PARTY_NOTICES.md');
-  const backup = readFileSync(target, 'utf8');
-  try {
-    writeFileSync(target, backup.replace('| 许可证 | MIT |', '| 许可证 | Apache-2.0 |'));
-    assert.equal(checkNotices().ok, false, '篡改许可证后必须判定不一致');
-  } finally {
-    writeFileSync(target, backup);
-  }
-  assert.equal(checkNotices().ok, true, '还原后必须重新通过');
+test('notices: 声明被篡改时 check 必须失败（内存注入，不写盘）', () => {
+  /* 这是门禁存在的意义：声明可以被手改得看起来合规，但内容与事实不符。
+
+     **必须用内存注入而不是写盘**：npm test 是 node --test tools/*.test.mjs，
+     各测试文件并行。测试改写真实的 THIRD_PARTY_NOTICES.md / upstream.json
+     期间，notices:check 门禁或别的测试可能读到改到一半的内容。实测这个
+     模式在 md-links 上造成 6 次全量跑红 4 次，而单独跑全绿。 */
+  const good = renderNotices();
+  assert.equal(checkNotices({ actual: good }).ok, true, '未篡改时必须通过');
+
+  const tampered = good.replace('| 许可证 | MIT |', '| 许可证 | Apache-2.0 |');
+  assert.notEqual(tampered, good, '篡改必须真的改了内容（否则本用例是假绿）');
+  assert.equal(checkNotices({ actual: tampered }).ok, false,
+    '篡改许可证后必须判定不一致');
 });
 
-test('notices: 文件缺失时 check 必须失败，而不是当作「无内容即通过」', () => {
+test('notices: 声明缺失时 check 必须失败，而不是当作「无内容即通过」', () => {
   /* 空集合通过是最隐蔽的假绿：删掉文件反而变绿，等于鼓励删除。 */
-  const target = join(ROOT, 'THIRD_PARTY_NOTICES.md');
-  const backup = readFileSync(target, 'utf8');
-  try {
-    rmSync(target);
-    const result = checkNotices();
-    assert.equal(result.ok, false, '文件缺失时必须判定失败');
-    assert.equal(result.actual, null, '缺失时 actual 应为 null');
-  } finally {
-    writeFileSync(target, backup);
-  }
+  const result = checkNotices({ actual: null });
+  assert.equal(result.ok, false, '文件缺失时必须判定失败');
+  assert.equal(result.actual, null, '缺失时 actual 应为 null');
 });
 
 test('notices: 非法 SPDX 标识符必须抛错，不许静默写出', () => {
   /* 写错许可证标识符比没有更糟：它会让人以为自己合规了。
      用真实的 spdx-expression-parse 校验，而不是手写正则 —— 手写判断
      `MIT OR Apache-2.0` 这类表达式必错。 */
-  const upstreamPath = join(ROOT, 'upstream.json');
-  const backup = readFileSync(upstreamPath, 'utf8');
-  try {
-    const parsed = JSON.parse(backup);
-    parsed.license = 'NOT-A-REAL-LICENSE';
-    writeFileSync(upstreamPath, JSON.stringify(parsed, null, 2));
-    assert.throws(() => renderNotices(), /SPDX/, '非法许可证必须抛错并提到 SPDX');
-  } finally {
-    writeFileSync(upstreamPath, backup);
-  }
+  assert.throws(() => renderNotices(withUpstream({ license: 'NOT-A-REAL-LICENSE' })),
+    /SPDX/, '非法许可证必须抛错并提到 SPDX');
 });
 
 test('notices: 缺少 license 字段必须抛错，不许留空', () => {
   /* 留空的许可证等于没声明 —— 而「没声明」在合规上比「声明了但格式不对」更糟。 */
-  const upstreamPath = join(ROOT, 'upstream.json');
-  const backup = readFileSync(upstreamPath, 'utf8');
-  try {
-    const parsed = JSON.parse(backup);
-    delete parsed.license;
-    writeFileSync(upstreamPath, JSON.stringify(parsed, null, 2));
-    assert.throws(() => renderNotices(), /license/, '缺少 license 必须抛错');
-  } finally {
-    writeFileSync(upstreamPath, backup);
-  }
+  assert.throws(() => renderNotices(withUpstream({ license: undefined })),
+    /license/, '缺少 license 必须抛错');
 });
 
 test('notices: 复杂 SPDX 表达式（OR / AND / 括号）必须被接受', () => {
   /* 校验不能只认单个标识符 —— 那样会把合法的双许可作品判成错误，
      逼人简化成不准确的单一许可证。 */
-  const upstreamPath = join(ROOT, 'upstream.json');
+  const text = renderNotices(withUpstream({ license: 'MIT OR Apache-2.0' }));
+  assert.match(text, /MIT OR Apache-2\.0/, '表达式必须原样出现在声明里');
+
+  /* 括号表达式同样要接受。 */
+  const grouped = renderNotices(withUpstream({ license: '(MIT AND BSD-2-Clause)' }));
+  assert.match(grouped, /MIT AND BSD-2-Clause/, '带括号的表达式必须被接受');
+});
+
+test('notices: 把读取函数直接当参数传必须报错，不许静默退化', () => {
+  /* 实测踩过的坑：`renderNotices(readFn)` 不会报错 —— `options.read` 取到
+     undefined，于是静默回落到真仓库。调用点写起来仍然「像对的」，而注入的
+     数据完全没生效，测试变成在验真仓库（本文件里真的发生过一次）。
+
+     所以必须显式失败：形状错了就该炸，安静地做另一件事才是危险的。 */
   const backup = readFileSync(upstreamPath, 'utf8');
-  try {
-    const parsed = JSON.parse(backup);
-    parsed.license = 'MIT OR Apache-2.0';
-    writeFileSync(upstreamPath, JSON.stringify(parsed, null, 2));
-    assert.doesNotThrow(() => renderNotices(), '合法的 OR 表达式必须被接受');
-    assert.match(renderNotices(), /MIT OR Apache-2\.0/, '表达式必须原样出现在声明里');
-  } finally {
-    writeFileSync(upstreamPath, backup);
-  }
+  const bareRead = (name) => (name === 'upstream.json'
+    ? backup
+    : readFileSync(join(ROOT, name), 'utf8'));
+  assert.throws(() => renderNotices(bareRead), /TypeError|对象/,
+    '传裸函数必须报错 —— 静默退化会让注入的数据不生效而不被发现');
 });

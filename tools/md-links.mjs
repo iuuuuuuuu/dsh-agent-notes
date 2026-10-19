@@ -152,36 +152,80 @@ export function verifyMarkdownLinks() {
 
   for (const doc of documents) {
     const full = join(PACKAGE_ROOT, doc);
-    const text = readFileSync(full, 'utf8');
-    const stripped = stripCodeFences(text);
-    const found = extractLinks(stripped);
-
-    for (const { target } of found) {
-      const local = localPathOf(target);
-      if (local === null) continue;
-      links += 1;
-
-      /* 百分号编码要及时解码：`%E4%B8%AD` 这种写法指向真实存在的中文文件名。 */
-      let decoded = local;
-      try { decoded = decodeURI(local); } catch { /* 非法编码：按原样检查 */ }
-
-      const base = dirname(join(PACKAGE_ROOT, doc));
-      const resolved = resolve(base, decoded);
-
-      /* 目标必须在仓库内：`../../../etc/passwd` 这类穿越路径不算合法文档链接。 */
-      const rel = relative(PACKAGE_ROOT, resolved);
-      if (rel.startsWith('..') || rel.startsWith(sep + '..')) {
-        errors.push(`${doc}: 链接越出仓库范围 -> ${target}`);
-        continue;
-      }
-
-      if (!existsSync(resolved)) {
-        errors.push(`${doc}: 链接目标不存在 -> ${target}`);
-      }
-    }
+    const found = verifyOne(full, doc, errors);
+    links += found;
   }
 
   return { checked: documents.length, links, errors };
+}
+
+/**
+ * 校验单个文档里的相对链接，把错误累积进 errors。
+ *
+ * 拆出来是为了让「校验一个不在仓库里的文件」成为可能：测试需要在临时
+ * 目录里造一份 vendored 副本再验它，而不能往真仓库里写探针文件 ——
+ * `node --test` 并行跑各个测试文件，往真目录写东西会让**别的**测试读到
+ * 不一致的内容（实测 `project-skill` 与 `self-update` 偶发失败就是这么来的）。
+ *
+ * @param {string} full 文档绝对路径。
+ * @param {string} label 出错时用于显示的路径。
+ * @param {string[]} errors 错误累积数组，原地 push。
+ * @param {string} [baseRoot] 越界判断的根目录，缺省为仓库根。
+ * @returns {number} 本文档里被检查的相对链接数。
+ */
+function verifyOne(full, label, errors, baseRoot = PACKAGE_ROOT) {
+  const text = readFileSync(full, 'utf8');
+  const stripped = stripCodeFences(text);
+  const found = extractLinks(stripped);
+  let links = 0;
+
+  for (const { target } of found) {
+    const local = localPathOf(target);
+    if (local === null) continue;
+    links += 1;
+
+    /* 百分号编码要及时解码：`%E4%B8%AD` 这种写法指向真实存在的中文文件名。 */
+    let decoded = local;
+    try { decoded = decodeURI(local); } catch { /* 非法编码：按原样检查 */ }
+
+    const base = dirname(full);
+    const resolved = resolve(base, decoded);
+
+    /* 目标必须在根目录内：`../../../etc/passwd` 这类穿越路径不算合法文档链接。 */
+    const rel = relative(baseRoot, resolved);
+    if (rel.startsWith('..') || rel.startsWith(sep + '..')) {
+      errors.push(`${label}: 链接越出仓库范围 -> ${target}`);
+      continue;
+    }
+
+    if (!existsSync(resolved)) {
+      errors.push(`${label}: 链接目标不存在 -> ${target}`);
+    }
+  }
+
+  return links;
+}
+
+/**
+ * 只校验给定的几个文档（不按默认规则收集）。
+ *
+ * 用途是测试与诊断：验证某一份特定的 Markdown 会被怎么处理，
+ * 而不必也不该把整仓库扫一遍。
+ *
+ * @param {string[]} files 文档绝对路径。
+ * @param {string} [baseRoot] 越界判断的根，缺省为这些文件的公共父目录。
+ * @returns {{ checked: number, links: number, errors: string[] }} 结果。
+ */
+export function verifyMarkdownLinksIn(files, baseRoot) {
+  const errors = [];
+  let links = 0;
+  /* 缺省根取第一份文件的目录：临时目录里的探针文件之间互相引用时，
+     以它为界才不会把同一目录里的兄弟文件判成越界。 */
+  const root = baseRoot ?? (files.length > 0 ? dirname(files[0]) : PACKAGE_ROOT);
+  for (const full of files) {
+    links += verifyOne(full, full, errors, root);
+  }
+  return { checked: files.length, links, errors };
 }
 
 /* ── CLI ──────────────────────────────────────────────────────────────── */

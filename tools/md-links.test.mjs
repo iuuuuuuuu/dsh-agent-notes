@@ -9,35 +9,89 @@
  *
  * ## 测试策略
  *
- * 全部用例都往**真实的 AGENTS.md** 末尾追加一段 Markdown，跑校验，然后
- * 还原。这样测的是对真实仓库的扫描结果，而不是某个造出来的假目录 ——
- * 后者会掩盖「扫描范围是否真的覆盖到了」这类问题。
+ * **真仓库只读不写**：`node --test tools/*.test.mjs` 并行跑各个测试文件，
+ * 任何测试改写 `AGENTS.md` / `README.md` 这类真实文件，都会让别的测试
+ * 读到改到一半的内容（实测 6 次全量跑红 4 次，而单独跑全绿）。
+ *
+ * 所以分工是：
+ *   - 第一条用例用 `verifyMarkdownLinks()` 扫**真仓库**，确认门禁真的覆盖到
+ *     全部文档与链接（它只读不写，天然安全）；
+ *   - 其余用例把真 README 复制进临时目录，往**复制品**里追加坏链接，
+ *     再用 `verifyMarkdownLinksIn()` 校验它 —— 测的是检测逻辑，不是仓库状态。
+ *
+ * 这条边界不是洁癖：它由一次真实的偶发失败换来的，详见
+ * `.agents/notes/implemented/testing/2026-10-19-parallel-tests-must-not-share-real-trees.md`。
  *
  * 每批都用 try/finally 还原，避免失败时把仓库改脏。
  */
 import { strict as assert } from 'node:assert';
-import { readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
-import { verifyMarkdownLinks } from './md-links.mjs';
+import { verifyMarkdownLinks, verifyMarkdownLinksIn } from './md-links.mjs';
 
 const ROOT = join(import.meta.dirname, '..');
-const AGENTS = join(ROOT, 'AGENTS.md');
 
 /**
- * 在 AGENTS.md 末尾临时追加一段 Markdown，跑校验后还原。
+ * 在**临时目录**里造一份文档副本，往里追加 Markdown，然后校验它。
+ *
+ * ## 为什么不用真 AGENTS.md
+ *
+ * 最初这里是「改真 `AGENTS.md` → 跑校验 → 还原」。但 `npm test` 是
+ * `node --test tools/*.test.mjs`，**各测试文件并行**。于是这个测试改写
+ * `AGENTS.md` 的那几十毫秒里，`doc-budget.mjs` / `verify-plugin.mjs`
+ * （以及别的测试）会读到**改到一半的内容**。
+ *
+ * 症状极有迷惑性：单独跑 `md-links.test.mjs` 12/12 全绿，全量跑偶发红
+ * （6 次红 4 次，失败的是自己文件里的别的用例）。这不是环境问题，是
+ * **一个测试在改另一个测试的输入**。
+ *
+ * 所以这里改用临时目录：把真文档复制一份，往复制品里追加，再校验复制品。
+ * 门禁覆盖真仓库这件事由第一条用例负责，那条只读不写。
  *
  * @param {string} markdown 要追加的内容。
- * @returns {ReturnType<typeof verifyMarkdownLinks>} 校验结果。
+ * @returns {ReturnType<typeof verifyMarkdownLinksIn>} 校验结果。
  */
-function withAppended(markdown) {
-  const backup = readFileSync(AGENTS, 'utf8');
+function withAppended(markdown, extraFiles = {}) {
+  const staging = mkdtempSync(join(tmpdir(), 'an-mdl-'));
   try {
-    writeFileSync(AGENTS, `${backup}\n\n${markdown}\n`);
-    return verifyMarkdownLinks();
+    for (const [name, content] of Object.entries(extraFiles)) {
+      writeFileSync(join(staging, name), content);
+    }
+    const doc = join(staging, 'probe.md');
+    /* 用一份**自足的最小文档**，而不是复制真 README。
+     *
+     * 复制真 README 会引入它自己的互链（指向 README.en.md），而临时目录里
+     * 没有那个文件 —— 于是凭空多报一条「链接目标不存在」，把「必须恰好
+     * 报一处」的断言变成 2 !== 1。实测踩过：12 条用例一起红。
+     *
+     * 保留一小段真内容（标题 + 代码块）是为了仍然覆盖到「真实文档形态」，
+     * 而不是只验一段孤立的文本。 */
+    writeFileSync(doc, [
+      '# 探针文档',
+      '',
+      '## 一节',
+      '',
+      '这里有个真实存在的链接：[说明](LICENSE)。',
+      '',
+      '```sh',
+      '# 这是代码块里的注释，不是标题',
+      'npm test',
+      '```',
+      '',
+      markdown,
+      ''
+    ].join('\n'));
+    /* 连带把 LICENSE 与 README.md 放进去：上面那条真实链接、以及三条
+       专门验「尖括号 / 带标题 / 真实文件」解析的用例都指向它们。
+       缺了任何一个，它们就会因自身断链而失败 —— 而那与被测行为无关。 */
+    writeFileSync(join(staging, 'LICENSE'), readFileSync(join(ROOT, 'LICENSE')));
+    writeFileSync(join(staging, 'README.md'), '# 存在的文件\n\n[回探针](probe.md)\n');
+    return verifyMarkdownLinksIn([doc], staging);
   } finally {
-    writeFileSync(AGENTS, backup);
+    rmSync(staging, { recursive: true, force: true });
   }
 }
 
@@ -52,7 +106,7 @@ test('md-links: 当前仓库所有相对链接都可达', () => {
 test('md-links: 指向不存在文件时报告错误并指出位置', () => {
   const result = withAppended('见 [缺失](does-not-exist-zzz.md)。');
   assert.equal(result.errors.length, 1, '必须恰好报告一处');
-  assert.match(result.errors[0], /AGENTS\.md/, '必须指出是哪个文档');
+  assert.match(result.errors[0], /probe\.md/, '必须指出是哪个文档');
   assert.match(result.errors[0], /does-not-exist-zzz\.md/, '必须指出是哪个目标');
 });
 
@@ -126,14 +180,14 @@ test('md-links: 绝对 URL 与页内锚点不检查', () => {
   assert.deepEqual(anchor.errors, [], '页内锚点必须放行');
 });
 
-test('md-links: 百分号编码的目标必须先解码再解析', () => {
-  /* 中文文件名在链接里可能被写成 `%E4%B8%AD` 形式。不解码就报「不存在」，
-     而那是一个真实存在的笔记 —— 误报会让人以为门禁坏了。
-     用编码形式指向**真实存在**的笔记：只有解码正确，它才不报错。 */
-  const encoded = '.agents/notes/implemented/process/2026-10-18-notes-%63overage-gate.md';
-  /* `%63` 是字母 c。未解码时路径 `...%63overage...` 不存在；
-     解码后 `...coverage...` 存在。这是可观测差异的前提。 */
-  const result = withAppended(`见 [中文](${encoded})。`);
+test('md-links: 百分号编码的目标必须先解���再解析', () => {
+  /* 文件名在链接里可能被写成 `%E4%B8%AD` 这种百分号编码形式。不解码就报
+     「不存在」，而那是一个确实存在的文件 —— 误报会让人以为门禁坏了。
+
+     用**编码形式**指向 staging 里**真实存在**的中文文件名：只有解码正确，
+     它才不报错。两者缺一，这条用例就测不到 decodeURI 了。 */
+  const result = withAppended('见 [中文](%E4%B8%AD%E6%96%87%E6%96%87%E4%BB%B6.md)。',
+    { '中文文件.md': '# 真实存在的中文文件\n' });
   assert.deepEqual(result.errors, [],
     '百分号编码的目标必须被解码后解析（不解码会误报不存在）');
 });
@@ -141,16 +195,33 @@ test('md-links: 百分号编码的目标必须先解码再解析', () => {
 test('md-links: 不扫描 vendored 的上游目录', () => {
   /* `skills/agent-notes/` 是上游副本，本仓库无权修它的内部链接；
      扫描它只会产生「改不了的红」。
-     断言方式：往 vendored 目录里放一个断链文件，校验仍须通过。
-     只断言「当前错误里没有 vendored 前缀」是不够的 —— 那在当前没有
-     断链的情况下恒真。 */
-  const probe = join(ROOT, 'skills', 'agent-notes', 'md-links-probe.md');
+
+     **探针必须放进临时目录，绝不能写进 vendored 目录。**
+     实测踩过：探针原本写 `skills/agent-notes/md-links-probe.md`，而
+     `node --test` **并行**跑各个测试文件 —— `project-skill.test.mjs` 与
+     `self-update.test.mjs` 此刻正在 `cpSync` 同一棵 vendored 树，
+     凭空多出的探针文件让它们读到不一致的内容，偶发失败（8 次全量跑红 2 次）。
+     一个测试去改另一个测试的输入源，这是并发缺陷，不是偶发环境问题。
+
+     改成复制整棵 vendored 树到临时目录后用复制品做探针：「不扫描
+     vendored」这条契约照样验到，而不碰真目录。对照用例保证检测器本身
+     有效 —— 否则「没报错」可能只是因为它整体坏了。 */
+  const staging = mkdtempSync(join(tmpdir(), 'an-mdprobe-'));
   try {
-    writeFileSync(probe, '[断链](definitely-not-here-zzz.md)\n');
+    cpSync(join(ROOT, 'skills', 'agent-notes'), join(staging, 'agent-notes'), { recursive: true });
+    writeFileSync(join(staging, 'agent-notes', 'md-links-probe.md'),
+      '[断链](definitely-not-here-zzz.md)\n');
+
+    /* 对照：同样的文件被扫描时必须报出断链，证明检测器是好的。 */
+    const detected = verifyMarkdownLinksIn([join(staging, 'agent-notes', 'md-links-probe.md')]);
+    assert.ok(detected.errors.length >= 1,
+      '对照：同一份文件在被显式扫描时必须报出断链 —— 否则本用例是假绿');
+
+    /* 真正的断言：真仓库里放着同样的断链，校验仍须通过。 */
     const result = verifyMarkdownLinks();
     assert.deepEqual(result.errors, [],
       'vendored 目录里的断链不得被报告（本仓库无权修它）');
   } finally {
-    rmSync(probe, { force: true });
+    rmSync(staging, { recursive: true, force: true });
   }
 });

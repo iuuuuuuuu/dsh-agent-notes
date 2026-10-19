@@ -91,17 +91,23 @@ function render(levels) {
 /**
  * 校验所有配对的双语文档。
  *
+ * @param {{pairs?: typeof PAIRS, read?: (path: string) => string}} [options] 选项。
+ *   `read` 用于把校验指向别处（测试的临时副本）。**真仓库只读不写是硬边界**：
+ *   `node --test` 并行跑各个测试文件，改写真实 README 会让别的测试读到
+ *   改到一半的内容（实测 6 次全量跑红 4 次，单独跑全绿）。
  * @returns {{ pairs: number, errors: string[], warnings: string[] }} 结果。
  */
-export function verifyBilingual() {
+export function verifyBilingual(options = {}) {
+  const list = options.pairs ?? PAIRS;
+  const read = options.read ?? ((path) => readFileSync(path, 'utf8'));
   const errors = [];
   const warnings = [];
 
-  for (const pair of PAIRS) {
+  for (const pair of list) {
     const primaryPath = join(PACKAGE_ROOT, pair.primary);
     const secondaryPath = join(PACKAGE_ROOT, pair.secondary);
-    const primary = structureOf(readFileSync(primaryPath, 'utf8'));
-    const secondary = structureOf(readFileSync(secondaryPath, 'utf8'));
+    const primary = structureOf(read(primaryPath));
+    const secondary = structureOf(read(secondaryPath));
 
     /* 标题层级必须逐条对应。长度不同说明有一版多了/少了节。 */
     if (primary.levels.length !== secondary.levels.length) {
@@ -134,7 +140,7 @@ export function verifyBilingual() {
     }
   }
 
-  return { pairs: PAIRS.length, errors, warnings };
+  return { pairs: list.length, errors, warnings };
 }
 
 /* ── CLI ──────────────────────────────────────────────────────────────── */

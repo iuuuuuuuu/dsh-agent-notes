@@ -16,7 +16,7 @@
  * 让全部红灯用例通过。
  */
 import { strict as assert } from 'node:assert';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { test } from 'node:test';
 
@@ -30,20 +30,30 @@ const zhBackup = readFileSync(ZH, 'utf8');
 const enBackup = readFileSync(EN, 'utf8');
 
 /**
- * 临时改一个文件、跑校验、还原。
+ * 临时改一对文档、跑校验、还原。
  *
- * @param {{zh?: string, en?: string}} edits 要写入的内容，不给的保持原样。
+ * ## 为什么用内存映射而不是写文件
+ *
+ * 最初这里是「写真 `README.md` / `README.en.md` → 跑校验 → 还原」。但
+ * `npm test` 是 `node --test tools/*.test.mjs`，**各测试文件并行** ——
+ * 这个测试改写真 README 的那几十毫秒里，`md-links.test.mjs` 正在扫
+ * 真实仓库、`docs:bilingual` 门禁也可能同时读到改到一半的内容。
+ *
+ * 症状极有迷惑性：单独跑 `bilingual-docs.test.mjs` 10/10 全绿，全量跑偶发红
+ * （6 次红 4 次，失败的却是**另一个文件**的用例）。
+ *
+ * 改成用 `read` 覆盖把校验指向内存内容后，**一个字节都不写盘**：
+ * 真仓库只被读取，从头到尾保持不变。
+ *
+ * @param {{zh?: string, en?: string}} edits 要替换的内容，不给的保持原样。
  * @returns {ReturnType<typeof verifyBilingual>} 校验结果。
  */
 function withEdits(edits) {
-  try {
-    if (edits.zh !== undefined) writeFileSync(ZH, edits.zh);
-    if (edits.en !== undefined) writeFileSync(EN, edits.en);
-    return verifyBilingual();
-  } finally {
-    writeFileSync(ZH, zhBackup);
-    writeFileSync(EN, enBackup);
-  }
+  const contents = new Map([
+    [ZH, edits.zh ?? zhBackup],
+    [EN, edits.en ?? enBackup]
+  ]);
+  return verifyBilingual({ read: (path) => contents.get(path) ?? readFileSync(path, 'utf8') });
 }
 
 test('bilingual: 当前两版 README 结构一致', () => {

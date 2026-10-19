@@ -284,7 +284,8 @@ try {
     ['apply 的 config 开关组合', 'config.test.mjs'],
     ['第三方归属声明', 'notices.test.mjs'],
     ['Markdown 相对链接', 'md-links.test.mjs'],
-    ['双语文档结构一致', 'bilingual-docs.test.mjs']
+    ['双语文档结构一致', 'bilingual-docs.test.mjs'],
+    ['发版记账一致', 'release-check.test.mjs']
   ]) {
     const full = join(PACKAGE_ROOT, 'tools', file);
     if (!existsSync(full)) {

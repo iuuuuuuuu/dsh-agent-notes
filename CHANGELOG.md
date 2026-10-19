@@ -5,6 +5,55 @@
 
 ## [Unreleased]
 
+### 新增
+
+- **第三方归属声明 `THIRD_PARTY_NOTICES.md`**
+  - 本插件分发的 `skills/agent-notes/` 下 21 个文件是上游
+    `czm15053/write-notes-like-deepseek` 的 vendored 副本，此前仓库里
+    **完全没有提过上游**。MIT 要求分发衍生作品时保留原版权与许可声明
+  - `npm run notices` 生成、`npm run notices:check` 校验（已接入 `check` 与 CI）。
+    来源、commit、许可证、文件数全部从 `upstream.json` 与上游清单生成，不手抄 ——
+    手写的声明会随同步漂移，而漂移后的归属声明比没有更危险
+  - 依赖清单**递归**收集并含传递依赖，许可证从实际安装的包元数据读取。
+    只列直接依赖在合规语义上是错的：传递依赖同样落在开发者机器上
+  - 许可证标识符用 `spdx-expression-parse` 校验而非手写正则 ——
+    `MIT OR Apache-2.0` 这类复合表达式手写必错，而写错的许可证比没有更糟
+
+- **`md:links` —— 拦住文档断链**
+  - 仓库有 29 个 Markdown、56 条相对链接。此前没有任何门禁检查它们是否还指向
+    存在的文件：笔记门禁只管笔记之间，`verify` 只管双语文档存在
+  - 断链在归档/删除笔记、重命名文件时必然出现，且不会让任何测试变红 ——
+    只让后来点开的人撞 404
+  - 覆盖：fragment/query 剥离、代码块与行内代码跳过、百分号编码解码、
+    越界路径拒绝；不扫描 vendored 目录（无权修上游内容）
+
+- **`docs:bilingual` —— 拦住双语 README 结构漂移**
+  - `verify` 只验「两个 README 都在且带徽标」。实测给英文版追加一整节，
+    中文版完全不知道，它照样绿灯；改的人不会察觉，因为他只读了自己写的那一版
+  - 比**结构**（标题层级序列 + 代码块数）而非字数：中英长度天然不同
+    （416 vs 471 行，而结构完全一致），拿字数当判据只会长期误报
+  - 本次顺带补齐两版 README 都漏掉的 6 个命令说明（`hooks:install`、
+    `archive:note`、`notes:coverage`、`notes:supersession`、`doc:budget`、
+    `check:full`）—— 装钩子、归档这些日常操作此前根本没写
+
+### 修复
+
+- **浏览器端注册状态改记「实际结果」**
+  - `syncHost` 原先用「上次想让它怎样」当「实际是什么」：注册抛错时
+    `enabled` 已记成 true、`dispose` 仍是 null，此后每次同状态对齐都被早退挡掉
+    —— 一次瞬时故障会让看板 tab 在整个会话里消失，界面无任何提示
+  - 改为以 `dispose` 是否为 null 作判据，且注销失败也要复位句柄
+
+- **补上 `npm run build` 脚本**
+  - `verify-plugin.mjs` 早就提示「请跑 `npm run build`」，而该命令并不存在
+
+- **两处测试偶发红**
+  - `project-skill` 的 `cpSync` 未建父目录（`cp ENOENT`）；`self-update` 用
+    永不 resolve 的 fetch 留下悬挂后台任务，`finally` 删目录后它还在跑
+
+- **CI 增加 `npm ci`**
+  - 新增 devDependency 后的必然后果，此前零依赖时不需要这一步
+
 ## [0.5.0] - 2026-10-18
 
 ### 新增
