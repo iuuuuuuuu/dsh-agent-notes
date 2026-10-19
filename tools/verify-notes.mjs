@@ -23,12 +23,74 @@
  * 环境变量：
  *   AGENT_NOTE_ROOT  覆盖笔记根（与 vendored 脚本同一变量，供故障注入用）。
  */
+import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
-import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import { runAllGates } from '../lib/notes.js';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
+const HERE = dirname(fileURLToPath(import.meta.url));
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
+
+/**
+ * 加载 `runAllGates`。
+ *
+ * ## 为什么用动态 import 而不是静态的
+ *
+ * 静态 `import ... from '../lib/notes.js'` 在脚本被拷到别的仓库时会直接
+ * `ERR_MODULE_NOT_FOUND` —— 而 README 明确承诺「直接复用本仓库的
+ * `tools/verify-notes.mjs`」。实测四种独立用法里有两种死在这一点上。
+ *
+ * ## 为什么不内联复制 runAllGates
+ *
+ * `lib/notes.js` 是「没有可验对象不算通过」的唯一真源（见本文件顶部注释）。
+ * 复制一份会立刻产生第二份真相，而漂移的表现正是「一种入口拦住了、
+ * 另一种没拦住」—— 正是本脚本存在要防的那类假绿。
+ *
+ * ## 找不到时为什么不降级
+ *
+ * 降级意味着少跑那几条「空集合判失败」的检查，而那正是本脚本的**唯一**
+ * 理由。所以明确报错，并告诉用户该拷哪些文件。
+ *
+ * @returns {Promise<Function>} `runAllGates`。
+ * @throws {Error} 找不到实现时抛出，消息里列出该拷什么。
+ */
+async function loadGateRunner() {
+  const candidates = [
+    { path: resolve(HERE, '..', 'lib', 'notes.js'), label: '包内 lib/notes.js' },
+    ...(typeof process.env.DSH_AGENT_NOTES_LIB === 'string'
+      && process.env.DSH_AGENT_NOTES_LIB.trim() !== ''
+      ? [{ path: resolve(process.env.DSH_AGENT_NOTES_LIB.trim()), label: '$DSH_AGENT_NOTES_LIB' }]
+      : [])
+  ];
+
+  for (const candidate of candidates) {
+    if (!existsSync(candidate.path)) continue;
+    const module = await import(pathToFileURL(candidate.path).href);
+    if (typeof module.runAllGates === 'function') return module.runAllGates;
+  }
+
+  throw new Error(
+    [
+      '找不到笔记门禁实现（runAllGates）。',
+      '  本脚本只做 CLI 外壳，判定逻辑在 lib/notes.js —— 它是「空集合不算通过」',
+      '  的唯一真源，复制一份会立刻产生第二份真相。',
+      '',
+      '  在别的仓库里用时请把实现一起带过去：',
+      '    cp -r dsh-agent-notes/lib  <目标仓库>/',
+      '    cp -r dsh-agent-notes/skills <目标仓库>/',
+      '  或用 $DSH_AGENT_NOTES_LIB 指向 lib/notes.js 的绝对路径。',
+      '  门禁脚本本身则放在 <目标仓库>/.agents/skills/<技能名>/scripts/，',
+      '  或用 $AGENT_NOTE_SCRIPTS_DIR 显式指定。'
+    ].join('\n')
+  );
+}
+
+const runAllGates = await loadGateRunner().catch((error) => {
+  /* 加载失败是「无法进行」，不是「检查失败」。两者退出码必须区分 ——
+     上游用 2 表示前者，沿用它，免得调用方把环境问题当成门禁红了。 */
+  console.error(`✖ ${error.message}`);
+  process.exit(2);
+});
 
 /**
  * 挑一个「要验哪个仓库」的根。

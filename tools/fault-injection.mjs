@@ -288,7 +288,8 @@ try {
     ['发版记账一致', 'release-check.test.mjs'],
     ['本地钩子安装与卸载', 'install-hooks.test.mjs'],
     ['sync-upstream 参数解析', 'args-parse.test.mjs'],
-    ['文本完整性（U+FFFD）', 'text-integrity.test.mjs']
+    ['文本完整性（U+FFFD）', 'text-integrity.test.mjs'],
+    ['笔记门禁的跨仓库可用性', 'verify-notes-standalone.test.mjs']
   ]) {
     const full = join(PACKAGE_ROOT, 'tools', file);
     if (!existsSync(full)) {
