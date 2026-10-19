@@ -7,6 +7,29 @@
 
 ### 新增
 
+- **看板首页补上「已归档」入口**
+  - 现象：归档笔记在数据层、渲染层都正常（真机确认带「已归档」徽标显示），
+    但**首页那 4 张 KPI 卡只覆盖 3 个 lifecycle** —— implemented / proposed /
+    rejected / simplification，`archived` 不在其中。不点筛选下拉找不到
+  - 判为**遗漏而非设计**：同一份 HTML 里归档是完整支持的（`.st-archived`
+    徽标样式、`LIFECYCLES` 含它、`STATUS_LABELS.archived`、筛选器认它）
+  - 改在上游 HTML 的**注入层**（`lib/board-responsive.js`）补一张卡 ——
+    vendored 内容手改会被 `verify-plugin.mjs` 的哈希比对拦下
+  - 三个关键结论**全部来自真机**，读代码一个都看不出来：
+    ① 上游 `renderBaseline()` 每次做 `kpi-row.innerHTML = ...` **整体覆盖**，
+       而它 5 秒一轮热更新 → 「插一次」必然被抹掉（实测采样 8.5 秒，
+       全程 row=4 但最后 card=NO）→ 必须用 MutationObserver 补回
+    ② observer 回调是**微任务**，在同步块结束后才执行 → 「改完立刻置标志位」
+       拦不住自触发 → **页面卡死（DOM 0 字节）** → 必须 disconnect/observe
+    ③ 数据注入要转义 `<`（生产代码早有：`.replace(/</g, "\\u003c")` + 函数式
+       replace）—— 本仓**真有一篇笔记引了看板源码**，不是假设
+  - 真机验证四用例：archived=1 显示 1 / archived=0 **显示 0 不隐藏** /
+    撤掉补丁卡片消失（证明来自本补丁）/ **25 秒后仍在**（跨 3 轮上游重渲染）
+  - 配套 `tools/board-responsive.test.mjs`（6 条离线用例）守「补丁源码含什么、
+    注入是否发生、幂等」；真机时序验证不入库（慢且不稳）
+  - 顺带把 `tools/board.test.mjs` 三处写死「补丁 1 个」的断言改成按补丁数算 ——
+    **判据本身一个字没改**，只是「干净」的定义要跟着注入物数量更新
+
 - **`tools/find-browser.mjs`：6 个渲染探针不再硬编码本机 Chrome 路径**
   - 原先每个探针各写死 `C:/Program Files/Google/Chrome/Application/chrome.exe`，
     **换机器/换平台就崩** —— 这是它们不能进 `npm test` 的直接原因
