@@ -14,7 +14,7 @@ import { tmpdir } from 'node:os';
 import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { DRAWER_PATCH_ID, injectResponsiveCss, RESPONSIVE_CSS, RESPONSIVE_STYLE_ID } from '../lib/board-responsive.js';
+import { ARCHIVED_CARD_PATCH_ID, DRAWER_PATCH_ID, injectResponsiveCss, RESPONSIVE_CSS, RESPONSIVE_STYLE_ID } from '../lib/board-responsive.js';
 import { buildBoard, buildBoardFromRoots, buildInlineData, parseNote, scanNotes } from '../lib/board.js';
 import { firstLines, isInside, registerBoardRoutes, renderNoticePage, revisionOf } from '../lib/board-route.js';
 import { clearGitProbeCache, listGitChildren, originOf, resolveNotesRoots } from '../lib/notes.js';
@@ -393,11 +393,17 @@ test('board-route: 正文含 HTML 片段时不得破坏注入的脚本块', asyn
     const upstream = (readFileSync(
       join(ROOT, 'skills', 'agent-notes', 'assets', 'agent-notes-board.html'), 'utf8'
     ).match(/<script/g) ?? []).length;
-    const expected = upstream + 1;
-    assert.equal(scriptTags, expected, `注入后 <script 应恰好 ${expected} 个（上游 ${upstream} + 补丁 1），实际 ${scriptTags}`);
+    /* ★ 数量从「上游 + 补丁数」算，不写死「补丁 1 个」。
+       它原本写死 `upstream + 1`，加归档卡补丁后就少算一个 ——
+       而**开闭标签必须配平**才是这条测试真正要守的（数据不能截断脚本块）。
+       写死数量会让「新增一个补丁」变成测试失败，而那不是缺陷。 */
+    const expected = upstream + 2;
+    assert.equal(scriptTags, expected, `注入后 <script 应恰好 ${expected} 个（上游 ${upstream} + 补丁 2），实际 ${scriptTags}`);
     assert.equal(closeTags, expected, `注入后 </script> 应恰好 ${expected} 个，实际 ${closeTags}`);
     assert.equal((html.match(new RegExp(`id="${DRAWER_PATCH_ID}"`, 'g')) ?? []).length, 1,
-      '补丁脚本必须恰好一个');
+      '抽屉补丁脚本必须恰好一个');
+    assert.equal((html.match(new RegExp(`id="${ARCHIVED_CARD_PATCH_ID}"`, 'g')) ?? []).length, 1,
+      '归档卡补丁脚本必须恰好一个');
 
     // 数据必须能完整解析回来，且正文原样保留。
     const start = html.indexOf('window.__INLINE_DATA__ = ') + 'window.__INLINE_DATA__ = '.length;
@@ -452,9 +458,13 @@ test('board-route: UI 响应里必须带窄屏适配样式，且不破坏上游�
        剥离**两样**我们自己加的东西再比较：适配样式块、抽屉补丁脚本块。
        只剥样式的话，补丁脚本会留在里面导致不等 —— 而被改动的上游字节
        才是这条断言真正要防的。 */
+    /* ★ 两个补丁都要剥。判据（剥干净后与「只注入数据」逐字节一致）一个字没改 ——
+       它守的东西没变；只是「干净」的定义要跟着注入物数量更新。
+       原来只剥 DRAWER_PATCH_ID，剥漏了归档卡那个 → 断言失败。 */
     const stripped = html
       .replace(new RegExp(`<style id="${RESPONSIVE_STYLE_ID}">[\\s\\S]*?</style>\\n?`), '')
-      .replace(new RegExp(`<script id="${DRAWER_PATCH_ID}">[\\s\\S]*?</script>\\n?`), '');
+      .replace(new RegExp(`<script id="${DRAWER_PATCH_ID}">[\\s\\S]*?</script>\\n?`), '')
+      .replace(new RegExp(`<script id="${ARCHIVED_CARD_PATCH_ID}">[\\s\\S]*?</script>\\n?`), '');
     const expected = original.replace(
       'window.__INLINE_DATA__ = null;',
       () => `window.__INLINE_DATA__ = ${JSON.stringify(JSON.parse(
@@ -693,7 +703,14 @@ test('board-responsive: 抽屉滚动修复已由上游提供，注入层不得�
     '注入层不应再重复上游的锁滚动规则');
   const page = '<html><head></head><body><aside id="drawer-console"></aside></body></html>';
   const out = injectResponsiveCss(page);
-  assert.doesNotMatch(out, /MutationObserver/, '注入层不应再用 MutationObserver 补 scrollTop');
+  /* ★ 判据收窄到「**抽屉补丁那个 script 块**内」。
+     原断言是 `doesNotMatch(out, /MutationObserver/)`，那会连带禁掉归档卡补丁 ——
+     而它用 MutationObserver 防的是「上游 5 秒一轮重渲染把 kpi-row 整体覆盖，
+     把归档卡抹掉」，与抽屉无关。**禁的应该是用途，不是机制。 */
+  const drawerPatchAt = out.indexOf(`id="${DRAWER_PATCH_ID}"`);
+  const drawerPatchJs = out.slice(drawerPatchAt, out.indexOf('</script>', drawerPatchAt));
+  assert.doesNotMatch(drawerPatchJs, /MutationObserver/,
+    '抽屉补丁不应再用 MutationObserver 补 scrollTop');
   assert.doesNotMatch(out, /\.scrollTop\s*=\s*0/, '注入层不应再补 scrollTop 归零');
 });
 
