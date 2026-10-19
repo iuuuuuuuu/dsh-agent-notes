@@ -281,7 +281,8 @@ try {
     ['斜杠命令 agent-notes', 'commands.test.mjs'],
     ['工具 agent_notes_gate / status', 'plugin-tools.test.mjs'],
     ['浏览器端开关与看板 tab', 'client.test.mjs'],
-    ['apply 的 config 开关组合', 'config.test.mjs']
+    ['apply 的 config 开关组合', 'config.test.mjs'],
+    ['第三方归属声明', 'notices.test.mjs']
   ]) {
     const full = join(PACKAGE_ROOT, 'tools', file);
     if (!existsSync(full)) {

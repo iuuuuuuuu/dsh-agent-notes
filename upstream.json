@@ -3,5 +3,7 @@
   "path": "skills/write-notes-like-deepseek",
   "ref": "72573a5b179de7798bbb7c4aeacdc0df6bf62439",
   "syncedAt": "2026-10-18T08:53:29.898Z",
-  "fileCount": 21
+  "fileCount": 21,
+  "license": "MIT",
+  "note": "上游 README 声明 MIT 并链接 LICENSE，但该文件在其仓库中不存在（实测 404）。按 README 声明处理。"
 }

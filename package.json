@@ -69,13 +69,18 @@
     "notes:supersession": "node tools/notes-supersession.mjs",
     "archive:note": "node skills/agent-notes/scripts/archive-agent-note.ts",
     "doc:budget": "node tools/doc-budget.mjs",
+    "notices": "node tools/notices.mjs",
+    "notices:check": "node tools/notices.mjs --check",
     "hooks:install": "node tools/install-hooks.mjs",
     "evidence": "node tools/live-evidence.mjs",
-    "check": "npm run verify && npm run notes:gate && npm run notes:coverage:last && npm run notes:supersession:last && npm run doc:budget && npm test && npm run gate:fault-injection",
+    "check": "npm run verify && npm run notices:check && npm run notes:gate && npm run notes:coverage:last && npm run notes:supersession:last && npm run doc:budget && npm test && npm run gate:fault-injection",
     "check:full": "npm run check && npm run evidence",
     "notes:coverage:last": "node tools/notes-coverage.mjs --range HEAD~1..HEAD",
     "notes:supersession:last": "node tools/notes-supersession.mjs --range HEAD~1..HEAD",
     "sync:latest": "node tools/sync-upstream.mjs --latest"
   },
-  "upstreamCommit": "0e8200c0f80d37a1c75e585a65b35401ae198462"
+  "upstreamCommit": "0e8200c0f80d37a1c75e585a65b35401ae198462",
+  "devDependencies": {
+    "spdx-expression-parse": "^5.0.0"
+  }
 }
