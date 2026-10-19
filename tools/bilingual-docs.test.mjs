@@ -201,3 +201,92 @@ test('bilingual: 只改文字不动结构必须放行（对照）', () => {
   });
   assert.deepEqual(result.errors, [], '只改标题文字不改结构必须放行');
 });
+/* ── 表格结构 ──────────────────────────────────────────────────────────
+ *
+ * 表格是**跨语言刚体**：同一份对照表，中英的行列数必然一致 ——
+ * 不一致读者就对不上，而那与翻译无关，是真的漏同步。
+ *
+ * 列表则相反，实测已确认不可比：分节比对 25 节里唯一不一致的那节，
+ * 中文 2 个列表项、英文 2 段散文，内容不缺。**排版选择不是漂移。**
+ */
+
+test('bilingual: 表格数量不一致必须报出来', () => {
+  /* ★ 在**已有节内**插一张表，不引入新标题 —— 否则标题门禁会先红并
+     `continue`，表格检查根本没跑到（实测踩过：报错说的是「标题数量不一致」，
+     根本没到表格那一步）。 */
+  const result = withEdits({
+    en: enBackup.replace(
+      '\n## Known limitations',
+      '\nExtra table:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n## Known limitations'
+    )
+  });
+  assert.ok(
+    result.errors.some((e) => /表格数量不一致/.test(e)),
+    `英文多一张表必须被报出，实际：${JSON.stringify(result.errors)}`
+  );
+});
+
+test('bilingual: 同一张表的列数不一致必须报出来', () => {
+  /* 把英文版第一张表的某一列删掉 —— 读者会对不上。 */
+  const lines = enBackup.split('\n');
+  let at = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (/^\s*\|.*\|.*\|/.test(lines[i]) && !/^\s*\|\s*:?-{3,}/.test(lines[i])) { at = i; break; }
+  }
+  assert.notEqual(at, -1, '英文版应至少有一张表');
+
+  const edited = lines.slice();
+  edited[at] = edited[at].replace(/\|[^|]*\|/, '');   /* 删一个单元格 */
+  const result = withEdits({ en: edited.join('\n') });
+
+  assert.ok(
+    result.errors.some((e) => /表格结构不一致/.test(e)),
+    `列数不一致必须被报出，实际：${JSON.stringify(result.errors)}`
+  );
+});
+
+test('bilingual: 两版同时改表格应放行（对照：证明判据不是「有没有表格」）', () => {
+  const zhLines = zhBackup.split('\n');
+  const enLines = enBackup.split('\n');
+  let zhAt = -1;
+  let enAt = -1;
+  for (let i = 0; i < zhLines.length; i += 1) {
+    if (/^\s*\|.*\|.*\|/.test(zhLines[i]) && !/^\s*\|\s*:?-{3,}/.test(zhLines[i])) { zhAt = i; break; }
+  }
+  for (let i = 0; i < enLines.length; i += 1) {
+    if (/^\s*\|.*\|.*\|/.test(enLines[i]) && !/^\s*\|\s*:?-{3,}/.test(enLines[i])) { enAt = i; break; }
+  }
+  assert.notEqual(zhAt, -1, '中文版应至少有一张表');
+  assert.notEqual(enAt, -1, '英文版应至少有一张表');
+
+  /* 两边都加一列 —— 同步改动应当放行。 */
+  const zhEdited = zhLines.slice();
+  zhEdited[zhAt] += '| 额外 |';
+  const enEdited = enLines.slice();
+  enEdited[enAt] += '| extra |';
+
+  const result = withEdits({ zh: zhEdited.join('\n'), en: enEdited.join('\n') });
+  assert.deepEqual(result.errors, [],
+    `两版同步加列应放行，实际：${JSON.stringify(result.errors)}`);
+});
+
+test('bilingual: 竖线在正文里但不是表格，不得被当表格', () => {
+  /* `a || b` 这种行含 `|` 但不是表格 —— 误判会造出假漂移。 */
+  const result = withEdits({
+    zh: zhBackup + '\n\n管道命令 `foo || bar` 不是表格。\n',
+    en: enBackup + '\n\nA pipeline `foo || bar` is not a table.\n'
+  });
+  assert.deepEqual(result.errors, [],
+    `正文里的竖线不得被当表格，实际：${JSON.stringify(result.errors)}`);
+});
+
+test('bilingual: 代码块里的表格不得被计入', () => {
+  /* 代码块里常有表格示例 —— 它们在 fence 内，不该参与比对。 */
+  const block = '\n\n\`\`\`md\n| a | b |\n|---|---|\n| 1 | 2 |\n\`\`\`\n\n';
+  const result = withEdits({
+    zh: zhBackup + block,
+    en: enBackup + '\n\n\`\`\`md\n| a | b |\n|---|---|\n\`\`\`\n\n'
+  });
+  assert.deepEqual(result.errors, [],
+    `围栏内的表格不得计入，实际：${JSON.stringify(result.errors)}`);
+});
