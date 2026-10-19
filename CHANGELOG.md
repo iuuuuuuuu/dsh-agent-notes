@@ -75,6 +75,14 @@
 
 ### 修复
 
+- **核查客户端 bundle 同步与归档路径：两条都可用（无代码改动）**
+  - 客户端 bundle：真改 `src/client.js` 函数体、不 build、跑 `verify-plugin.mjs`
+    —— 两种注入都被正确拦下，报错明确指向 `npm run build`
+  - 归档路径：在临时仓库真归档一篇 —— 文件移动、封印生成、格式重写
+    （加 `Archived: 日期`）、门禁验证（`1 archived note(s) verified`）全部正确
+  - 归档数一直是 0 只是因为还没有需要归档的笔记，**不是机制坏了**
+  - 两条都**没有**固化成常驻测试（成本不对称，且均未退化过），重访信号已记
+
 - **上游 verify 清单的分母算错了：真实 42，此前一直按 65 数**
   - 此前的 65 来自上游 `package.json` 的 **npm script 名**，按名字里含
     `verify-` 的数量数的。抽查发现 `verify-third-party-notices` 与
