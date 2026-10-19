@@ -75,6 +75,19 @@
 
 ### 修复
 
+- **上游比对核查收尾：42 道 verify 全部判定，8 个方向证据链完整**
+  - 判定结果：**4 已实现 + 1 部分实现 + 7 有理由不适用 + 30 结构性不适用 = 42**
+  - 结构性不适用的都是读本仓库没有的路径（`packages/`、`cordis.yml`、
+    `.d.ts`、VitePress 站点等）
+  - 顺带厘清一个长期歧义：本仓库有**两个**上游 —— 比对对象是
+    `deepseek-ai/deepseek-harness`（方法论发源地），而 `skills/agent-notes/`
+    的 vendored 来源是 `czm15053/write-notes-like-deepseek`。
+    而 `dsh-tauri/dependencies/` 只是**本机 DSH 的安装位置**，不是比对对象
+  - 分类表我填错过两次（`md-links` 重复计数、`agent-note-tree` 混入），
+    都被「每项恰好一类 + 合计等于真实总数」的脚本断言抓出 ——
+    表格看起来整齐、数字能凑对，不代表分类对
+  - 6 项明确接受的缺口已列在笔记里，各带重访信号
+
 - **核查实机证据链与 `check:full`：可用，接线正确（无代码改动）**
   - `npm run evidence` 用**真实 DSH** 的 SkillRegistry/ToolRuntime/CommandRuntime
     验 10 项契约（注册、list、source: bundled、模型可调用、正文剥离 frontmatter
