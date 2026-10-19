@@ -28,6 +28,7 @@
 ## 命令
 
 ```sh
+npm run build                  # 重建 lib/client.js（改了 src/client.js 后必须跑）
 npm test                       # 行为测试（真跑子进程、真写文件）
 npm run gate:fault-injection   # 证明门禁会红（含笔记门禁外壳）
 npm run notes:gate             # 本仓库笔记门禁（空树/零篇判失败）
@@ -78,9 +79,8 @@ node skills/agent-notes/scripts/verify-archived-agent-notes.ts
 ### 覆盖门禁：拦住「该写而没写」
 
 上面 `notes:gate` 的三条只验**已写笔记的格式**，对「改了代码却一篇没写」
-完全无感。本仓库连续 5 次改 `.github/workflows/verify.yml` 一篇没写，
-就是这么漏掉的 —— 当时在修紧急 CI 故障，注意力全在「让它绿」上，
-而「这次要不要留笔记」需要主动回想规范，多轮对话里必被挤掉。
+完全无感。本仓库连续 5 次改 CI 配置一篇没写就是这么漏掉的：修紧急故障时
+注意力全在「让它绿」，而「要不要留笔记」需要主动回想，多轮里必被挤掉。
 
 所以有第二道门禁，判定口径是**自动检测仓库结构**（不写死任何路径）：
 
