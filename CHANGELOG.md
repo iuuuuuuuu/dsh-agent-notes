@@ -7,6 +7,22 @@
 
 ### 新增
 
+- **`md:links` 排除归档笔记作为「源」（对齐上游 `verify-md-links.ts`）**
+  - 上游第 33 行注释写明：`Archived notes are excluded as sources,
+    but links to them remain checked`
+  - 本仓库此前无差别扫描 `.agents/notes/`，所以第一篇归档笔记一落地
+    `md:links` 就报 3 处红
+  - 排除后：归档笔记内部的断链不再报（承认封存内容会腐化，且封印机制
+    **设计上禁止**事后修改）；**活文档指向归档笔记的断链照常报**
+  - 故障注入证明排除没蔓延：给活文档造一条指向归档笔记的坏链 → 仍 exit=1
+
+- **仓库第一篇归档笔记已入库**
+  - `2026-10-18-drop-redundant-drawer-patch-after-upstream-fix.md`
+    （上游已修复抽屉缺陷、插件删掉注入层重复补丁，决策使命完成）
+  - `archived` 门禁报 `1 archived note(s) verified, 1 seal(s) in manifest`
+  - 两处「活文档 → 归档笔记」的入站链接已手工改成 `../../archived/<class>/x.md`
+    —— 归档脚本会打印提示但不自动改，因为改法取决于语义
+
 - **提交前钩子从 2 道扩到 8 道**（`.githooks/commit-msg`）
   - 字符完整性、门禁对齐、Markdown 链接、双语结构、归属声明、发版记账，
     外加原有的覆盖与 supersession
@@ -74,6 +90,16 @@
     `check:full`）—— 装钩子、归档这些日常操作此前根本没写
 
 ### 修复
+
+- **归档必然断链，且事后无法修 —— 死锁**
+  - 归档把 `implemented/<class>/x.md` 移到 `archived/<class>/x.md`，深度不变
+    只换 lifecycle 段。所以 `../bug-fix/y.md` 归档后会解析成
+    `archived/bug-fix/y.md`，而 `y.md` 还在 `implemented/`
+  - 实测规模：待归档笔记的出向链接 **63 条里 60 条（95%）会断**，
+    涉及 33/41 篇笔记
+  - 而 `--write` **救不了**：读源码确认它只封**未封**的，
+    已封的改了就报 `seal mismatch: frozen notes must never change`
+  - 于是形成死锁：归档后必然断链，但断了不能改归档文件
 
 - **上游比对核查收尾：42 道 verify 全部判定，8 个方向证据链完整**
   - 判定结果：**5 已实现 + 1 部分实现 + 6 有理由不适用 + 30 结构性不适用 = 42**

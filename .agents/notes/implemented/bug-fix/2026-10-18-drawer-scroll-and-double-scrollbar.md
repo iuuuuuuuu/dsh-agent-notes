@@ -80,7 +80,7 @@ CDP 实测脚本流程：打开第 1 篇 → `scrollTop` 设到底 → 关闭 �
 
 > **后续（2026-10-18，同日）**：上游 commit `72573a5` 已修好这两个缺陷，
 > 修法与本笔记的建议一致。注入层的两段补丁随之成为纯冗余，已删除 ——
-> 见 [../simplification/2026-10-18-drop-redundant-drawer-patch-after-upstream-fix.md](../simplification/2026-10-18-drop-redundant-drawer-patch-after-upstream-fix.md)。
+> 见 [../simplification/2026-10-18-drop-redundant-drawer-patch-after-upstream-fix.md](../../archived/simplification/2026-10-18-drop-redundant-drawer-patch-after-upstream-fix.md)。
 > 本笔记保留为「当时为什么这么修」的记录；当前实现**不再**包含这两段。
 
 上游 issue：

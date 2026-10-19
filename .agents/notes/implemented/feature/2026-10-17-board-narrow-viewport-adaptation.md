@@ -5,7 +5,7 @@ Status: implemented
 > 同域：本篇解决**窄屏布局**。**抽屉滚动**见
 > [../bug-fix/2026-10-18-drawer-scroll-and-double-scrollbar.md](../bug-fix/2026-10-18-drawer-scroll-and-double-scrollbar.md)，
 > 上游修好后删掉重复注入的决定见
-> [../simplification/2026-10-18-drop-redundant-drawer-patch-after-upstream-fix.md](../simplification/2026-10-18-drop-redundant-drawer-patch-after-upstream-fix.md)。
+> [../simplification/2026-10-18-drop-redundant-drawer-patch-after-upstream-fix.md](../../archived/simplification/2026-10-18-drop-redundant-drawer-patch-after-upstream-fix.md)。
 > 三者共用同一条原则：**能注入就不改 vendored 看板**。
 
 ## Problem
