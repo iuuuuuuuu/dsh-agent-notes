@@ -61,7 +61,7 @@ assert.equal(info.behind, false) 偶发红
 | `release-check` | 改真 `package.json` / `CHANGELOG.md` | `verifyRelease({ read })` 注入（这是本篇初稿里的「重访信号」，同批就处理掉了） |
 
 门禁「覆盖真仓库」这件事由**只读**的用例负责（`md-links` 第一条用
-`verifyMarkdownLinks()` 扫真仓库）��两类用例分工明确：只读的验覆盖面，
+`verifyMarkdownLinks()` 扫真仓库）。两类用例分工明确：只读的验覆盖面，
 注入的验检测逻辑。这样既消除了竞争，又没有把「门禁真的作用在这个仓库上」
 从测试里删掉。
 
