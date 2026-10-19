@@ -40,6 +40,12 @@ function makeRepo() {
   git('config', 'user.email', 'probe@example.test');
   git('config', 'user.name', 'probe');
   git('config', 'commit.gpgsign', 'false');
+  /* 关掉行尾转换：测试断言的是「git diff 的内容」，而行尾转换会污染它。
+     并行时 git 对同一批文件做 stat 检查会互相失效 → 打出 CRLF warning →
+     warning 混进 diff 输出 → 解析失败（表现为文件级 test failed，没有断言）。
+     这不是为本机绕过：CI 是 ubuntu（autocrlf 本就 false），
+     加上这行是让所有平台看到同一份 diff。 */
+  git('config', 'core.autocrlf', 'false');
   return dir;
 }
 
