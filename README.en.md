@@ -470,7 +470,13 @@ This plugin **imports no `@deepseek-ai/*` package**. That is measured, not styli
 
 ## License
 
-MIT. Vendored upstream content remains under its authors' copyright; see the notes inside `skills/agent-notes/` and the upstream repository.
+MIT — see [LICENSE](LICENSE) for the full text.
+
+The 21 files under `skills/agent-notes/` are a vendored copy of upstream
+`czm15053/write-notes-like-deepseek` and remain under their authors'
+copyright. Source, pinned commit, license, and file count are listed item by item in
+the [third-party notices](THIRD_PARTY_NOTICES.md), kept in sync with reality by
+`npm run notices:check`.
 
 ---
 

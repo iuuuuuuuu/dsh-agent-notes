@@ -200,6 +200,23 @@ function verifyOne(full, label, errors, baseRoot = PACKAGE_ROOT) {
 
     if (!existsSync(resolved)) {
       errors.push(`${label}: 链接目标不存在 -> ${target}`);
+      continue;
+    }
+
+    /* 指向目录要单独判。
+       实测踩过：`[见说明](docs/)` 这种写法会让 readFileSync 抛 EISDIR，
+       **整个门禁直接崩掉** —— 不是报告问题，是自己挂了。崩掉时退出码非 0，
+       看起来像「门禁红了」，实际是「门禁没能运行」。那正是本仓库最忌讳的
+       形态：红的含义必须清楚。
+       Markdown 里 `x/` 会渲染成目录下的 index，行为取决于渲染器；
+       本门禁只保证「目标是文件」，所以明确报出来而不是崩溃。 */
+    let isDirectory = false;
+    try { isDirectory = statSync(resolved).isDirectory(); } catch { /* 读不到就当不是目录 */ }
+    if (isDirectory) {
+      errors.push(
+        `${label}: 链接指向目录而非文件 -> ${target}`
+        + '（目录没有内容可指；要指某个文件请写全文件名）'
+      );
     }
   }
 

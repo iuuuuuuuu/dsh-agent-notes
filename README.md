@@ -415,7 +415,12 @@ npm run doc:budget             # 文档字数预算（超了会红，提示压�
 
 ## 许可
 
-MIT。vendored 上游内容版权归其作者，见 `skills/agent-notes/` 内注释与上游仓库。
+MIT，全文见 [LICENSE](LICENSE)。
+
+本插件分发的 `skills/agent-notes/` 下 21 个文件是上游
+`czm15053/write-notes-like-deepseek` 的 vendored 副本，版权归其作者 ——
+来源、固定 commit、许可证与文件数逐项列在
+[第三方归属声明](THIRD_PARTY_NOTICES.md)，由 `npm run notices:check` 保证与实际一致。
 
 ---
 
