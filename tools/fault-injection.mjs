@@ -280,7 +280,8 @@ try {
     ['脱离 DSH 的跨仓库可用性', 'standalone.test.mjs'],
     ['斜杠命令 agent-notes', 'commands.test.mjs'],
     ['工具 agent_notes_gate / status', 'plugin-tools.test.mjs'],
-    ['浏览器端开关与看板 tab', 'client.test.mjs']
+    ['浏览器端开关与看板 tab', 'client.test.mjs'],
+    ['apply 的 config 开关组合', 'config.test.mjs']
   ]) {
     const full = join(PACKAGE_ROOT, 'tools', file);
     if (!existsSync(full)) {
