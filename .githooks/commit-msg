@@ -1,12 +1,36 @@
 #!/bin/sh
 # 由 tools/install-hooks.mjs 生成，请勿手改（改那个脚本）。
 #
-# 两道检查，任一失败即拦下：
-#   1. 覆盖门禁 —— 该写笔记的改动必须同批带笔记（tools/notes-coverage.mjs）
-#   2. supersession 检查 —— 新增笔记必须声明与既有笔记的关系
-#      （tools/notes-supersession.mjs，规则借鉴 deepseek-harness）
+# 提交前的快速门禁。任一失败即拦下。
 #
-# 紧急情况可 `git commit --no-verify` 跳过 —— 但 CI 会再查一次。
+# 为什么是子集而不是全跑 npm run check：那里面含 283 个用例（约 34 秒），
+# 每次提交都等这么久，人就会转去 --no-verify —— 门禁就此失效。
+# 这里是「快且必要」的那部分；完整套件仍由 CI 兜底（权威那道）。
+#
+# ⚠️ 这些都是**即时反馈**。CI 才是权威：钩子可被 git commit --no-verify
+#    绕过（那是为了让 Note-Skip 合法出口不被堵死）。
 set -e
+
+echo "▸ 字符完整性（U+FFFD 会静默破坏中文）"
+node tools/text-integrity.mjs
+
+echo "▸ Markdown 链接"
+node tools/md-links.mjs
+
+echo "▸ 双语文档结构"
+node tools/docs:bilingual 2>/dev/null || node tools/bilingual-docs.mjs
+
+echo "▸ 第三方归属声明"
+node tools/notices.mjs --check
+
+echo "▸ 发版记账"
+node tools/release-check.mjs
+
+echo "▸ 门禁对齐（CI 是否漏了本地门禁）"
+node tools/ci-alignment.mjs
+
+echo "▸ 覆盖门禁：该写笔记的改动必须同批带笔记"
 node tools/notes-coverage.mjs --message-file "$1"
+
+echo "▸ supersession：新增笔记必须声明与既有笔记的关系"
 node tools/notes-supersession.mjs

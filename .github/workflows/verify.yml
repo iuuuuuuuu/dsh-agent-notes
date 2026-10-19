@@ -115,6 +115,43 @@ jobs:
       - name: 文档预算
         run: npm run doc:budget
 
+      # ── 以下五道门禁是后来加的，本地 check 链里有，CI 一度一道都没跑 ──
+      #
+      # 实测踩过：连续三轮加了 notices / md:links / docs:bilingual /
+      # text:integrity / release:check 五道门禁，全都只接进了本地 `npm run check`，
+      # CI 的 verify job 没同步。后果是**它们红过时 CI 毫无反应** ——
+      # 本地成了唯一防线，而本地会被人 `--no-verify`、也会忘记跑。
+      #
+      # 为什么不用一句 `npm run check` 收尾（那样永远不会漏）：
+      #   ① 拆开是为了「哪一步让摘要变了在日志里一目了然」（本文件上方已说明）；
+      #   ② `notes:coverage:last` / `supersession:last` 查的是 HEAD~1..HEAD，
+      #      CI 用 `github.event.before..HEAD` 更准（覆盖整个 push 的所有提交），
+      #      所以那两步**刻意不接**这条链 —— 它们在上面已有独立步骤。
+      #
+      # 所以这里逐个列出**只跑本地、不依赖 git 范围**的那几道。
+      # 判据：凡是判据只依赖「当前文件内容」的门禁都该进 CI；凡是需要
+      # 「本次变更范围」的（coverage / supersession）走上面各自的步骤。
+      - name: 第三方归属声明
+        run: npm run notices:check
+
+      - name: Markdown 链接
+        run: npm run md:links
+
+      - name: 双语文档结构
+        run: npm run docs:bilingual
+
+      - name: 文本完整性
+        run: npm run text:integrity
+
+      - name: 发版记账
+        run: npm run release:check
+
+      # 这道门禁检查的正是「上面这些步骤有没有被漏进 CI」——
+      # 包括它自己。放在最后一步，所以它红时能指出「本 job 缺了什么」。
+      # 它把自己也列进判据：漏掉自己同样该被报出来。
+      - name: 门禁对齐（CI 与本地 check 链一致）
+        run: npm run ci:align
+
       # 跑测试前后各打一次摘要，并在测试后**断言 vendored 目录没被改**。
       #
       # 这不是临时排查残留，是针对一类真实缺陷的永久门禁：

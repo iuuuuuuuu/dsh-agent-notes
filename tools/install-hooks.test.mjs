@@ -54,7 +54,10 @@ function sandbox() {
      这里只需要它们**存在**（钩子正文只是引用路径，运行期才执行）。
      复制真实的门禁脚本，让钩子内容里的路径与真实布局一致。 */
   copyFileSync(SCRIPT, join(dir, 'tools', 'install-hooks.mjs'));
-  for (const name of ['notes-coverage.mjs', 'notes-supersession.mjs']) {
+  /* install-hooks.mjs 现在 import 钩子正文（拆成独立文件是为了能单独测它）。
+     沙箱必须把它一起拷进来，否则 import 失败，六条用例会全红 ——
+     症状与「安装逻辑坏了」一样，但修复方向相反。 */
+  for (const name of ['notes-coverage.mjs', 'notes-supersession.mjs', 'hook-body.mjs']) {
     const src = join(ROOT, 'tools', name);
     if (existsSync(src)) copyFileSync(src, join(dir, 'tools', name));
   }
@@ -196,6 +199,9 @@ test('hooks: 非 git 仓库目录必须退出 2，不静默装一半', () => {
   SANDBOXES.push(dir);
   mkdirSync(join(dir, 'tools'), { recursive: true });
   copyFileSync(SCRIPT, join(dir, 'tools', 'install-hooks.mjs'));
+  /* 钩子正文也要带上：缺它则 import 失败、退出码变 1 而非 2，
+     症状看着像「退出码被改坏」，实际是模块没解析到。 */
+  copyFileSync(join(ROOT, 'tools', 'hook-body.mjs'), join(dir, 'tools', 'hook-body.mjs'));
 
   const r = spawnSync(process.execPath, [join(dir, 'tools', 'install-hooks.mjs')], {
     cwd: dir, encoding: 'utf8', windowsHide: true
