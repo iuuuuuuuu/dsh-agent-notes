@@ -37,6 +37,14 @@ jobs:
         with:
           node-version: '22'
 
+      # 装开发依赖。此前本仓库零依赖，这一步不需要；现在有了 devDependencies
+      # （spdx-expression-parse，用于校验许可证标识符），不装的话
+      # tools/notices.test.mjs 会因解析不到包而整片失败 —— 实测红过一次。
+      # 用 npm ci 而非 npm install：前者严格按 package-lock.json 安装，
+      # 才能保证 CI 与本地的依赖树一致。
+      - name: 安装依赖
+        run: npm ci
+
       # 完整自检：包清单、patch 一致性、零依赖、双语文档、vendored 哈希、
       # 客户端 bundle 同步、投影与命令名一致性，然后跑测试与故障注入。
       # notes:gate 单独列出来：三条 vendored 脚本在空集合上 exit 0，
