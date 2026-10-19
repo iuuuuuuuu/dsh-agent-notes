@@ -64,7 +64,7 @@ function isRepoRoot() {
        2. 斜杠方向不同（`\` vs `/`）；
        3. 末尾多一个分隔符（`new URL('..', import.meta.url)` 的 fileURLToPath
           就会留一个）；
-       4. **短路径 vs 长路径**（8.3 形式 `C:\Users\IUUUUU~1\...`）。
+       4. **短路径 vs 长路径**（8.3 形式 `C:\Users\<短用户名>\...`）。
      第 4 种是实测踩到的：`import.meta.url` 在某些环境（实测 `%TEMP%`
      所在目录）解析出的是短路径，而 `git rev-parse` 给的是长路径，
      两者字符串永不相等 —— 于是 `npm run hooks:install` 直接退出 2，

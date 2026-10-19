@@ -237,9 +237,34 @@ async function collectPaths(ref) {
   return paths;
 }
 
-/** 解析命令行参数。 */
-function parseArgs(argv) {
-  const args = { check: false, yes: false, latest: false, auto: false, branch: 'main', ref: resolveDefaultRef() };
+/**
+ * 解析命令行参数。
+ *
+ * **导出是为了可测。** 此前它没有导出、文件导入即执行 `main()`，于是
+ * 参数解析的全部边界（缺值、未知参数、组合语义）一条都测不了 ——
+ * 而这是外部可传的输入。
+ *
+ * `--help` 走 `exit` 回调而不是直接 `process.exit`：直接退出在测试里
+ * 会把整个测试进程带走，而它要表达的只是「打印用法并正常结束」。
+ *
+ * @param {string[]} argv 参数数组（不含 node 与脚本路径）。
+ * @param {{onHelp?: () => void, defaultRef?: string}} [options] 选项。
+ * @returns {{check: boolean, yes: boolean, latest: boolean, auto: boolean, branch: string, ref: string}} 解析结果。
+ * @throws {Error} 参数缺值或未知时抛出。
+ */
+export function parseArgs(argv, options = {}) {
+  const help = options.onHelp ?? (() => {
+    printUsage();
+    process.exit(0);
+  });
+  const args = {
+    check: false,
+    yes: false,
+    latest: false,
+    auto: false,
+    branch: 'main',
+    ref: options.defaultRef ?? resolveDefaultRef()
+  };
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index];
     if (arg === '--check') args.check = true;
@@ -257,18 +282,30 @@ function parseArgs(argv) {
       args.ref = value;
       index += 1;
     } else if (arg === '--help' || arg === '-h') {
-      console.log('用法: node tools/sync-upstream.mjs [--check] [--yes] [--latest] [--auto] [--branch <name>] [--ref <branch|commit>]');
-      console.log('  --check        只报告内置副本与该 ref 的差异，零写入');
-      console.log('  --latest       与上游默认分支逐文件比对，判断是否落后（防假绿）');
-      console.log('  --auto         查上游 HEAD 并合并到它（CI 用；隐含 --yes）');
-      console.log('  --branch <n>   配合 --latest/--auto 指定上游分支，默认 main');
-      console.log('  --yes          真的覆盖内置副本并记录清单');
-      process.exit(0);
+      help();
+      /* help() 正常情况下不返回（默认实现是 process.exit）。但测试注入的
+         实现会返回，所以这里继续往下走 —— 解析成默认参数即可。 */
     } else {
       throw new Error(`未知参数: ${arg}`);
     }
   }
   return args;
+}
+
+/**
+ * 打印用法。
+ *
+ * @returns {void}
+ */
+function printUsage() {
+  console.log('用法: node tools/sync-upstream.mjs [--check] [--yes] [--latest] [--auto] [--branch <name>] [--ref <branch|commit>]');
+  console.log('  --check        只报告内置副本与该 ref 的差异，零写入');
+  console.log('  --latest       与上游默认分支逐文件比对，判断是否落后（防假绿）');
+  console.log('  --auto         查上游 HEAD 并合并到它（CI 用；隐含 --yes）');
+  console.log('  --branch <n>   配合 --latest/--auto 指定上游分支，默认 main');
+  console.log('  --ref <b|c>    指定要比对的 commit 或分支，默认取 upstream.json 的记录');
+  console.log('  --yes          真的覆盖内置副本并记录清单');
+  console.log('  --help, -h     显示这段用法');
 }
 
 /**
@@ -340,7 +377,15 @@ async function main() {
       for (const rel of drift.missing) console.error(`  文件缺失  ${rel}`);
     }
     ref = head;
-    args.yes = true;
+    /* `--auto` 隐含 `--yes`，但**不得覆盖 `--check` 显式给出的「零写入」意图**。
+       实测踩过：`node tools/sync-upstream.mjs --auto --check` 会把
+       `args.yes` 置真，随后走到合并路径真的写文件 —— 而 `--check` 的
+       契约是「零写入」。更糟的是它**不报错、退出码还可能是 0**，
+       于是「我明明要检查」变成了「我覆盖了 vendored 副本」。
+
+       `--check` 优先是保守方向：两者同传时退回「只检查」，
+       想要写入就显式写 `--auto`（不带 --check）。 */
+    if (!args.check) args.yes = true;
   }
 
   /* `--latest`：判断内置副本是否落后于上游默认分支。
@@ -492,20 +537,47 @@ function writeManifest(manifest, ref) {
 
   const upstreamFile = join(PACKAGE_ROOT, 'upstream.json');
   const previous = existsSync(upstreamFile) ? JSON.parse(readFileSync(upstreamFile, 'utf8')) : {};
-  const next = {
+
+  /* **保留本函数不负责的字段。**
+     曾经的写法是白名单重建 next，只留 repository/path/ref/syncedAt/
+     fileCount/commit —— 于是别人往这个文件里加的字段会被静默抹掉。
+     实测踩过：`license` 与 `note`（第三方归属声明 `tools/notices.mjs` 的
+     数据源）就是这样没的，表现为「跑一次 sync:check 之后 notices:check
+     就红了：upstream.json 缺少 license 字段」。
+
+     白名单式的「重建」看起来更干净，但代价是**这个文件从此只有本函数能
+     写**。改成「先展开原有字段，再让本函数管的字段覆盖它」，
+     新增字段就不必回头改这里。 */
+  const managed = {
     repository: UPSTREAM.repository,
     path: UPSTREAM.pathPrefix,
     ref,
     syncedAt: new Date().toISOString(),
-    fileCount: Object.keys(manifest.files).length,
-    ...(previous.commit === undefined ? {} : { commit: previous.commit })
+    fileCount: Object.keys(manifest.files).length
   };
+  const next = { ...previous, ...managed };
+
   writeFileSync(upstreamFile, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
   console.log(`  已记录 tools/upstream-manifest.json 与 upstream.json`);
   void relative;
 }
 
-main().catch((error) => {
-  console.error(`合并失败: ${error?.message ?? error}`);
-  process.exit(1);
-});
+/**
+ * 仅在被**直接执行**时才跑主流程。
+ *
+ * 为什么要有这个守卫：为了让 `parseArgs` 可测而把它导出后，测试就要
+ * `import` 本文件 —— 而本文件末尾原本无条件调用 `main()`，那会让每次
+ * import 都真的去访问网络、写文件。测试要能 import，就不能一进来就干活。
+ *
+ * 判定方式与 `tools/bilingual-docs.mjs` 一致：比较 `process.argv[1]` 与
+ * 本文件路径（都归一化成正斜杠，Windows 下 `\` 要换掉）。
+ */
+const invokedDirectly = process.argv[1] !== undefined
+  && process.argv[1].replace(/\\/g, '/').endsWith('/tools/sync-upstream.mjs');
+
+if (invokedDirectly) {
+  main().catch((error) => {
+    console.error(`合并失败: ${error?.message ?? error}`);
+    process.exit(1);
+  });
+}
