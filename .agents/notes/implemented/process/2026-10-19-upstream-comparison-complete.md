@@ -52,27 +52,49 @@ goal 要求「全部核查完毕后确认无实质优化空间再标记完成」
 
 | 判定 | 数量 | 依据 |
 |---|---|---|
-| **已实现** | 4 | `verify-agent-note-{format}`、`verify-archived-agent-notes`（vendored 直接用）、`doc-budgets`（`doc-budget.mjs`）、`md-links`（`md-links.mjs`） |
+| **已实现** | 5 | `verify-agent-note-format`、`verify-archived-agent-notes`（vendored 直接用）、`doc-budgets`（`doc-budget.mjs`）、`md-links`（`md-links.mjs`）、`agent-note-classification`（见下） |
 | **已部分实现** | 1 | `translation-pairing`（比结构，不补逐节哈希） |
-| **有理由不适用** | 7 | `md-wrap`、`no-top-level-await`、`export-jsdoc`、`public-repository-links`、`concrete-terms`、`runtime-closure`、`agent-note-classification` |
+| **有理由不适用** | 6 | `md-wrap`、`no-top-level-await`、`export-jsdoc`、`public-repository-links`、`concrete-terms`、`runtime-closure` |
 | **结构性不适用** | 30 | 读 `packages/`、`cordis.yml`、`.d.ts`、VitePress 站点等本仓库没有的路径 |
 
-合计 **4 + 1 + 7 + 30 = 42**，每项恰好归一类。
+合计 **5 + 1 + 6 + 30 = 42**，每项恰好归一类。
 
-> **这张表我填错过两次，都被脚本抓出来：**
+> **这张表我填错过三次，每次都是「看起来对」：**
 >
-> 1. 第一版把 `md-links` 同时算进「已实现」与「不适用」→ 合计 43；
-> 2. 第二版把 `verify-agent-note-tree.ts` 算进「已实现」→ 合计 43。那个文件
->    **确实存在于上游 `scripts/`**（本仓库一直在用它），但**没被任何
->    `package.json` script 引用** —— 而 42 这个分母是「被引用的 verify 脚本」。
+> 1. 把 `md-links` 同时算进「已实现」与「不适用」→ 合计 43；
+> 2. 把 `verify-agent-note-tree.ts` 算进「已实现」→ 合计 43。那个文件
+>    **确实存在于上游 `scripts/`**，但**没被任何 `package.json` script 引用**，
+>    而 42 这个分母是「被引用的 verify 脚本」；
+> 3. 把 `agent-note-classification` 判成「不适用」—— 只看了它封禁旧路径那一半，
+>    没看到它的结构检查复用了 tree 门禁（**已在做**）。
 >
-> 两次都是「表格看起来整齐、数字也能凑对」，只是分类本身错了。
-> **所以分类必须由脚本产出，并断言「每项恰好一类 + 合计等于真实总数」**，
-> 不能凭印象填表。
+> 前两次是**计数错**（合计能凑对但分类重叠），第三次是**判定错**（读名字不读源码）。
+> 共同点：表格整齐、数字能凑对，**错误藏在分类里而不是算术里**。
+>
+> 所以：分类必须由脚本产出，并断言「每项恰好一类 + 合计等于真实总数」；
+> 而判定必须读源码，不能读文件名。
 >
 > 顺带记下分母的边界：「被 `package.json` 引用的 verify 脚本」= 42，
 > 而「`scripts/` 目录里的 `verify-*.ts` 文件」可能更多。本篇用前者 ——
 > 它代表**上游实际在跑的门禁**。
+
+#### `verify-agent-note-classification` 为什么算「已实现」而不是「不适用」
+
+我最初判它「不适用」，理由是「它封禁 `docs/rfc` 旧路径，本仓库全历史零出现」。
+**读了源码才发现那个理由只覆盖了它的一半。**
+
+它实际做两件事：
+
+| 它做的 | 本仓库现状 |
+|---|---|
+| ① 强制 lifecycle/class 路径与日期文件名 —— 复用 `agent-note-tree.ts` 的 `walkAgentNoteTree` | **已实现**：`verify-agent-note-tree.ts` 就在做，且故障注入证明会红（「非法分类目录 refactor」「文件名不符合 yyyy-mm-dd」「出现 INDEX.md」三条都 exit=1） |
+| ② 封禁 `docs/rfc` / `docs/rfcs` | 本仓库 git 全历史**零出现**，连 `docs/` 目录都不存在 |
+
+所以准确说法是：**主体已实现，只有第 ② 条那个封禁不适用**。整体归「已实现」。
+
+> **教训：「这个门禁叫什么名字」与「它实际做什么」是两回事。**
+> 名字里有 `classification` 就以为它是「分类规则检查」，而它真正的结构检查
+> 是**复用 tree 门禁**的。判定必须读源码，不能读文件名。
 
 ### 三、明确接受的缺口（不是「没想到」，是「想过不做」）
 
