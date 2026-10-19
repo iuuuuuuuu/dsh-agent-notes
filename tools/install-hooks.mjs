@@ -110,29 +110,9 @@ if (undo) {
   process.exit(0);
 }
 
-/* 钩子正文。刻意用 `#!/bin/sh` 而不是 node：
-   Windows 上 git 自带的 sh 一定在，node 的路径却可能不在 PATH 里。
-   真正的判定逻辑仍然交给 node 脚本，钩子只做转发。
-
-   为什么挂 commit-msg 而不是 pre-commit：
-   `Note-Skip:` 是写在**提交信息**里的放行标记，而 pre-commit 阶段本次提交
-   信息还没生成，读不到它 —— 实测那样挂会让「我明明写了 Note-Skip 却被拦」，
-   属于把合法出口堵死，人就会转去 --no-verify，门禁等于失效。
-   commit-msg 拿得到 `$1`（COMMIT_EDITMSG 路径），暂存区在此时也仍然可查，
-   一个钩子同时满足两个条件。 */
-const hookBody = `#!/bin/sh
-# 由 tools/install-hooks.mjs 生成，请勿手改（改那个脚本）。
-#
-# 两道检查，任一失败即拦下：
-#   1. 覆盖门禁 —— 该写笔记的改动必须同批带笔记（tools/notes-coverage.mjs）
-#   2. supersession 检查 —— 新增笔记必须声明与既有笔记的关系
-#      （tools/notes-supersession.mjs，规则借鉴 deepseek-harness）
-#
-# 紧急情况可 \`git commit --no-verify\` 跳过 —— 但 CI 会再查一次。
-set -e
-node tools/notes-coverage.mjs --message-file "$1"
-node tools/notes-supersession.mjs
-`;
+/* 钩子正文由 tools/hook-body.mjs 提供 —— 拆出来是为了能单独测它：
+   它是「门禁的门禁」，藏在模板字符串里就没法验证。 */
+import { HOOK_BODY as hookBody } from './hook-body.mjs';
 
 if (!existsSync(HOOKS_DIR)) mkdirSync(HOOKS_DIR, { recursive: true });
 
