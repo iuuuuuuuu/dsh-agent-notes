@@ -7,6 +7,17 @@
 
 ### 新增
 
+- **`main` 分支保护：13 道门禁第一次有了远端强制力**
+  - 此前 `main` 无任何保护（`Branch not protected`）。三条绕过路径都实测可行：
+    `--no-verify` 绕本地钩子、直推 `main` 跳过 CI、`--force` 改写历史
+  - 已配 `required_status_checks=[verify]`、`strict`、`enforce_admins`、
+    禁 force push、禁删除。实测 `git push --force` 到 `main` 被 GitHub 拒绝：
+    `GH006: Required status check "verify" is expected`
+  - 刻意**不**把 `upstream-drift` 设为必需检查：那个 job 在网络不可达时
+    **故意**退出 2（查不到也必须红），设为必需会让网络抖动变成无法推送
+  - 代价：`strict=true` 要求分支与 `main` 同步，推 `main` 必须走 PR
+  - **该设置不在 git 里**，迁移或 fork 时需按笔记里的表格重新配置
+
 - **第三方归属声明 `THIRD_PARTY_NOTICES.md`**
   - 本插件分发的 `skills/agent-notes/` 下 21 个文件是上游
     `czm15053/write-notes-like-deepseek` 的 vendored 副本，此前仓库里
