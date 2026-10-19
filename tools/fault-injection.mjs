@@ -9,7 +9,7 @@
  * 用法：node tools/fault-injection.mjs
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -279,14 +279,27 @@ try {
     ['归档入口', 'archive-note.test.mjs'],
     ['脱离 DSH 的跨仓库可用性', 'standalone.test.mjs'],
     ['斜杠命令 agent-notes', 'commands.test.mjs'],
-    ['工具 agent_notes_gate / status', 'plugin-tools.test.mjs']
+    ['工具 agent_notes_gate / status', 'plugin-tools.test.mjs'],
+    ['浏览器端开关与看板 tab', 'client.test.mjs']
   ]) {
     const full = join(PACKAGE_ROOT, 'tools', file);
     if (!existsSync(full)) {
       console.error(`  ✖ tools/${file} 不存在 —— ${label}没有故障注入，不可信`);
       failures += 1;
     } else {
-      console.log(`  ✔ ${label}的故障注入在 tools/${file}（由 npm test 执行）`);
+      /* 光「文件存在」不够 —— 一个全是恒真断言的测试文件同样存在。
+         至少要求它有真正的用例，并且数量不是零。
+         本条写于一次真实教训：`client.test.mjs` 第一版 6 个用例全绿，
+         但 `apply` 在 slots 缺失时提前 return、`useEffect` 也没被真执行，
+         所以断言测的是我自己造的空数组。 */
+      const text = readFileSync(full, 'utf8');
+      const cases = (text.match(/^test\(/gm) ?? []).length;
+      if (cases === 0) {
+        console.error(`  ✖ tools/${file} 里没有 test(...) 用例 —— ${label}的故障注入是空壳`);
+        failures += 1;
+      } else {
+        console.log(`  ✔ ${label}的故障注入在 tools/${file}（${cases} 个用例，由 npm test 执行）`);
+      }
     }
   }
 

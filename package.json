@@ -58,6 +58,7 @@
     "url": "https://github.com/iuuuuuuuu/dsh-agent-notes/issues"
   },
   "scripts": {
+    "build": "node build.mjs",
     "test": "node --test tools/*.test.mjs",
     "sync": "node tools/sync-upstream.mjs",
     "sync:check": "node tools/sync-upstream.mjs --check",
