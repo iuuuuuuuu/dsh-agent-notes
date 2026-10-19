@@ -49,11 +49,33 @@
 
 ### 修复
 
+- **`node tools/sync-upstream.mjs --auto --check` 会静默写入**
+  - `--auto` 隐含 `--yes` 是设计（CI 用它自动合并），但它**无条件**覆盖了用户
+    显式写下的 `--check`。两者同传时会走合并路径真的覆盖 vendored 副本，
+    而 `--check` 的契约是「零写入」
+  - 隐蔽之处：这次没出事纯属巧合 —— ref 相同且本地与清单一致，路径恰好没写文件
+    而已，**退出码仍是 0、不报任何错**。本地一旦有出入就会真的写
+  - 修法：`--check` 优先。两者同传退回「只检查」，要写入就显式写 `--auto`
+
+- **`sync:check` 会抹掉 `upstream.json` 里别人的字段**
+  - `writeManifest` 原本用白名单重建该文件，只留 `repository`/`path`/`ref`/
+    `syncedAt`/`fileCount`/`commit`。于是任何别的字段都会被静默抹掉
+  - 实测：第三方归属声明（`THIRD_PARTY_NOTICES.md` 的数据源）依赖的 `license`
+    与 `note` 就这样没的，`notices:check` 随之变红 —— 而触发它的只是一次
+    普通的同步检查，**没有人改过那个文件**
+  - 修法：改成 `{ ...previous, ...managed }`，保留本函数不负责的字段
+  - 白名单式的「重建」把「这个文件只有我能写」变成隐式约束，
+    而那个约束没有任何文档说明 —— 谁往里加字段都会被抹掉
+
+- **`--help` 的两处文档缺口**
+  - `--help` / `-h` 与 `--ref` 都没在用法说明里出现
+  - 由新增的「用法文本一致性」测试抓出：每个开关必须拥有自己的说明行
+
 - **`npm run hooks:install` 在部分 Windows 上装不上钩子**
   - 脚本比对 `git rev-parse --show-toplevel` 与自己的 `PACKAGE_ROOT` 来判定
     「是否在仓库根」。原有的归一化处理了大小写、斜杠方向、尾随分隔符，
-    **漏了 8.3 短路径**：`import.meta.url` 可能解析出 `C:\Users\IUUUUU~1\...`，
-    而 git 给的是 `C:\Users\iuuuuuuuu\...`，两者永不相等
+    **漏了 8.3 短路径**：`import.meta.url` 可能解析出 `C:\Users\<短用户名>\...`，
+    而 git 给的是 `C:\Users\<用户名>\...`，两者永不相等
   - 后果：在 `%TEMP%` 或用户目录位于 8.3 形式下的 Windows 机器上，安装直接
     退出 2，**钩子装不上** —— 「该写笔记却没写」这道本地门禁静默消失，
     只剩 CI 那一道还拦着

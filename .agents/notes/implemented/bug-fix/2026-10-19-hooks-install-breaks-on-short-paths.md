@@ -19,7 +19,7 @@ Independent: 本篇处理的是**路径归一化在 Windows 上的失效**，与
 
 ```
 ✖ 当前目录不是 git 仓库根，无法安装钩子。
-  PACKAGE_ROOT = C:\Users\IUUUUU~1\AppData\Local\Temp\an-hooks-xxx\
+  PACKAGE_ROOT = C:\Users\<短用户名>\AppData\Local\Temp\an-hooks-xxx\
 ```
 
 脚本用 `git rev-parse --show-toplevel` 的输出与自己的 `PACKAGE_ROOT` 比对，
@@ -32,10 +32,10 @@ Independent: 本篇处理的是**路径归一化在 Windows 上的失效**，与
 
 | 来源 | 路径 |
 |---|---|
-| `import.meta.url` 解析出的 `PACKAGE_ROOT` | `C:\Users\IUUUUU~1\AppData\...` |
-| `git rev-parse --show-toplevel` | `C:/Users/iuuuuuuuu/AppData/...` |
+| `import.meta.url` 解析出的 `PACKAGE_ROOT` | `C:\Users\<短用户名>\AppData\...` |
+| `git rev-parse --show-toplevel` | `C:/Users/<用户名>/AppData/...` |
 
-`C:\Users\IUUUUU~1` 是 8.3 短路径（Windows 对长文件名给的兼容名）。
+`C:\Users\<短用户名>` 是 8.3 短路径（Windows 对长文件名给的兼容名）。
 两者字符串永不相等，于是**在任何 `%TEMP%` 或用户目录位于 8.3 形式下的
 Windows 机器上，`npm run hooks:install` 直接退出 2，钩子装不上**。
 
@@ -45,7 +45,7 @@ Windows 机器上，`npm run hooks:install` 直接退出 2，钩子装不上**�
 ### 为什么本机没暴露
 
 本机的仓库在 `D:\WishProject\`，路径没有 8.3 形式，所以本地一直正常。
-暴露它的是测试：一旦在 `%TEMP%`（`C:\Users\IUUUUU~1\...`）下建沙箱，
+暴露它的是测试：一旦在 `%TEMP%`（`C:\Users\<短用户名>\...`）下建沙箱，
 差异立刻显现。
 
 ## Decision
@@ -54,10 +54,10 @@ Windows 机器上，`npm run hooks:install` 直接退出 2，钩子装不上**�
 
 关键在于 **`.native` 与 JS 版行为不同**（实测）：
 
-| 实现 | 输入 `C:\Users\IUUUUU~1\AppData\Local\Temp\an-8-he6krr` 的输出 |
+| 实现 | 输入 `C:\Users\<短用户名>\AppData\Local\Temp\an-8-he6krr` 的输出 |
 |---|---|
-| `realpathSync()`（JS 版） | `C:\Users\IUUUUU~1\AppData\...` ← **不展开** |
-| `realpathSync.native()` | `C:\Users\iuuuuuuuu\AppData\...` ← **展开** |
+| `realpathSync()`（JS 版） | `C:\Users\<短用户名>\AppData\...` ← **不展开** |
+| `realpathSync.native()` | `C:\Users\<用户名>\AppData\...` ← **展开** |
 
 我第一版修法用的是 JS 版 `realpathSync`，**测试仍然全红** —— 那一刻才明白
 不是「加 realpath 就行」，而是「加对的那一版 realpath」。
