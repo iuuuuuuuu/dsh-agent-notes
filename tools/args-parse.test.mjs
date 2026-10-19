@@ -79,7 +79,7 @@ test('args: --branch / --ref 缺值必须抛错，不许静默用默认值', () 
 
 test('args: 未知参数必须抛错并点名', () => {
   assert.throws(() => parseArgs(['--nope'], opts), /未知参数: --nope/);
-  /* 位置参数同样不接受 —— 这个脚本没��位置参数，出现就是打错了。 */
+  /* 位置参数同样不接受 —— 这个脚本没有位置参数，出现就是打错了。 */
   assert.throws(() => parseArgs(['main'], opts), /未知参数: main/);
 });
 

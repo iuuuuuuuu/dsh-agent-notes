@@ -55,7 +55,7 @@ const PAIRS = [
 /**
  * 抽出一份 Markdown 的结构指纹。
  *
- * 只取与��言无关的部分：
+ * 只取与语言无关的部分：
  *   - 标题的**层级**（`#` 的个数），不含标题文字（文字必然是两种语言）；
  *   - 围栏代码块的数量。
  *
@@ -153,7 +153,7 @@ function main() {
   }
   console.error(`双语文档一致性失败：${result.errors.length} 处`);
   for (const error of result.errors) console.error(`  ✖ ${error}`);
-  console.error('  修复：让两版结构对���，或若确实有意只改一版，说明理由并同步另一版。');
+  console.error('  修复：让两版结构对应，或若确实有意只改一版，说明理由并同步另一版。');
   process.exit(1);
 }
 

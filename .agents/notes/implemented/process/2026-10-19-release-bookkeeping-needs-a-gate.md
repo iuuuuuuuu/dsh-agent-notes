@@ -42,7 +42,7 @@ Independent: 本篇处理的是**发布流程的记账一致性**，与前面三
 
 1. `package.json` 当前版本**必须**在 CHANGELOG 有对应版本段；
 2. 版本段不得重复（语义化版本不允许复用版本号）；
-3. 版本段必须严格递减（���件里最新版本在前）；
+3. 版本段必须严格递减（文件里最新版本在前）；
 4. 每个版本段必须带 `YYYY-MM-DD` 日期；
 5. `[Unreleased]` 是唯一允许无日期的段；**存在时必须有内容** ——
    空段说明「攒着不发」，而攒到什么时候此前完全看不见。
@@ -74,7 +74,7 @@ CI 的 `npm ci`，全都没进 CHANGELOG。已补齐。
 - **收益**：`[Unreleased]` 为空会红。这直接对应「攒着不发却看不见」—— 本仓库补 CHANGELOG 之前就处于这个状态。
 - **代价与已知上限**：只管结构不管内容。一段写错了但格式正确的说明，本门禁放行。
 - **代价与已知上限**：`version.test.mjs` 与本门禁各管一半记账（前者管 tag，后者管 CHANGELOG）。两套判断理论上可能互相矛盾（例如 tag 打了但 CHANGELOG 没段 —— 这时 tag 测试绿、CHANGELOG 测试红）。目前没有测试断言「两个门禁不冲突」，若将来有人改动其中一条的判定口径，那种矛盾不会被自动发现。
-- **重访信号**：若开始发到 npm（而非仅 git tag），`package.json` 的 `files` 白名单、`publishConfig`、以及打包产物的完整性都需要新的门禁 —— 那时应该引入上游那套 `release:pack` + `verify-packed-install`，并重新��估上面那条「不做一键发版脚本」的结论。
+- **重访信号**：若开始发到 npm（而非仅 git tag），`package.json` 的 `files` 白名单、`publishConfig`、以及打包产物的完整性都需要新的门禁 —— 那时应该引入上游那套 `release:pack` + `verify-packed-install`，并重新评估上面那条「不做一键发版脚本」的结论。
 
 ## Verification
 

@@ -73,7 +73,7 @@ Windows 机器上，`npm run hooks:install` 直接退出 2，钩子装不上**�
 
 `tools/install-hooks.test.mjs`（9 个用例）。全部在 `mkdtempSync` 出来的
 **临时 git 仓库**里跑 —— 脚本靠 `git rev-parse` 判定仓库根，所以要把脚本
-**复制**进沙箱，��则它的 `PACKAGE_ROOT` 永远指向本仓库、判定必然失败。
+**复制**进沙箱，否则它的 `PACKAGE_ROOT` 永远指向本仓库、判定必然失败。
 
 覆盖：安装成功、写钩子文件、设 `core.hooksPath`、钩子正文两道门禁、
 shebang、重复安装幂等、内容不同才提示覆盖、`--undo`、重复卸载、
@@ -98,7 +98,7 @@ shebang、重复安装幂等、内容不同才提示覆盖、`--undo`、重复�
 - **代价与已知上限**：测试要复制脚本进沙箱，因为它靠 `git rev-parse` 判定。**这意味着沙箱里的脚本副本与仓库里的可能不同步** —— 若两者行为分叉，测试验的就不是真正在用的那份。缓解办法是每次测试都从仓库复制（当前如此），但「复制」本身是一份拷贝，仍有理论上的漂移窗口。
 - **代价与已知上限**：`.native` 与 JS 版在**非 Windows** 平台行为是否一致未验证。当前 CI 只跑 ubuntu（`realpathSync.native` 在 Linux 上可用且会展开符号链接，与 JS 版基本一致），但没有专门用例锁住这个差异。
 - **代价与已知上限**：8.3 短路径只在 Windows 上出现，所以**这个缺陷在 Linux CI 里永远不会复现**。这条覆盖完全依赖本地 Windows 环境 —— 若将来只跑 Linux CI，这份测试对该缺陷就退化成了「其它边界路径的覆盖」。这也是它值得单独记的原因。
-- **重访信号**：若 `npm run hooks:install` 将来支持「从子目录调用」（例如 npm workspaces 或 `npm --prefix`），应重新评估「脚本目录 vs cwd」这个语义选择 —— 见上��被否的第三条。
+- **重访信号**：若 `npm run hooks:install` 将来支持「从子目录调用」（例如 npm workspaces 或 `npm --prefix`），应重新评估「脚本目录 vs cwd」这个语义选择 —— 见上面被否的第三条。
 
 ## Verification
 
