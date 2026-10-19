@@ -227,11 +227,17 @@ test('release: 往 [Unreleased] 加内容必须放行（对照）', () => {
 test('release: 升版本号并同步加段必须放行（对照）', () => {
   /* 正当发版：改版本号 + 写版本段，两者一致。这条必须绿 ——
      否则门禁在阻止正确行为，人就会学会绕过它。 */
+  /* ★ 用 fixture 而不是真实 CHANGELOG —— 那批用例已经在同一文件里改过了
+     （真实文件的形状随发版动作变化，依赖它的测试必然在某次发版后红）。
+     且版本号用 \`NEXT\` + 模板插值，**不写死**：写死 '0.6.0' 时
+     若 fixture 的版本段是别的值，报的是「没有对应段」，
+     验的就不是「同步改版本号与 CHANGELOG」这件事了。 */
+  const NEXT = '99.98.97';
   const result = withEdits({
-    pkg: pkgWith('0.6.0'),
-    changelog: changelogBackup.replace(
+    pkg: pkgWith(NEXT),
+    changelog: FIXTURE_CHANGELOG.replace(
       '## [Unreleased]\n',
-      '## [Unreleased]\n\n### 修复\n\n- 某个修复\n\n## [0.6.0] - 2026-10-19\n\n### 新增\n\n- 新东西\n'
+      `## [Unreleased]\n\n### 修复\n\n- 某个修复\n\n## [${NEXT}] - 2026-10-19\n\n### 新增\n\n- 新东西\n`
     )
   });
   assert.deepEqual(result.errors, [], '同步改版本号与 CHANGELOG 必须放行');
