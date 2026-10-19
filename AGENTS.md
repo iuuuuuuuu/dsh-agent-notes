@@ -145,19 +145,18 @@ npm run doc:budget            # 文档字数预算（AGENTS.md / README）
 
 ### 改写历史必须用 `--force-with-lease`
 
-同样来自 `deepseek-harness` 的硬规则：**`--force` 永不允许。**
+来自 `deepseek-harness` 的硬规则：**`--force` 永不允许。** 裸 `--force`
+会静默覆盖别人的提交，失败方向不可逆 —— 被覆盖的提交若没别处留存就丢了。
+`--force-with-lease` 把「我知道远端当时是什么」变成必须显式给出的前提：
 
 ```sh
-# 改写前先记录远端当前 OID
-git fetch origin
-OID=$(git rev-parse origin/<branch>)
-# 用 lease 推送：若远端已被别人更新，推送会中止而不是覆盖
+git fetch origin && OID=$(git rev-parse origin/<branch>)
 git push --force-with-lease=<branch>:$OID origin <branch>
 ```
 
-裸 `--force` 会静默覆盖别人的提交，而失败方向不可逆 ——
-被覆盖的提交若没有别处留存就直接丢了。`--force-with-lease` 把
-「我知道远端当时是什么」变成一个必须显式给出的前提。
+`main` 上这条已由远端**强制执行**（`allow_force_pushes=false` +
+`required_status_checks=verify`）：推 main 必须走 PR 且 CI 通过，详见
+[该篇笔记](.agents/notes/implemented/process/2026-10-19-branch-protection-makes-gates-enforceable.md)。
 
 ## 上游
 
