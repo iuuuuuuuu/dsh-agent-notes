@@ -10,6 +10,8 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
+
+import { isEnvironmentUnavailable } from './sync-upstream.mjs';
 import { fileURLToPath } from 'node:url';
 
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -32,9 +34,83 @@ function runSync(args) {
   return { code: result.status ?? -1, out: `${result.stdout ?? ''}${result.stderr ?? ''}` };
 }
 
+/**
+ * 断言 `--check` 通过，并在**环境不可用**时给出能指路的失败信息。
+ *
+ * ## 为什么不能简单 assert.equal(code, 0)
+ *
+ * `sync-upstream.mjs` 现在区分两种非零退出：
+ *   - exit 1 = 检查失败（上游真有差异）
+ *   - exit 2 = **无法进行**（网络不可用或被限流）
+ *
+ * 实测踩过：断网时旧实现返回 1，测试报
+ * 「--check 在上游一致时应 exit 0，实际 1 / 合并失败: fetch failed」——
+ * **断言在说契约被破坏，实际是网络不行**，那是误导性诊断。
+ *
+ * ## 为什么不用 test.skip()
+ *
+ * 跳过是**假绿的温床** —— 它会让「这条契约现在没人验」静悄悄过去。
+ * 这里选择：仍然失败，但把失败信息说清楚。环境不可用不是通过。
+ *
+ * @param {number} code 退出码。
+ * @param {string} out 输出。
+ * @param {string} what 期望的契约描述。
+ */
+function assertCheckPassed(code, out, what) {
+  if (code === 2) {
+    assert.fail(
+      '**环境不可用**，不是契约被破坏 —— 上面的 exit 2 表示网络不可用或被限流，'
+      + '这次检查压根没做成。\n'
+      + '（这是真实结论：本次运行没有验证「' + what + '」这条契约。）\n'
+      + '原始输出:\n' + out
+    );
+  }
+  assert.equal(code, 0, what + ' 应 exit 0，实际 ' + code + '\n' + out);
+}
+
+test('退出码必须区分「环境不可用」(2) 与「检查失败」(1)', () => {
+  /* 实测踩过：断网时旧实现返回 1，与「上游真有差异」无法区分。于是测试报
+     「--check 在上游一致时应 exit 0，实际 1 / 合并失败: fetch failed」——
+     **断言在说契约被破坏，实际是网络不行**。
+
+     修法是 isEnvironmentUnavailable() 把网络类错误映射到 exit 2。
+     这里验那个判定函数，不真去断网 —— 真断网会让测试依赖环境，
+     而且本地未必能断得掉。 */
+
+  /* 网络类：必须判为「环境不可用」。 */
+  const envErrors = [
+    new TypeError('fetch failed'),
+    new Error('getaddrinfo ENOTFOUND github.com'),
+    new Error('request timed out ETIMEDOUT'),
+    new Error('connect ECONNREFUSED'),
+    new Error('unable to verify the first certificate'),
+    new Error('rate limit exceeded (429)'),
+    Object.assign(new Error('fetch failed'), { cause: { code: 'ENETUNREACH' } })
+  ];
+  for (const error of envErrors) {
+    assert.equal(
+      isEnvironmentUnavailable(error), true,
+      '「' + (error.message ?? '') + '」应判为环境不可用'
+    );
+  }
+
+  /* 检查失败类：必须留在 exit 1。 */
+  const checkErrors = [
+    new Error('404 Not Found'),
+    new Error('ref refs-does-not-exist-zzz 不存在'),
+    new Error('合并冲突：3 个文件')
+  ];
+  for (const error of checkErrors) {
+    assert.equal(
+      isEnvironmentUnavailable(error), false,
+      '「' + (error.message ?? '') + '」是有效检查结果，不该判为环境问题'
+    );
+  }
+});
+
 test('同步清单确实存在且覆盖全部上游文件', { timeout: 180_000 }, () => {
   const { code, out } = runSync(['--check']);
-  assert.equal(code, 0, `--check 在上游一致时应 exit 0，实际 ${code}\n${out}`);
+  assertCheckPassed(code, out, '--check 在上游一致时');
   assert.match(out, /相同\s*21/, `应核对到 21 个文件，实际输出:\n${out}`);
   assert.doesNotMatch(out, /只枚举到|找不到目录/, '不应出现枚举失败');
 });
@@ -50,9 +126,9 @@ test('枚举失败必须报错，不得伪装成「无需合并」', { timeout: 
 test('--check 不写任何文件', { timeout: 180_000 }, () => {
   const manifest = join(PACKAGE_ROOT, 'tools', 'upstream-manifest.json');
   const before = existsSync(manifest) ? readFileSync(manifest, 'utf8') : undefined;
-  const { code } = runSync(['--check']);
+  const { code, out } = runSync(['--check']);
   const after = existsSync(manifest) ? readFileSync(manifest, 'utf8') : undefined;
-  assert.equal(code, 0);
+  assertCheckPassed(code, out, '--check 不得改动 manifest');
   assert.equal(after, before, '--check 不得改动 manifest');
 });
 

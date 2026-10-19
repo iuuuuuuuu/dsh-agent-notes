@@ -575,9 +575,53 @@ function writeManifest(manifest, ref) {
 const invokedDirectly = process.argv[1] !== undefined
   && process.argv[1].replace(/\\/g, '/').endsWith('/tools/sync-upstream.mjs');
 
+/**
+ * 这个错误是「环境不可用」还是「检查失败」？
+ *
+ * 必须分清：exit 1 = 检查失败，exit 2 = 无法进行（本仓库既有约定，
+ * 见 verify-notes / install-hooks / doc-budget）。
+ *
+ * 混为一谈的后果实测到了：断网时 `--check` 返回 1，测试报
+ * 「--check 在上游一致时应 exit 0，实际 1 / 合并失败: fetch failed」——
+ * 断言在说契约被破坏，实际是网络不行。**那是误导性诊断**，
+ * 会把人引向错误的方向去查。
+ *
+ * @param {unknown} error 捕获到的错误。
+ * @returns {boolean} true 表示环境不可用（该用 exit 2）。
+ */
+export function isEnvironmentUnavailable(error) {
+  /* fetch 的失败一律是 TypeError，message 各平台不同，但都含这几个词。 */
+  const message = String(error?.message ?? error ?? '');
+  const code = String(error?.cause?.code ?? error?.code ?? '');
+
+  /* 网络层：连不上、超时、DNS 失败、TLS 失败。 */
+  if (/(fetch failed|ENOTFOUND|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|EPROTO|self-signed|certificate)/i.test(message)) {
+    return true;
+  }
+  if (['ENOTFOUND', 'ETIMEDOUT', 'ECONNREFUSED', 'EAI_AGAIN', 'ENETUNREACH', 'EPROTO'].includes(code)) {
+    return true;
+  }
+  /* 认证与限流：是「暂时查不到」，不是「上游变了」。 */
+  if (/\b(401|403|429)\b/.test(message)) {
+    return true;
+  }
+  return false;
+}
+
 if (invokedDirectly) {
   main().catch((error) => {
-    console.error(`合并失败: ${error?.message ?? error}`);
+    const message = error?.message ?? error;
+    if (isEnvironmentUnavailable(error)) {
+      /* 措辞与既有约定一致：`tools/self-update.test.mjs` 早就在断言 exit 2
+         时消息匹配「查不到上游 HEAD|无法校验」，注释还写着「网络不可用时
+         明确跳过，不算假绿」—— 它比我先处理了这个问题。所以是新代码向
+         既有约定靠拢，不是要求既有约定改。 */
+      console.error(`无法校验上游: ${message}`);
+      console.error('这是**环境问题**（网络不可用或被限流），不是「上游有差异」。');
+      console.error('退出码 2 = 无法进行（本次没有完成校验）；上游真有差异时退出码是 1。');
+      process.exit(2);
+    }
+    console.error(`合并失败: ${message}`);
     process.exit(1);
   });
 }

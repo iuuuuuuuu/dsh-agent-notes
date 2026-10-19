@@ -7,6 +7,22 @@
 
 ### 新增
 
+- **`ci:align` 从「查一个文件」扩到「查所有 workflow」+ 6 条 CI 安全属性**
+  - 两种口径：`verify.yml` 是 `all`（跑齐本地链），`upstream-sync.yml` 是
+    `subset`（4 道必需：verify / notes:gate / npm test / fault-injection）
+  - subset 的 9 条豁免**逐条写了理由**（文档类门禁判的是人写的文档，
+    机器人不改那些文件；coverage 类判「本次提交范围」，机器人不经人审）
+  - 新增 6 条安全属性断言：PR 触发器 / `fetch-depth:0` / 最小权限 /
+    工作区洁净断言 / **门禁排在 push 之前** / push 受 `if` 保护
+    —— 删任一条都红并点名
+  - 其中 `fetch-depth:0` 最隐蔽：删掉不会让门禁变红，只会让 `notes-coverage`
+    **从「通过」退化成「查不到」** —— 那是另一种假绿
+
+- **未登记的新 workflow 报出来但不判红**（有意取舍）
+  - 强制登记会逼着人给纯通知型 workflow 填一堆不需要的门禁豁免，
+    **乱填的豁免表比没有更糟** —— 它稀释了这张表的可信度
+  - 报出来 = 让人知道；不判红 = 不逼人乱填
+
 - **`md:links` 排除归档笔记作为「源」（对齐上游 `verify-md-links.ts`）**
   - 上游第 33 行注释写明：`Archived notes are excluded as sources,
     but links to them remain checked`
@@ -90,6 +106,47 @@
     `check:full`）—— 装钩子、归档这些日常操作此前根本没写
 
 ### 修复
+
+- **断网时 `sync-upstream --check` 报「契约被破坏」，实际是网络不行**
+  - 实测断网（SSL 握手失败）时它返回 **exit 1**（= 检查失败），
+    与「上游真有差异」**无法区分**
+  - 后果：测试报「--check 在上游一致时应 exit 0，实际 1 / 合并失败: fetch failed」
+    —— **断言在说契约被破坏，实际是网络连不上**。会误导排查
+  - 修：新增 `isEnvironmentUnavailable()`，网络类错误（含 401/403/429 限流）
+    映射到 **exit 2 = 无法进行**，与本仓库其它工具一致
+    （`verify-notes` / `install-hooks` / `doc-budget` 都用 2 表示无法进行）。
+    404 留在 1 —— 上游确实没那个 ref，那是**有效检查结果**
+  - 测试侧同步改：遇到 exit 2 时**仍然失败但说清原因**，**不用 `test.skip()`** ——
+    跳过是假绿的温床，会让「这条契约现在没人验」静悄悄过去
+  - 措辞向既有约定靠拢（用「无法校验上游」而不是我最初写的「无法检查」）——
+    `self-update.test.mjs` 早就在断言 exit 2 的消息格式，**它比我先处理了这个问题**
+  - 新增的纯函数用例在任何网络状态下都能跑，**不把门禁可用性绑在网络上**
+
+- **保护发布的那道门禁，自己没有任何门禁保护**
+  - `upstream-sync.yml` 有一道「合并后必须通过才允许提交」，它握着
+    `contents: write` + `git push main` + `git push origin <tag>` —— 直接发布
+  - 而 `ci-alignment.mjs` 当时**硬编码只读 `verify.yml`**，全仓 grep
+    `upstream-sync` 零引用。**删掉那道门禁整步，全链仍 exit 0**
+
+- **`npm test --if-present` 被当成「门禁存在」（我独立验时抓到的漏洞）**
+  - 把 `upstream-sync` 的 `npm test` 改成 `npm test --if-present`，
+    `ci-align` 仍报「齐全」—— 而那后面就是 `push main` + `push tag`
+  - 根因：正则 `npm test(\s|$)` 匹配了**字面量**，没匹配**语义**。
+    而 `--if-present` 的语义恰恰是「不存在就跳过」= 没有这道门禁
+  - 与「扫全文没区分注释与命令」是同族错误 —— 我在笔记里写过这个教训，
+    又在同一道门禁里犯了一次
+
+- **并行测试偶发红的根因：`core.autocrlf` 污染 `git diff` 输出**
+  - 症状：并行下 `notes-coverage` / `notes-supersession` 偶发文件级失败
+    （`test failed` 没有具体断言 —— 因为崩在解析阶段，不是断言阶段）
+  - 抓到的证据：输出里有 `warning: LF will be replaced by CRLF`，
+    本机 `core.autocrlf=true`，而测试建的临时仓库**继承了它**
+  - 链条：并行 → git 对同一批文件做 stat 检查互相失效 → warning 混进
+    `git diff` stdout → 解析失败
+  - 修法：给两个测试的临时仓库加 `core.autocrlf=false`
+  - 验证：**修前 4 轮红 1 次 → 修后 8 轮全绿**
+  - 这不是为本机绕过：CI 是 ubuntu（autocrlf 本就 false），
+    加上它是让所有平台看到同一份 diff
 
 - **「零依赖」是自设的枷锁，却被当成否决理由用了 6 次 —— 全部纠正**
   - Owner 第二次指出这个问题。扫描发现 6 处判定用「零依赖 / 引依赖」否决方案，
