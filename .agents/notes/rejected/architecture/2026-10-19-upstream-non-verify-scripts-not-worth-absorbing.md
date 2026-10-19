@@ -47,9 +47,9 @@ Independent: 本篇核查的是**辅助工具脚本**（build/test/hook/通知�
 | `change-scope.ts` | `notes-coverage.mjs:258-282`（diffPaths 已内联） | **已吸收**，本仓库注释明写「我最初判定它们不必要，那是错误的判据」 |
 | `verify-doc-budgets.ts` | `doc-budget.mjs` | **本仓库更强**：上游用 `wc -w`，对中文严重低估；本仓库按 CJK 逐字计费 |
 | `archived-agent-notes.ts` | `verify-archived-agent-notes.ts`（vendored） | 上游多出的「`.md`+`.zh.md`+`.i18n.yaml` 三元组」与「Git blob SHA-1 sidecar」是**上游的双语要求**，本仓库笔记树不要求双语，照搬只会凭空造红。它独有的 `Archived:` 日期校验本仓库已实现 |
-| `markdown.ts` | `bilingual-docs.mjs` 用正则剥围栏 | 否：依赖 mdast，违反零依赖约束 |
-| `run-gates.ts` / `parallelism.ts` | `package.json` 的 13 步串跑 + `ci-alignment.mjs` | 否：与本仓库「零依赖 + 线性 check」的路线直接冲突 |
-| `install-lefthook.mjs` | `install-hooks.mjs` | 否：引入 lefthook 依赖，换不来东西 |
+| `markdown.ts` | `bilingual-docs.mjs` 用正则剥围栏 | 暂不做，理由**不是依赖** —— 见 §3 |
+| `run-gates.ts` / `parallelism.ts` | `package.json` 的 13 步串跑 + `ci-alignment.mjs` | 暂不做，理由是**并行会放大测试写真实目录的干扰**（本仓库踩过 5 轮），不是零依赖 |
+| `install-lefthook.mjs` | `install-hooks.mjs` | 暂不做：换来的东西不值那个依赖树（钩子逻辑本仓库已自建且验证过） |
 | `gen-third-party-notices.ts` | `notices.mjs` | 否：已明确取舍过 |
 | `agent-note-tree.ts` | vendored 同一份 | 否：同一份代码，本仓库不得手改 |
 | `test-fixture-cleanup.ts` | 无 | 否：本仓库不建 junction |
@@ -70,7 +70,7 @@ Independent: 本篇核查的是**辅助工具脚本**（build/test/hook/通知�
 ## Alternatives considered
 
 - **把 `archived-agent-notes.ts` 的三元组检查照搬过来** — 它能防止「归档笔记缺翻译」。**这是本篇最强的一条被否方案**，因为本仓库的笔记树**不要求双语**（`docs:bilingual` 只管 `README.md` / `README.en.md`）。照搬后每一篇归档笔记都要有 `.zh.md` + `.i18n.yaml`，而本仓库根本没有这个约定 —— 结果是凭空造红。
-- **用 `markdown.ts`（mdast）替换 `bilingual-docs.mjs` 的正则剥围栏** — 正则确实脆弱。否掉因为它引入 mdast，而本仓库的硬约束是零运行时依赖（`verify-plugin.mjs` 会拦 `@deepseek-ai/*`，但 mdast 也会让 `npm test` 需要 `npm install` 才能跑）。且正则方案的实际失效面已知且可控（只比结构，不比内容）。
+- **用 `markdown.ts`（mdast）替换 `bilingual-docs.mjs` 的正则剥围栏** — 正则确实脆弱。**暂不做的理由不是依赖**（见 [零依赖是我自设的枷锁](../../implemented/process/2026-10-19-zero-dep-was-my-own-self-imposed-shackle.md)），而是**没有要拦的问题**：实测缩进代码块 0 处、行首粗体里的「被拆开的段落」0 处，且中文排版本身就依赖折行 —— 上游那条规则在本仓库会大量误报。为不存在的问题引 AST 是浪费。
 - **采用 `parallelism.ts` 并行跑门禁** — 能把 41 秒的 `npm test` 压下来。否掉因为并行测试正是本仓库踩过 5 轮的坑的根源（测试互相写真实目录）。而且门禁是串行的**语义要求**：前面的门禁红了，后面的跑了也没意义。
 - **真跑一遍上游脚本再下结论**（而不只是读源码） — 见下「代价与已知上限」。
 
