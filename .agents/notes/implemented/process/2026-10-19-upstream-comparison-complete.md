@@ -6,7 +6,7 @@ Status: implemented
 >
 > | 上游 | 是什么 | 本仓库与它的关系 |
 > |---|---|---|
-> | `deepseek-ai/deepseek-harness`（**DSH 本体**） | 方法论的发源地，含 42 道 `verify-*` 与 `.agents/notes/` 实践 | **本篇的比对对象**：逐项看它的门禁有没有值得吸收的 |
+> | `deepseek-ai/deepseek-harness`（**DSH 本体**） | 方法论的发源地，含 44 道 `verify-*` 与 `.agents/notes/` 实践 | **本篇的比对对象**：逐项看它的门禁有没有值得吸收的 |
 > | `czm15053/write-notes-like-deepseek` | 把 DSH 实践提炼成 skill 的中间层 | `skills/agent-notes/` 是它的 vendored 副本，由 `sync-upstream.mjs` 按 `upstream.json` 的固定 ref 合并 |
 >
 > 而 `dsh-tauri/dependencies/` 下的路径是**本机 DSH 的安装位置**（`live-evidence.mjs`
@@ -48,7 +48,7 @@ goal 要求「全部核查完毕后确认无实质优化空间再标记完成」
 | **发布流程** | `release:check`（版本/日期/递减）；`notices:check`；实机证据链验 10 项宿主契约 | `release-bookkeeping-needs-a-gate`、`live-evidence-path-verified` |
 | **文档** | `md:links`（45 文档、96 链接）、`docs:bilingual`、`text:integrity`、`doc:budget`；两版 README 归属指向已修 | `markdown-links-need-a-gate`、`bilingual-docs-compare-structure-not-length`、`ufffd-passes-every-gate`、`comments-are-claims-not-facts` |
 
-### 二、上游 42 道 `verify-*` 的最终判定
+### 二、上游 44 道 `verify-*` 的最终判定
 
 | 判定 | 数量 | 依据 |
 |---|---|---|
@@ -96,6 +96,72 @@ goal 要求「全部核查完毕后确认无实质优化空间再标记完成」
 > 名字里有 `classification` 就以为它是「分类规则检查」，而它真正的结构检查
 > 是**复用 tree 门禁**的。判定必须读源码，不能读文件名。
 
+
+#### 逐条清单（44 道，可复核）
+
+**分母怎么来的**：上游 `package.json` 里有 **65 个** `verify-*` script 名，
+但其中 21 个的值指向 `gen-*.ts` / `persistence-*.ts` —— 它们是**生成器**，
+名字带 verify 而已。判据是「script 的值指向的文件名是不是 `verify-*.ts`」，
+**不需要网络**。
+
+⚠️ **我当初算成了 42，错了。** 当时用的是「逐个 URL 探测哪个 `.ts` 文件存在」，
+而那个探测把**探测失败**（404 / 分支不对 / CDN 缓存）当成了「文件不存在」。
+典型例子：`verify-cli-help` 的值是 `tsx scripts/gen-cli-help.ts --check`，
+它返回 404，我据此划进「不存在」—— **结论巧合对了，理由是错的**。
+
+**少数派 13 道（判定各有具体理由，不适用归纳）**：
+
+- `verify-agent-note-format` —— **已实现**（vendored 直接用）
+- `verify-archived-agent-notes` —— **已实现**（vendored 直接用）
+- `verify-doc-budgets` —— **已实现**（doc-budget.mjs）
+- `verify-md-links` —— **已实现**（md-links.mjs）
+- `verify-agent-note-classification` —— **已实现**（见下节）
+- `verify-translation-pairing` —— **部分实现**（比结构，不补逐节哈希）
+- `verify-md-wrap` —— **有理由不适用**
+- `verify-no-top-level-await` —— **有理由不适用**
+- `verify-export-jsdoc` —— **有理由不适用**
+- `verify-public-repository-links` —— **有理由不适用**
+- `verify-concrete-terms` —— **有理由不适用**
+- `verify-runtime-closure` —— **有理由不适用**
+
+**结构性不适用 32 道**：
+
+> 判据：它们读 `packages/`（上游 monorepo 的业务代码），而本仓库是**单包插件**，
+> 没有那个目录。逐条列在这里不是为了展开，而是**为了让「29」这个数可复核** ——
+> 只写总数与分类时，没人能验证覆盖是否完整。
+
+- `verify-application-entrypoints`
+- `verify-client-domain-graph`
+- `verify-client-packages`
+- `verify-client-route-resolution`
+- `verify-client-ui-i18n`
+- `verify-config-source-ownership`
+- `verify-cordis-config`
+- `verify-default-product-isolation`
+- `verify-doc-refs`
+- `verify-doc-site-fragments`
+- `verify-dsh-package-licenses`
+- `verify-mermaid`
+- `verify-no-bare-dispatcher`
+- `verify-no-unknown-casts`
+- `verify-node-next-types`
+- `verify-npm-install-layout`
+- `verify-optional-dependency-imports`
+- `verify-package-dependencies`
+- `verify-package-meta`
+- `verify-package-paths`
+- `verify-package-readme-limitations`
+- `verify-package-readme-model-experience`
+- `verify-package-readme-summaries`
+- `verify-plugin-record-callers`
+- `verify-product-use`
+- `verify-repository-references`
+- `verify-skill-invocation-metadata`
+- `verify-subsystem-pages`
+- `verify-translation-prompt`
+- `verify-type-equiv`
+- `verify-upgrade-guides`
+- `verify-v3-event-vocabulary`
 ### 三、明确接受的缺口（不是「没想到」，是「想过不做」）
 
 | 缺口 | 为什么接受 | 重访信号 |
@@ -113,21 +179,64 @@ goal 要求「全部核查完毕后确认无实质优化空间再标记完成」
 `build:check`（`build.ts --scope check`，构建并校验）—— 本仓库的等价物是
 `verify-plugin.mjs` 里的**重建比对**，已实现且已验证会红。无吸收点。
 
+### 五、收尾之后又发现并修掉的（这 5 轮说明「核查完毕」不是终态）
+
+原以为收尾就是终态。实际后面 5 轮里**又发现了 5 个真缺口**，全部已修：
+
+| 发现 | 性质 | 笔记 |
+|---|---|---|
+| 「零依赖」被当成否决理由用了 **6 次** | **判据错误**（Owner 两次纠正过） | `zero-dep-was-my-own-self-imposed-shackle` |
+| `upstream-sync.yml` 里**保护发布**的门禁自己没人保护 | 真缺口（握 `contents:write` + push tag） | `publish-gate-had-no-guardian` |
+| 断网时 `sync-upstream` 报「契约被破坏」而非「环境不可用」 | 真缺口（误导性诊断） | `network-down-reported-as-contract-broken` |
+| `npm test --if-present` 被当成「门禁存在」 | **我自己独立验时抓到的**（执行者汇报说全通过） | `publish-gate-had-no-guardian` |
+| 归档导致 **95% 的出向链接断裂**，且事后无法修 | 真缺口（死锁） | `archiving-breaks-links-by-design` |
+
+**这条记录的真正含义**：写「核查完毕」那一刻是不准的 —— 它只是**那一刻**的
+快照。后来的每一轮都在推翻它的一部分。所以本篇的数字会再次过时，那不是
+本篇的缺陷，而是这件事的性质。
+
+### 六、收尾之后做的三项改进（都是「够用就好」，不是大改造）
+
+| 做了什么 | 为什么值得 | 依赖 |
+|---|---|---|
+| 双语只比**语言标记** | 段落数/列表数**不是漂移信号**（中英排版惯例不同，实测 30 处「差异」全是方法假象） | **零** —— 原计划的 mdast 方案被替代 |
+| 并发度**不动** | 23/29 的测试是进程/IO 密集，按 CPU 数定并发是**错的信号** | 零 |
+| 渲染探针不再硬编码 Chrome | 拆掉了探针进 `npm test` 的前置条件；实测 puppeteer 可用但**不必重写** | 零（只用 `findBrowser()`） |
+
+三项都**没引入新依赖** —— 而这正是「按「值不值得它的成本」而非「要不要引依赖」
+判断」的结果。
+
+### 七、方法论：这一轮我推翻了自己三次
+
+| # | 我说的 | 实测 | 教训 |
+|---|---|---|---|
+| 1 | 上游有 65 道 verify | **42** | 分母不能从 script 名反推 |
+| 2 | mdast 能多测 5/7 场景 | **那 5 个不能当门禁** | 数字有说服力 ≠ 证据，必须能追到具体位置 |
+| 3 | 并发高更快 | 并发 16 比 4 **更快** | 瓶颈不是 CPU 时，核数是错信号 |
+
+三次都是**「看起来很确定的判断被实测推翻」**。共同点：我都在用**未经验证的
+方法**（反推的名字、造的样例、单机的测量）去支撑一个结论。
+
+> **判据**：当我说「A 比 B 更重要」时，我能指出具体是 A 的哪一条事实、
+> 在哪个文件第几行吗？指不出就说明我在用感觉。
+
 ## Alternatives considered
 
 - **不写收尾篇，直接标记 goal 完成** — 省一篇笔记。否掉因为「为什么可以停了」这个判断本身需要留痕：半年后有人问「上游还有没有该吸收的」，答案必须能从仓库里找到，而不是靠记得。
-- **把 42 道 verify 逐条写进一篇长清单** — 更完整。否掉因为 29 道结构性不适用的理由同构（「读 `packages/`，本仓库没有」），逐条写会稀释真正有信息量的那 13 条。已在表格里按类别归纳，具体判定在两篇 rejected 笔记里。
+- **把 44 道 verify 逐条写进一篇长清单** — 更长，但**可复核**。**当初否掉了它，现在判定当初的否掉是错的**：理由是「32 道结构性不适用的理由同构，逐条写会稀释那 13 条」。
+  实测证明那个理由站不住 —— 收尾审计要复核「42 道全部判定」时，本地只剩 4 个抽样，**无法验证覆盖是否完整**；顺带查出**分母本身错了**（真值 44，我用「URL 探测哪些文件存在」得到 42，而那个探测把**探测失败**当成了「文件不存在」）。
+  → 逐条清单不是「稀释」，是**可复核的唯一凭据**。少数派的信息量靠「少数派」这个命名就已经保住，不需要靠「没列它们」来保护。清单见上文「逐条清单（44 道，可复核）」。
 - **把「明知不做的缺口」单独拆一篇 rejected** — 语义更纯。否掉因为那些缺口**不是被否决的方案**，而是**已落地决定的已知上限** —— 它们与对应的 implemented 笔记是同一件事的两面，拆开会让「某项做了什么、代价是什么」分散在两处。
-- **继续核查，不标记完成** — goal 还有 240 轮额度。否掉因为**没有候选了**：8 个方向有证据，42 道 verify 全判定，非 verify 类无吸收点。继续下去只能为了「有产出」而制造改动，那正是 goal 明令禁止的。
+- **继续核查，不标记完成** — goal 还有 240 轮额度。否掉因为**没有候选了**：8 个方向有证据，44 道 verify 全判定（清单可复核），非 verify 类无吸收点。继续下去只能为了「有产出」而制造改动，那正是 goal 明令禁止的。
 
 ## Consequences
 
-- **收益**：把「核查完毕」从印象变成可核对的表格。8 个方向各自对上了笔记与实测，42 道 verify 有明确分类。
+- **收益**：把「核查完毕」从印象变成可核对的表格。8 个方向各自对上了笔记与实测，44 道 verify 有明确分类，逐条清单在下一节。
 - **收益**：6 项明确接受的缺口有了重访信号 —— 它们不是遗漏，是权衡后的取舍，且每条都写清了「什么情况下该重新考虑」。
 - **收益**：顺带清理了 `.probe/` 下十几轮的探针残留（2.6M → 546K），根目录保留 8 个更早轮次的浏览器/性能探针（有参考价值）。
 - **代价与已知上限**：本篇是**汇总**，具体理由分散在 15+ 篇笔记里。新读者要理解某个判定，需要跳转。这是笔记树按「一次改动一篇」组织的固有代价。
 - **代价与已知上限**：缺口表里 4 项「无自动化测试」的接受理由是「成本不对称 + 未退化过」。若其中任何一项退化，那个理由就不成立了 —— 但退化时不会有人自动想起这张表。**这是本篇最弱的一环**：重访信号需要人主动查，而没有机制提醒。
-- **重访信号**：若上游新增 `verify-*`，需重新跑一遍分类（`audit-verify-list.mjs` 的思路可复用）。若本仓库开始发布可被第三方 import 的库，`export-jsdoc` 的判定要重评。
+- **重访信号**：若上游新增 `verify-*`，需重新跑一遍分类（分母判据见下节，别再用 URL 探测）（`audit-verify-list.mjs` 的思路可复用）。若本仓库开始发布可被第三方 import 的库，`export-jsdoc` 的判定要重评。
 
 ## Verification
 
