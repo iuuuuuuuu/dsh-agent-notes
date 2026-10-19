@@ -53,6 +53,39 @@ function withEdits(edits) {
   });
 }
 
+/**
+ * 一份**自造的** CHANGELOG 样本，形状固定。
+ *
+ * ★ 为什么不能依赖真实 CHANGELOG：真实文件的形状随发版动作变化
+ *   （发版时 `[Unreleased]` 会被转成版本段，而门禁又要求不留空段）。
+ *   依赖它的测试必然在某次发版后红 —— 本次发 0.6.0 时就红了 4 条。
+ *
+ *   而这 4 条用例真正要验的是「解析器分得清版本段与小节」以及
+ *   「缺段 / 空段 / 重复段会报错」，与真实文件长什么样无关。
+ */
+const CURRENT_VERSION = JSON.parse(pkgBackup).version;
+
+/* ★ 版本段用**读到的真实版本**，不写死 —— 写死 0.5.0 时，
+   verifyRelease 会先报「当前版本没有对应段」，那几条用例看到的
+   就是这条噪声而不是它要验的东西。跟随真实版本后，
+   fixture 不再与版本号耦合，发版后不必再改。 */
+const FIXTURE_CHANGELOG = [
+  '# Changelog',
+  '',
+  '## [Unreleased]',
+  '',
+  '### 新增',
+  '',
+  '- 攒着还没发的一条。',
+  '',
+  `## [${CURRENT_VERSION}] - 2026-10-18`,
+  '',
+  '### 新增',
+  '',
+  '- 已发布的一条。',
+  ''
+].join('\n');
+
 /** 取出当前 package.json 的可改副本。 */
 function pkgWith(version) {
   const pkg = JSON.parse(pkgBackup);
@@ -75,13 +108,20 @@ test('release: 当前仓库的版本 / CHANGELOG 对得上', () => {
 });
 
 test('release: parseChangelog 能分清版本段与小节', () => {
-  const sections = parseChangelog(changelogBackup);
+  const sections = parseChangelog(FIXTURE_CHANGELOG);
   const unreleased = sections.find((s) => s.version === 'Unreleased');
   assert.ok(unreleased !== undefined, '必须识别出 Unreleased 段');
   /* `### 新增` 这类小节不得被当成版本段 —— 否则段落计数会全乱。 */
   assert.ok(!sections.some((s) => s.version.startsWith('#') || s.version === '新增'),
     '三级小节不得被解析成版本段');
-  assert.ok(sections.some((s) => s.version === '0.5.0'), '必须识别出 0.5.0 段');
+  /* 版本段跟随当前版本（fixture 用 \`CURRENT_VERSION\`）——
+     写死 '0.5.0' 会让发版后这条用例失败。 */
+  assert.ok(sections.some((s) => s.version === CURRENT_VERSION),
+    `必须识别出 ${CURRENT_VERSION} 段`);
+  /* 字段是 `body`（release-check.mjs:70 的 `{ version, date, body }`）——
+     我上一版凭印象写了 `headings`，字段不存在。 */
+  assert.ok(unreleased.body.includes('### 新增'),
+    'Unreleased 段的小节要落进 body —— 门禁要求它非空，所以样本里给了内容');
   assert.ok(sections.every((s) => s.version === 'Unreleased' || s.date !== null),
     '已发布段都必须有日期');
 });
@@ -89,9 +129,16 @@ test('release: parseChangelog 能分清版本段与小节', () => {
 test('release: 版本号没有对应段时必须报错', () => {
   /* 这是最要紧的一条：改了版本、打了 tag，CHANGELOG 里没有段
      —— 用户看到的发布说明是空的。 */
-  const result = withEdits({ pkg: pkgWith('0.6.0') });
+  /* ★ 原来写死 '0.6.0' —— 而 fixture 现在含当前版本 0.6.0，
+     那条错就不再发生，用例变成在验「有对应段」而不是「缺对应段」。
+     用一个**不可能存在于 fixture 里**的版本号（99.99.99），
+     且不随时间失效。 */
+  const MISSING = '99.99.99';
+  const result = withEdits({ pkg: pkgWith(MISSING), changelog: FIXTURE_CHANGELOG });
   assert.ok(result.errors.length >= 1, '必须报错');
-  assert.match(result.errors[0], /0\.6\.0.*没有对应段|没有对应段/, '必须点明缺哪个版本');
+  assert.match(result.errors[0],
+    new RegExp(`${MISSING.replace(/\./g, '\\.')}.*没有对应段|没有对应段`),
+    '必须点明缺哪个版本');
 });
 
 test('release: 同一版本出现两次必须报错', () => {
@@ -135,7 +182,7 @@ test('release: 版本段缺日期或日期格式不对都必须报错', () => {
 
 test('release: [Unreleased] 段为空时必须报错', () => {
   /* 空段说明「攒着不发」，而这件事此前完全看不见 —— 攒到什么时候都没人知道。 */
-  const lines = changelogBackup.split('\n');
+  const lines = FIXTURE_CHANGELOG.split('\n');
   const range = sectionRange(lines, 'Unreleased');
   const emptied = [
     ...lines.slice(0, range.start + 1),
@@ -150,7 +197,7 @@ test('release: [Unreleased] 段为空时必须报错', () => {
 
 test('release: 删掉 [Unreleased] 段必须放行（对照）', () => {
   /* 没有未发布内容时不留空段，是正确的做法 —— 不该被当成错误。 */
-  const lines = changelogBackup.split('\n');
+  const lines = FIXTURE_CHANGELOG.split('\n');
   const range = sectionRange(lines, 'Unreleased');
   const removed = [...lines.slice(0, range.start), ...lines.slice(range.end)].join('\n');
 
@@ -159,10 +206,22 @@ test('release: 删掉 [Unreleased] 段必须放行（对照）', () => {
 });
 
 test('release: 往 [Unreleased] 加内容必须放行（对照）', () => {
+  /* ★ 原来靠 `changelogBackup.replace('## [Unreleased]\n', ...)` —— 真实文件
+     发版后没有该段时 replace 找不到就是空替换，断言会在「什么都没加」的
+     情况下通过 = **假绿**。所以两条对照用例都改用自造 fixture。 */
   const result = withEdits({
-    changelog: changelogBackup.replace('## [Unreleased]\n', '## [Unreleased]\n\n### 修复\n\n- 某个修复\n')
+    changelog: FIXTURE_CHANGELOG.replace(
+      '## [Unreleased]\n',
+      '## [Unreleased]\n\n### 修复\n\n- 又一条\n'
+    )
   });
-  assert.deepEqual(result.errors, [], '往 Unreleased 攒内容必须放行');
+  assert.ok(result.errors === undefined || result.errors.length === 0,
+    '往 Unreleased 攒内容必须放行');
+  assert.notEqual(
+    FIXTURE_CHANGELOG.replace('## [Unreleased]\n', '## [Unreleased]\n\n### 修复\n\n- 又一条\n'),
+    FIXTURE_CHANGELOG,
+    '★ 替换必须真的发生了 —— 否则这条用例在什么都没改的空转里通过 = 假绿'
+  );
 });
 
 test('release: 升版本号并同步加段必须放行（对照）', () => {
