@@ -75,6 +75,13 @@
 
 ### 修复
 
+- **`lib/skill.js` 的 `createSkillProvider` 漏了 `@param`**
+  - 92 个导出里唯一一处 JSDoc 不完整（其余 91 个都有完整的 `@param`/`@returns`）
+  - 是逐项核查上游 `verify-export-jsdoc` 时人工发现的，**不是门禁发现的**
+  - 该门禁本身不采纳：覆盖率已 91/92，而要正确实现需 TypeScript 解析器 ——
+    手写近似会在两个方向都错（误报 void 函数、漏报空壳注释），
+    那是假绿的经典形态。详见 rejected/architecture 那篇
+
 - **`.githooks/commit-msg` 与源漂移，且漂移的那行本身是坏的**
   - 上一轮把钩子正文抽到 `tools/hook-body.mjs`，收尾时改了源里一行，
     但**没有重新生成 `.githooks/commit-msg`**，并把它一起合进了 main
