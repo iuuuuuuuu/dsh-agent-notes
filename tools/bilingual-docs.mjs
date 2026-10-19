@@ -1,0 +1,156 @@
+/**
+ * 双语 README 的结构一致性校验。
+ *
+ * ## 为什么需要
+ *
+ * `README.md`（中文，默认入口）与 `README.en.md`（英文）互链，但**没有任何
+ * 门禁检查它们是否还讲同一件事**。实测：给英文版追加一整节内容，中文版
+ * 完全不知道，`npm run verify` 照样绿灯 —— 它只验「两个文件都在」与
+ * 「都带 dsh 徽标」。
+ *
+ * 这类漂移的代价是隐蔽的：英文读者看到某个功能，中文读者完全看不到，而
+ * 没有任何测试会红。改的人也不会察觉，因为他只读了自己写的那一版。
+ *
+ * ## 比什么，为什么不比字数
+ *
+ * 比**结构**：标题的层级序列 + 围栏代码块的数量。
+ *
+ * 不比字数是因为中英长度天然不同（实测 416 行 vs 471 行，而标题数、
+ * 代码块数、表格行数完全一致）—— 字数差是**正常**的，拿它当判据只会
+ * 产出大量误报，而误报多的门禁会被绕过。
+ *
+ * 比结构能抓住的漂移形态：
+ *   - 给一版加了节（最常见：新增功能只更新了顺手改的那一版）；
+ *   - 删了一版的节；
+ *   - 改了层级导致对应关系错位。
+ *
+ * ## 为什么不校验「每节的内容对应」
+ *
+ * 逐节比对正文需要判断「这两段讲的是同一件事」，那要么靠翻译对齐（要
+ * 语言模型），要么靠人工维护锚点映射表。后者会变成另一件必须同步维护的
+ * 东西——而它漂移时同样没人发现。
+ *
+ * 结构性漂移是**可机械判定**的，正文语义漂移不是。所以本门禁只做前者，
+ * 并把后者记在重访信号里：若将来真的出现「结构一致但内容讲的不是同一件事」，
+ * 应当引入翻译配对检查（上游 `verify-translation-pairing` 走的就是那条路），
+ * 而不是给本门禁打补丁。
+ *
+ * ## 用法
+ *
+ * ```sh
+ * npm run docs:bilingual
+ * ```
+ */
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+
+/** 配对的双语文档：主文件与其对应版本。 */
+const PAIRS = [
+  { key: 'README', primary: 'README.md', secondary: 'README.en.md' }
+];
+
+/**
+ * 抽出一份 Markdown 的结构指纹。
+ *
+ * 只取与��言无关的部分：
+ *   - 标题的**层级**（`#` 的个数），不含标题文字（文字必然是两种语言）；
+ *   - 围栏代码块的数量。
+ *
+ * 刻意不取：表格行数、列表项数、正文长度。它们在本仓库同样一致，但受排版
+ * 影响更大 —— 一次正常的段落拆分就会让它们变化，而那不是需要拦的漂移。
+ *
+ * @param {string} text Markdown 原文。
+ * @returns {{ levels: number[], fences: number }} 结构指纹。
+ */
+export function structureOf(text) {
+  /* 标题：去掉围栏代码块后再数，否则代码示例里的 `# 注释` 会被当标题。 */
+  const withoutFences = text.replace(/(^|\n)(```|~~~)[^\n]*\n[\s\S]*?\n\2[^\n]*(?=\n|$)/g, '\n');
+  const levels = [];
+  for (const line of withoutFences.split('\n')) {
+    const match = /^(#{1,6})\s+\S/.exec(line);
+    if (match !== null) levels.push(match[1].length);
+  }
+  /* 代码块：数围栏行数的一半（开 + 闭）。 */
+  const fenceLines = text.match(/^\s*(```|~~~)/gm) ?? [];
+  return { levels, fences: Math.floor(fenceLines.length / 2) };
+}
+
+/**
+ * 把层级序列渲染成可读形式，便于报错时定位。
+ *
+ * @param {number[]} levels 层级序列。
+ * @returns {string} 形如 `1,2,3,3,2` 的串。
+ */
+function render(levels) {
+  return levels.join(',');
+}
+
+/**
+ * 校验所有配对的双语文档。
+ *
+ * @returns {{ pairs: number, errors: string[], warnings: string[] }} 结果。
+ */
+export function verifyBilingual() {
+  const errors = [];
+  const warnings = [];
+
+  for (const pair of PAIRS) {
+    const primaryPath = join(PACKAGE_ROOT, pair.primary);
+    const secondaryPath = join(PACKAGE_ROOT, pair.secondary);
+    const primary = structureOf(readFileSync(primaryPath, 'utf8'));
+    const secondary = structureOf(readFileSync(secondaryPath, 'utf8'));
+
+    /* 标题层级必须逐条对应。长度不同说明有一版多了/少了节。 */
+    if (primary.levels.length !== secondary.levels.length) {
+      errors.push(
+        `${pair.key}: 标题数量不一致 —— ${pair.primary} 有 ${primary.levels.length} 个，`
+        + `${pair.secondary} 有 ${secondary.levels.length} 个。`
+        + '新增或删除章节时两版必须同步。'
+      );
+      /* 数量不同时再报层级会刷屏，只报一处并提示怎么办。 */
+      continue;
+    }
+
+    for (let i = 0; i < primary.levels.length; i += 1) {
+      if (primary.levels[i] !== secondary.levels[i]) {
+        errors.push(
+          `${pair.key}: 第 ${i + 1} 个标题层级不一致 —— `
+          + `${pair.primary} 是 h${primary.levels[i]}，${pair.secondary} 是 h${secondary.levels[i]}。`
+        );
+        /* 只报第一处层级错位：它是根因，后面的错位多半是它引起的连带。 */
+        break;
+      }
+    }
+
+    /* 代码块数量对不上，说明示例没同步 —— 那是最容易漏的一类。 */
+    if (primary.fences !== secondary.fences) {
+      errors.push(
+        `${pair.key}: 代码块数量不一致 —— ${pair.primary} 有 ${primary.fences} 个，`
+        + `${pair.secondary} 有 ${secondary.fences} 个。`
+      );
+    }
+  }
+
+  return { pairs: PAIRS.length, errors, warnings };
+}
+
+/* ── CLI ──────────────────────────────────────────────────────────────── */
+
+function main() {
+  const result = verifyBilingual();
+  if (result.errors.length === 0) {
+    console.log(`双语文档一致性通过：${result.pairs} 对文件的结构（标题层级与代码块数）完全对应。`);
+    process.exit(0);
+  }
+  console.error(`双语文档一致性失败：${result.errors.length} 处`);
+  for (const error of result.errors) console.error(`  ✖ ${error}`);
+  console.error('  修复：让两版结构对���，或若确实有意只改一版，说明理由并同步另一版。');
+  process.exit(1);
+}
+
+const invokedDirectly = process.argv[1] !== undefined
+  && process.argv[1].replace(/\\/g, '/').endsWith('/tools/bilingual-docs.mjs');
+if (invokedDirectly) main();

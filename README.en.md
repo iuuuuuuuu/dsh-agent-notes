@@ -417,10 +417,16 @@ npm run verify                 # package self-check: manifest / patch / zero-dep
 npm run sync:latest            # has upstream drifted? (really goes red)
 npm run sync:check             # bundled copy vs the pinned ref, byte for byte
 npm run evidence               # live evidence against DSH's own real SkillRegistry
-npm run check                  # runs the four above in sequence
+npm run check                  # every purely local gate in sequence (run this before pushing)
+npm run check:full             # check + evidence (needs a local DSH)
+npm run hooks:install          # install the commit-msg hook: once per clone, after which a commit that should carry a note is stopped right there
+npm run archive:note -- <path> # archive and seal (the script computes the hashes — never hand-edit the manifest)
+npm run doc:budget             # documentation size budget (going over goes red and asks you to condense rather than raise the ceiling)
 ```
 
 `fault-injection` injects, for each gate, the exact defect it should catch (illegal class, bad filename, missing alternatives, a proposal title left in `implemented`, a tampered or deleted sealed archive, …), asserts a non-zero exit, then removes the defect and asserts a return to zero. **If any gate fails to react, the script itself exits non-zero** — and I verified that by injecting a deliberately failing assertion into the script.
+
+`hooks:install` deserves its own note: it attaches the "this change should carry a decision note" check to your local `commit-msg`, so you get the feedback at commit time. But a hook can be bypassed with `git commit --no-verify`, so **the CI gate is the authoritative one** — you want both.
 
 > `npm run evidence` and the integration tests need to locate a DSH installation. They auto-detect `$DSH_HOME`, `~/.dsh`, and each profile's `node_modules`; for non-standard layouts such as a bundled desktop install, point at it explicitly:
 >

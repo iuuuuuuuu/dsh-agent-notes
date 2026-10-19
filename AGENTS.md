@@ -28,18 +28,18 @@
 ## 命令
 
 ```sh
-npm run build                  # 重建 lib/client.js（改了 src/client.js 后必须跑）
+npm run build                  # 重建 lib/client.js（改 src/ 后必须跑）
 npm test                       # 行为测试（真跑子进程、真写文件）
 npm run gate:fault-injection   # 证明门禁会红（含笔记门禁外壳）
-npm run notes:gate             # 本仓库笔记门禁（空树/零篇判失败）
-npm run verify                 # 包自检（含双语文档与 dsh 徽标门禁）
-npm run sync:check             # 上游是否有更新
-npm run evidence               # 实机证据（需能找到 DSH；非标准位置设 DSH_DIST）
-npm run check                  # 全部纯本地门禁串跑（不需 DSH，提交后跑这个）
+npm run notes:gate             # 笔记门禁（空树/零篇判失败）
+npm run verify                 # 包自检（含双语文档与 dsh 徽标）
+npm run sync:check             # 上游是否有更新；真合并用 sync -- --yes
+npm run evidence               # 实机证据（需 DSH；非标准位置设 DSH_DIST）
+npm run check                  # 全部纯本地门禁串跑（不需 DSH，提交后跑）
 npm run check:full             # check + evidence（需本机 DSH）
-npm run notes:coverage         # 覆盖门禁：该写笔记的改动必须同批带笔记
-npm run hooks:install          # 装 commit-msg 钩子（每个 clone 跑一次）
-npm run sync -- --yes          # 真合并上游（改完必须重跑 check）
+npm run notices                 # 第三方归属声明（notices:check / md:links 在 check 内）
+npm run notes:coverage         # 覆盖门禁：受管改动必须同批带笔记
+npm run hooks:install          # 装 commit-msg 钩子（每个 clone 一次）
 ```
 
 ## 本仓库的决策笔记

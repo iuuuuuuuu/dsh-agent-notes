@@ -362,10 +362,16 @@ npm run verify                 # 包自检：清单 / patch / 零依赖 / 双语
 npm run sync:latest            # 上游是否已漂移（会真变红）
 npm run sync:check             # 副本与钉住 ref 是否逐字相同
 npm run evidence               # 实机证据：用 DSH 自带的真实 SkillRegistry 验证注册
-npm run check                  # 以上四条串跑
+npm run check                  # 全部纯本地门禁串跑（提交后跑这个）
+npm run check:full             # check + evidence（需本机 DSH）
+npm run hooks:install          # 装 commit-msg 钩子：每个 clone 跑一次，此后漏写笔记会被当场拦下
+npm run archive:note -- <路径> # 归档并封印（哈希由脚本算，勿手改 manifest）
+npm run doc:budget             # 文档字数预算（超了会红，提示压缩而非扩预算）
 ```
 
 `fault-injection` 会为每条门禁注入它该拦的故障（非法分类、坏文件名、缺备选方案、`implemented` 残留提案标题、篡改/删除已封印归档……），断言必须非零退出；再清掉故障断言回到零。**任何一条对故障无反应，该脚本自身非零退出**——它自己也引入了一条必然失败的断言验证过会红。
+
+其中 `hooks:install` 值得单独说一句：它把「该写笔记而没写」这道检查挂到本地 `commit-msg` 上，当场给出反馈。但钩子能被 `git commit --no-verify` 绕过，**CI 那一道才是权威的**——两道都要在。
 
 > `npm run evidence` 与集成测试需要找到 DSH 安装位置。会自动探测 `$DSH_HOME`、`~/.dsh` 及其各 profile 的 `node_modules`；桌面端内置安装等非标准位置请显式指定：
 >
