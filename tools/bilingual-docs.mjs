@@ -57,13 +57,27 @@ const PAIRS = [
  *
  * 只取与语言无关的部分：
  *   - 标题的**层级**（`#` 的个数），不含标题文字（文字必然是两种语言）；
- *   - 围栏代码块的数量。
+ *   - 围栏代码块的数量；
+ *   - **围栏代码块的语言标记，按出现顺序**（`sh` / `bash` / `yaml` / 空）。
  *
- * 刻意不取：表格行数、列表项数、正文长度。它们在本仓库同样一致，但受排版
- * 影响更大 —— 一次正常的段落拆分就会让它们变化，而那不是需要拦的漂移。
+ * ## 为什么加语言标记
+ *
+ * 前两项只比「有几个」，不比「是什么」。而语言标记（```js / ```bash / 空）
+ * 是**语言无关**的：翻译它没有任何意义。所以两版不一致**一定是真漂移**。
+ *
+ * 实测三个候选，只有它无歧义：
+ *
+ * | 候选 | 为什么不适合当门禁 |
+ * |---|---|
+ * | 段落数 / 列表项数 | **中英排版惯例本来就不同** —— 中文把内容排在列表里、英文排在正文段落里；中文还有「一格多项」（顿号分项）。实测 30 处「差异」全是方法假象，做成门禁会一直红且红了也没错 |
+ * | 代码块内的命令行 | 命令**相同**，但**注释不同**（`查看开关与笔记树状态` vs `Show switch and note-tree status`）。注释本就该翻译 |
+ * | **围栏语言标记** | **完全相同** ✅ 不承载语义，不一致即漂移 |
+ *
+ * 所以选了它 —— 而且**不需要 mdast**：判据就是「围栏行里 ``` 后面那个词」，
+ * 它在代码块内容之外，正则不会误吃块内的东西。
  *
  * @param {string} text Markdown 原文。
- * @returns {{ levels: number[], fences: number }} 结构指纹。
+ * @returns {{ levels: number[], fences: number, fenceLangs: string[] }} 结构指纹。
  */
 export function structureOf(text) {
   /* 标题：去掉围栏代码块后再数，否则代码示例里的 `# 注释` 会被当标题。 */
@@ -75,7 +89,13 @@ export function structureOf(text) {
   }
   /* 代码块：数围栏行数的一半（开 + 闭）。 */
   const fenceLines = text.match(/^\s*(```|~~~)/gm) ?? [];
-  return { levels, fences: Math.floor(fenceLines.length / 2) };
+
+  /* 语言标记：只取**开启**围栏的那些（开闭成对，奇偶位置 0/2/4… 是开）。
+     取全部会让闭合围栏的「空标记」混进来，比对时噪声更大。 */
+  const marks = [...text.matchAll(/(?:^|\n)(?:```|~~~)([^\n]*)/g)].map((m) => m[1].trim());
+  const fenceLangs = marks.filter((_, i) => i % 2 === 0);
+
+  return { levels, fences: Math.floor(fenceLines.length / 2), fenceLangs };
 }
 
 /**
@@ -136,6 +156,20 @@ export function verifyBilingual(options = {}) {
       errors.push(
         `${pair.key}: 代码块数量不一致 —— ${pair.primary} 有 ${primary.fences} 个，`
         + `${pair.secondary} 有 ${secondary.fences} 个。`
+      );
+      /* 数量不同就不必再比语言标记 —— 报一处并提示怎么办。 */
+      continue;
+    }
+
+    /* 语言标记顺序必须一致。它是**语言无关**的（翻译 ```sh 没有意义），
+       所以不一致一定是真漂移 —— 与段落数/列表项数不同，那些是中英排版
+       惯例的正常差异，做成门禁会一直红且红了也没错。 */
+    if (JSON.stringify(primary.fenceLangs) !== JSON.stringify(secondary.fenceLangs)) {
+      errors.push(
+        `${pair.key}: 代码块语言标记不一致 —— `
+        + `${pair.primary} 是 [${primary.fenceLangs.join(', ')}]，`
+        + `${pair.secondary} 是 [${secondary.fenceLangs.join(', ')}]。`
+        + '语言标记不承载语义（翻译 ```sh 没有意义），不一致即为漏同步。'
       );
     }
   }
