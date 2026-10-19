@@ -25,7 +25,7 @@
  * 每批都用 try/finally 还原，避免失败时把仓库改脏。
  */
 import { strict as assert } from 'node:assert';
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -190,6 +190,35 @@ test('md-links: 百分号编码的目标必须先解码再解析', () => {
     { '中文文件.md': '# 真实存在的中文文件\n' });
   assert.deepEqual(result.errors, [],
     '百分号编码的目标必须被解码后解析（不解码会误报不存在）');
+});
+
+test('md-links: 链接指向目录必须报错，不得崩掉整个门禁', () => {
+  /* 实测踩过：`[见说明](docs/)` 会让 readFileSync 抛 EISDIR，
+     **整个门禁直接崩掉** —— 不是报告问题，是自己挂了。
+     崩掉时退出码非 0，看起来像「门禁红了」，实际是「门禁没能运行」。
+     那正是本仓库最忌讳的形态：红的含义必须清楚。 */
+  const staging = mkdtempSync(join(tmpdir(), 'an-mddir-'));
+  try {
+    mkdirSync(join(staging, 'docs'), { recursive: true });
+    writeFileSync(join(staging, 'docs', 'a.md'), '# a\n', 'utf8');
+    mkdirSync(join(staging, 'images'), { recursive: true });
+
+    const doc = join(staging, 'probe.md');
+    writeFileSync(doc, '# t\n\n[见说明](docs)\n[又见](docs/)\n![图](images)\n', 'utf8');
+
+    /* 必须正常返回结果，而不是抛异常。 */
+    let result;
+    assert.doesNotThrow(() => { result = verifyMarkdownLinksIn([doc], staging); },
+      '指向目录不得让门禁崩溃 —— 崩掉时退出码非 0，会被误读成「门禁红了」');
+
+    assert.equal(result.errors.length, 3, '三处目录链接都要各报一条');
+    for (const error of result.errors) {
+      assert.match(error, /链接指向目录而非文件/, `必须说清是目录问题：${error}`);
+      assert.match(error, /要指某个文件请写全文件名/, `必须给出怎么改：${error}`);
+    }
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
+  }
 });
 
 test('md-links: 不扫描 vendored 的上游目录', () => {
