@@ -75,6 +75,19 @@
 
 ### 修复
 
+- **核查实机证据链与 `check:full`：可用，接线正确（无代码改动）**
+  - `npm run evidence` 用**真实 DSH** 的 SkillRegistry/ToolRuntime/CommandRuntime
+    验 10 项契约（注册、list、source: bundled、模型可调用、正文剥离 frontmatter
+    等），本机实跑 exit 0
+  - 无 DSH 时 exit **2**（「无法进行」而非「通过」），并说明怎么修 —— 不是假绿
+  - `check:full`（check 12 步 + 实机证据）端到端跑通
+  - 接线是对的，不改：实机证据依赖具体 DSH 版本，进 CI 会让「DSH 升级」与
+    「插件坏了」混为一谈；而进 `check` 会破坏它「纯本地不需 DSH」的核心承诺
+  - 顺带确认：「探测不到本机 DSH」是**有意取舍**（源码注释明写不硬编码本机
+    路径），不是覆盖不足 —— 容易被误认为 bug 去「修」
+  - 已知缺口：实机证据仍不在任何自动门禁里，「宿主契约有没有漂移」只在有人
+    主动跑 check:full 时才有答案。短期无低成本解法（需装了 DSH 的 CI）
+
 - **核查客户端 bundle 同步与归档路径：两条都可用（无代码改动）**
   - 客户端 bundle：真改 `src/client.js` 函数体、不 build、跑 `verify-plugin.mjs`
     —— 两种注入都被正确拦下，报错明确指向 `npm run build`
