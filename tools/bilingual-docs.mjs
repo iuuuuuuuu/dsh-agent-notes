@@ -77,8 +77,11 @@ const PAIRS = [
  * 它在代码块内容之外，正则不会误吃块内的东西。
  *
  * @param {string} text Markdown 原文。
- * @returns {{ levels: number[], fences: number, fenceLangs: string[] }} 结构指纹。
+ * @returns {{ levels: number[], fences: number, fenceLangs: string[], tables: number[][] }} 结构指纹。
  */
+/** GFM 表格的分隔行：|---|---| 或 |:--|--:| 等对齐标记变体。 */
+const DELIMITER_ROW = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
+
 export function structureOf(text) {
   /* 标题：去掉围栏代码块后再数，否则代码示例里的 `# 注释` 会被当标题。 */
   const withoutFences = text.replace(/(^|\n)(```|~~~)[^\n]*\n[\s\S]*?\n\2[^\n]*(?=\n|$)/g, '\n');
@@ -95,7 +98,56 @@ export function structureOf(text) {
   const marks = [...text.matchAll(/(?:^|\n)(?:```|~~~)([^\n]*)/g)].map((m) => m[1].trim());
   const fenceLangs = marks.filter((_, i) => i % 2 === 0);
 
-  return { levels, fences: Math.floor(fenceLines.length / 2), fenceLangs };
+  /* 列表项数**刻意不比**（实测已确认）：中文常把内容排在列表里、英文排在正文段落里。
+     分节实测 25 节里 24 节一致，唯一不一致的第 19 节正是这种排版选择 ——
+     中文 2 个列表项、英文 2 段散文，内容不缺。做成门禁会一直红且红了也没错。 */
+
+  /* 表格签名：每张表 → 每行的单元格数。与列表不同，**表格跨语言是刚体**
+     —— 同一份对照表，中英的列数行数必然一致（否则读者对不上）。
+     实测 README / README.en 8 张表逐行相同，零误报。 */
+  const tables = [];
+  /* 表格体外的含竖行：只是候选，要等分隔行确认才算表头。
+     ★ 实测那正是碎片来源 —— 行 3 的 `[English](README.en.md) | **中文**`
+     （语言切换链接）与行 273 的 `...[patch|minor|major]`（列表项里的代码）。
+     它们没有分隔行跟随，正确行为是**丢弃**而不是收进 tables：
+     收进去就成了假结构，会稀释真漂移（★ 两版同样错 ⇒ 门禁照样绿）。 */
+  let pendingHeader = null;
+  let current = null;
+
+  for (const line of withoutFences.split('\n')) {
+    /* ★ 分隔行必须先判：`|---|---|` 的字符全在 `[\s|:-]` 里，
+       所以「是不是内容」的判据对它必然为假 —— 放在前面就永远识别不到。 */
+    if (DELIMITER_ROW.test(line)) {
+      /* 分隔行确认了上一行是表头 —— 开一张新表并收下表头与分隔行。 */
+      if (pendingHeader !== null) {
+        current = [pendingHeader, line.split('|').length - 2];
+        tables.push(current);
+      }
+      pendingHeader = null;
+      continue;
+    }
+
+    const hasPipe = line.includes('|') && line.replace(/[\s|:-]/g, '') !== '';
+    if (!hasPipe) {
+      /* GFM：表格由随后的空行终止。任何非表格行都结束表格体，
+         同时丢弃未确认的候选（它不是表头）。 */
+      current = null;
+      pendingHeader = null;
+      continue;
+    }
+
+    if (current !== null) {
+      /* 表格体内：数据行并进当前那张表。 */
+      current.push(line.split('|').length - 2);
+      continue;
+    }
+
+    /* 表格体外：记为候选表头，等分隔行来确认。 */
+    pendingHeader = line.split('|').length - 2;
+  }
+
+  /* 未被分隔行确认的候选直接丢弃 —— 收进去就是碎片。 */
+  return { levels, fences: Math.floor(fenceLines.length / 2), fenceLangs, tables };
 }
 
 /**
@@ -172,6 +224,27 @@ export function verifyBilingual(options = {}) {
         + '语言标记不承载语义（翻译 ```sh 没有意义），不一致即为漏同步。'
       );
     }
+
+    /* 表格结构必须逐表对应：同一份对照表，中英的行列数不一致读者就对不上。 */
+    if (primary.tables.length !== secondary.tables.length) {
+      errors.push(
+        `${pair.key}: 表格数量不一致 —— ${pair.primary} 有 ${primary.tables.length} 张，`
+        + `${pair.secondary} 有 ${secondary.tables.length} 张。`
+        + '新增或删除表格时两版必须同步。'
+      );
+    } else {
+      for (let i = 0; i < primary.tables.length; i += 1) {
+        if (JSON.stringify(primary.tables[i]) === JSON.stringify(secondary.tables[i])) continue;
+        errors.push(
+          `${pair.key}: 第 ${i + 1} 张表格结构不一致 —— `
+          + `${pair.primary} 每行单元格数 [${primary.tables[i].join(', ')}]，`
+          + `${pair.secondary} 是 [${secondary.tables[i].join(', ')}]。`
+          + '表格是跨语言刚体：同一份对照表列数必须一致，否则读者对不上。'
+        );
+        /* 只报第一张：它通常是根因，后面的多半是连带。 */
+        break;
+      }
+    }
   }
 
   return { pairs: list.length, errors, warnings };
@@ -182,7 +255,7 @@ export function verifyBilingual(options = {}) {
 function main() {
   const result = verifyBilingual();
   if (result.errors.length === 0) {
-    console.log(`双语文档一致性通过：${result.pairs} 对文件的结构（标题层级与代码块数）完全对应。`);
+    console.log(`双语文档一致性通过：${result.pairs} 对文件的结构（标题层级、代码块与表格）完全对应。`);
     process.exit(0);
   }
   console.error(`双语文档一致性失败：${result.errors.length} 处`);
