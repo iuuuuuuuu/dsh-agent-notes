@@ -75,6 +75,20 @@
 
 ### 修复
 
+- **上游 verify 清单的分母算错了：真实 42，此前一直按 65 数**
+  - 此前的 65 来自上游 `package.json` 的 **npm script 名**，按名字里含
+    `verify-` 的数量数的。抽查发现 `verify-third-party-notices` 与
+    `verify-cli-help` **都不存在**（HTTP 404）
+  - 按 `scripts/verify-*.ts` 真实文件路径重数：**42 个**。于是
+    「已核查 6 项」的进度是假的 —— 分母错了 23，而实际未判定的是 32 个
+  - 后果不止数字：错误的进度会让人**过早宣布「查完了」**
+  - 判据改为解析真实文件路径（`/scripts\/(verify-[a-z-]+\.ts)/g`），
+    不数 script 名 —— 后者会同时产生幽灵项与漏项
+  - 32 个未判定项已全部判定：24 个结构性不适用（读 `packages/`、
+    `cordis.yml`、`.d.ts` 等本仓库没有的路径），8 个逐个核过
+  - 其中确认 `doc-budgets` **已实现**（就是本仓库的 `doc-budget.mjs`）、
+    `translation-pairing` 已部分实现（比结构，不补逐节哈希）
+
 - **`lib/skill.js` 的 `createSkillProvider` 漏了 `@param`**
   - 92 个导出里唯一一处 JSDoc 不完整（其余 91 个都有完整的 `@param`/`@returns`）
   - 是逐项核查上游 `verify-export-jsdoc` 时人工发现的，**不是门禁发现的**
