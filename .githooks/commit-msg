@@ -18,7 +18,7 @@ echo "▸ Markdown 链接"
 node tools/md-links.mjs
 
 echo "▸ 双语文档结构"
-node tools/docs:bilingual 2>/dev/null || node tools/bilingual-docs.mjs
+node tools/bilingual-docs.mjs
 
 echo "▸ 第三方归属声明"
 node tools/notices.mjs --check

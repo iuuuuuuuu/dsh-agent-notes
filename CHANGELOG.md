@@ -75,6 +75,18 @@
 
 ### 修复
 
+- **`.githooks/commit-msg` 与源漂移，且漂移的那行本身是坏的**
+  - 上一轮把钩子正文抽到 `tools/hook-body.mjs`，收尾时改了源里一行，
+    但**没有重新生成 `.githooks/commit-msg`**，并把它一起合进了 main
+  - 那行 `node tools/docs:bilingual 2>/dev/null || ...` 是错的 ——
+    `docs:bilingual` 是 npm script 名，不是文件路径。于是**合并进 main 的
+    钩子第三道门禁是坏的**，而 `2>/dev/null` 把错误静默吞掉了
+  - 更隐蔽：`hook-body.test.mjs` 的 11 条测试**读源**、全部通过，
+    而实际执行的是旧副本。门禁测的是源，跑的是生成物
+  - 修：重新生成钩子 + 新增一条测试「已安装文件必须逐字节等于 HOOK_BODY」
+    （比较前归一化行尾，否则 Windows 上会因 CRLF/LF 差异假红）
+  - 故障注入三条全部符合预期：基线绿 → 改回旧写法红 → 删掉一道红 → 还原绿
+
 - **五道门禁只接进了本地 `check` 链，CI 一道都没跑**
   - 连续三轮加了 `notices:check` / `md:links` / `docs:bilingual` /
     `text:integrity` / `release:check`，全部只进本地链
