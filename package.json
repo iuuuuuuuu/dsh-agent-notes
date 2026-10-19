@@ -78,11 +78,12 @@
     "release:check": "node tools/release-check.mjs",
     "hooks:install": "node tools/install-hooks.mjs",
     "evidence": "node tools/live-evidence.mjs",
-    "check": "npm run verify && npm run notices:check && npm run md:links && npm run ci:align && npm run docs:bilingual && npm run text:integrity && npm run release:check && npm run notes:gate && npm run notes:coverage:last && npm run notes:supersession:last && npm run doc:budget && npm test && npm run gate:fault-injection",
+    "check": "npm run verify && npm run notices:check && npm run md:links && npm run ci:align && npm run docs:bilingual && npm run docs:fix-links && npm run text:integrity && npm run release:check && npm run notes:gate && npm run notes:coverage:last && npm run notes:supersession:last && npm run doc:budget && npm test && npm run gate:fault-injection",
     "check:full": "npm run check && npm run evidence",
     "notes:coverage:last": "node tools/notes-coverage.mjs --range HEAD~1..HEAD",
     "notes:supersession:last": "node tools/notes-supersession.mjs --range HEAD~1..HEAD",
-    "sync:latest": "node tools/sync-upstream.mjs --latest"
+    "sync:latest": "node tools/sync-upstream.mjs --latest",
+    "docs:fix-links": "node tools/bilingual-links.mjs"
   },
   "upstreamCommit": "0e8200c0f80d37a1c75e585a65b35401ae198462",
   "devDependencies": {
