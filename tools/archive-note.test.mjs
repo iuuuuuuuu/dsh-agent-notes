@@ -28,6 +28,8 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
+import { replaceOutsideFences, rewriteRelativeLinks } from './archive-note.mjs';
+
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SCRIPTS = join(PACKAGE_ROOT, 'skills', 'agent-notes', 'scripts');
 const NODE = process.execPath;
@@ -191,4 +193,150 @@ test('archive:note: 拒绝归档仓库外的路径', () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+/* ── 链接改写 ──────────────────────────────────────────────────
+ *
+ * 归档把笔记从 implemented/<class>/ 移到 archived/<class>/，深度不变但
+ * 路径段变了 —— 于是笔记里的相对链接会失效。上游 archive-agent-note.ts
+ * 只做头部规范化，**没动正文里的链接**。
+ *
+ * tools/archive-note.mjs 在调用它之前先改写，使封印与最终内容一致。
+ */
+
+/** 造一个临时「仓库」，返回 notes 根。 */
+function sandbox() {
+  const dir = mkdtempSync(join(tmpdir(), 'an-arch-'));
+  const notes = join(dir, '.agents', 'notes');
+  for (const lc of ['implemented', 'archived']) {
+    mkdirSync(join(notes, lc, 'process'), { recursive: true });
+    mkdirSync(join(notes, lc, 'bug-fix'), { recursive: true });
+  }
+  writeFileSync(join(dir, 'README.md'), '# root\n', 'utf8');
+  writeFileSync(join(notes, 'implemented', 'bug-fix', 'y.md'), 'target\n', 'utf8');
+  return { dir, notes };
+}
+
+test('archive-note 链接改写: 相对链接要加一级并补 implemented', () => {
+  const s = sandbox();
+  try {
+    const r = rewriteRelativeLinks(
+      '见 [旧决策](../bug-fix/y.md)\n',
+      join(s.notes, 'implemented', 'process'),
+      join(s.notes, 'archived', 'process'),
+      s.notes
+    );
+    assert.equal(r.changed, 1, '应改写 1 条');
+    assert.ok(r.content.includes('](../../implemented/bug-fix/y.md)'),
+      `应改成跨 lifecycle 的形式，实际: ${r.content}`);
+  } finally {
+    rmSync(s.dir, { recursive: true, force: true });
+  }
+});
+
+test('archive-note 链接改写: 指向笔记树外的链接不得改写', () => {
+  const s = sandbox();
+  try {
+    const r = rewriteRelativeLinks(
+      '见 [README](../../README.md)\n',
+      join(s.notes, 'implemented', 'process'),
+      join(s.notes, 'archived', 'process'),
+      s.notes
+    );
+    assert.equal(r.changed, 0, '树外链接不该被改 —— 基准未变，改了反而错');
+  } finally {
+    rmSync(s.dir, { recursive: true, force: true });
+  }
+});
+
+test('archive-note 链接改写: 代码块里的示例不得改写（那是历史内容）', () => {
+  const s = sandbox();
+  try {
+    const src = [
+      '正文引用了示例：', '', '```md', '[示例](../bug-fix/y.md)',
+      '```', '', '而真链接是 [真的](../bug-fix/y.md)', ''
+    ].join('\n');
+    const r = rewriteRelativeLinks(
+      src,
+      join(s.notes, 'implemented', 'process'),
+      join(s.notes, 'archived', 'process'),
+      s.notes
+    );
+    assert.equal(r.changed, 1, '只该改真链接那一条');
+    assert.ok(r.content.includes('[示例](../bug-fix/y.md)'),
+      '代码块内的示例必须原样保留 —— 改它就是篡改历史');
+    assert.ok(r.content.includes('[真的](../../implemented/bug-fix/y.md)'),
+      '代码块外的真链接应被改写');
+  } finally {
+    rmSync(s.dir, { recursive: true, force: true });
+  }
+});
+
+test('archive-note 链接改写: 绝对 URL、协议相对与纯锚点不得改写', () => {
+  const s = sandbox();
+  try {
+    const src = [
+      '[a](https://example.com/x.md)', '[b](//cdn.example.com/y.md)',
+      '[c](#section)', '[d](mailto:x@y.z)', ''
+    ].join('\n');
+    const r = rewriteRelativeLinks(
+      src,
+      join(s.notes, 'implemented', 'process'),
+      join(s.notes, 'archived', 'process'),
+      s.notes
+    );
+    assert.equal(r.changed, 0, '这四种都不指向本仓库文件');
+    assert.equal(r.content, src, '必须逐字不变');
+  } finally {
+    rmSync(s.dir, { recursive: true, force: true });
+  }
+});
+
+test('archive-note 链接改写: fragment 与 query 必须跟着走', () => {
+  const s = sandbox();
+  try {
+    const r = rewriteRelativeLinks(
+      '见 [笔记](../bug-fix/y.md#decision) 与 [查询](../bug-fix/y.md?v=2)\n',
+      join(s.notes, 'implemented', 'process'),
+      join(s.notes, 'archived', 'process'),
+      s.notes
+    );
+    assert.equal(r.changed, 2);
+    assert.ok(r.content.includes('y.md#decision'), 'fragment 必须跟着走');
+    assert.ok(r.content.includes('y.md?v=2'), 'query 必须跟着走');
+  } finally {
+    rmSync(s.dir, { recursive: true, force: true });
+  }
+});
+
+test('archive-note 链接改写: 幂等 —— 已经是归档后形式的不再改', () => {
+  const s = sandbox();
+  try {
+    const r = rewriteRelativeLinks(
+      '见 [旧决策](../../implemented/bug-fix/y.md)\n',
+      join(s.notes, 'archived', 'process'),
+      join(s.notes, 'archived', 'process'),
+      s.notes
+    );
+    assert.equal(r.changed, 0, '同目录之间不该有改写');
+  } finally {
+    rmSync(s.dir, { recursive: true, force: true });
+  }
+});
+
+test('archive-note 链接改写: replaceOutsideFences 认两种围栏且不误伤', () => {
+  const src = [
+    '```js', 'const a = 1;', '```',
+    '外面这行要改',
+    '~~~', 'tilde 围栏内', '~~~',
+    '又一行要改', ''
+  ].join('\n');
+  let hits = 0;
+  const out = replaceOutsideFences(src, (line) => {
+    if (line.includes('要改')) hits += 1;
+    return line;
+  });
+  assert.equal(hits, 2, '只该命中两行围栏外的');
+  assert.ok(out.includes('const a = 1;'), 'js 围栏内不动');
+  assert.ok(out.includes('tilde 围栏内'), 'tilde 围栏内也不动');
 });
