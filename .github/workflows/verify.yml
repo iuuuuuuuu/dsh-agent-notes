@@ -115,7 +115,7 @@ jobs:
       - name: 文档预算
         run: npm run doc:budget
 
-      # ── 以下五道门禁是后来加的，本地 check 链里有，CI 一度一道都没跑 ──
+      # ── 以下门禁是后来加的，本地 check 链里有，CI 一度一道都没跑 ──
       #
       # 实测踩过：连续三轮加了 notices / md:links / docs:bilingual /
       # text:integrity / release:check 五道门禁，全都只接进了本地 `npm run check`，
@@ -140,10 +140,16 @@ jobs:
       - name: 双语文档结构
         run: npm run docs:bilingual
 
-      # 把双语文档之间「指错语言」的互链改回来（语言切换器那行不动，
-      # 与上游 skipTargets 同口径）。当前仓库零改动 —— 它是防御性完备。
+      # 把双语文档之间「指错语言」的互链**查出来**（语言切换器那行不动，
+      # 与上游 skipTargets 同口径）。当前仓库无可改之处 —— 它是防御性完备。
+      #
+      # ★ 这里必须是只读的 `--check`，不能是改写型。改写型门禁在 check 链里
+      #   边跑边写盘，随后本 job 末尾那条 `git status --porcelain` 断言就会红，
+      #   而报错写的是「某个门禁在仓库里留下了改动」—— 它指的其实是**别人的**
+      #   未提交改动（CI 里不该有，本地重放时会）。门禁的职责是判断，
+      #   写盘是「修」，两者不能是同一个按钮。
       - name: 双语互链
-        run: npm run docs:fix-links
+        run: npm run docs:links
 
       - name: 文本完整性
         run: npm run text:integrity

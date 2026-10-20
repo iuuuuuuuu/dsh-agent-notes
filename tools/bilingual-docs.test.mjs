@@ -290,3 +290,46 @@ test('bilingual: 代码块里的表格不得被计入', () => {
   assert.deepEqual(result.errors, [],
     `围栏内的表格不得计入，实际：${JSON.stringify(result.errors)}`);
 });
+
+/* ── 链接目标逐条比对（对应上游 `sig.links`）───────────────────────── */
+
+test('bilingual: 一侧改了外链、另一侧没改必须红', () => {
+  /* 这是本项唯一能抓的漂移形态：标题 / 代码块 / 表格全都一致，
+     只有链接目标不同。读者点过去是**两个不同项目**。 */
+  const result = withEdits({ en: enBackup.replaceAll('dhicoc/dsh-better-sidebar', 'dhicoc/dsh-better-sidebar-old') });
+  assert.equal(result.errors.length > 0, true, '必须报错');
+  assert.match(result.errors.join('\n'), /链接目标不一致/);
+  /* ★ 同时断言它没有误报成别的项 —— 否则「一律报错」也能过。 */
+  assert.doesNotMatch(result.errors.join('\n'), /标题数量|代码块|表格/);
+});
+
+test('bilingual: 两版同步改外链必须放行', () => {
+  const url = 'dhicoc/dsh-better-sidebar-next';
+  const result = withEdits({
+    zh: zhBackup.replaceAll('dhicoc/dsh-better-sidebar', url),
+    en: enBackup.replaceAll('dhicoc/dsh-better-sidebar', url)
+  });
+  assert.deepEqual(result.errors, [],
+    `两版同步改应放行，实际：${JSON.stringify(result.errors)}`);
+});
+
+test('bilingual: 一侧少一条链接必须红', () => {
+  /* 把中文版里那处行内链接换成纯文字：结构（标题/代码块/表格）全不变，
+     只少一条链接 —— 专门验「链接数量」这条判据。 */
+  const zh = zhBackup.replace('MIT，全文见 [LICENSE](LICENSE)。', 'MIT，全文见 LICENSE 文件。');
+  assert.notEqual(zh, zhBackup, '替换必须真的发生，否则这条用例验的是空转');
+  const result = withEdits({ zh });
+  assert.match(result.errors.join('\n'), /链接数量不一致/);
+});
+
+test('bilingual: 语言切换器那行不同不算链接漂移', () => {
+  /* 中文版指 `README.en.md`、英文版指 `README.md` —— 本来就该不同。
+     这一条是「链接比对」的误报边界，必须放行。 */
+  const result = withEdits({});
+  assert.deepEqual(result.errors, [],
+    `语言切换器那行不得被算成漂移，实际：${JSON.stringify(result.errors)}`);
+  const zh = structureOf(zhBackup, { skipLinkTargets: ['README.md', 'README.en.md'] });
+  assert.equal(zh.links.some((t) => t.endsWith('README.en.md')), false,
+    '语言切换器必须被跳过');
+  assert.equal(zh.links.some((t) => t.endsWith('README.md')), false);
+});

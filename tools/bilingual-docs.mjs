@@ -13,7 +13,12 @@
  *
  * ## 比什么，为什么不比字数
  *
- * 比**结构**：标题的层级序列 + 围栏代码块的数量。
+ * 比**结构**：标题的层级序列 + 围栏代码块的数量与语言标记 + 表格的行列数
+ * + **链接目标逐条**。
+ *
+ * 前四项与第五项的分工：前四项判「两版是不是同一个骨架」，链接判「两版
+ * 指向的是不是同一批地方」。后者是**外链漂移**的唯一探针 —— 把 GitHub 地址
+ * 从旧项目改成新项目却只改了一版，标题/代码块/表格全都一致，只有它能发现。
  *
  * 不比字数是因为中英长度天然不同（实测 416 行 vs 471 行，而标题数、
  * 代码块数、表格行数完全一致）—— 字数差是**正常**的，拿它当判据只会
@@ -42,15 +47,13 @@
  * ```
  */
 import { readFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+import { PAIRS, languageSwitcherTargets } from './bilingual-links.mjs';
+import { collectRelativeLinks } from './markdown-links.mjs';
 
-/** 配对的双语文档：主文件与其对应版本。 */
-const PAIRS = [
-  { key: 'README', primary: 'README.md', secondary: 'README.en.md' }
-];
+const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 /**
  * 抽出一份 Markdown 的结构指纹。
@@ -82,7 +85,7 @@ const PAIRS = [
 /** GFM 表格的分隔行：|---|---| 或 |:--|--:| 等对齐标记变体。 */
 const DELIMITER_ROW = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
 
-export function structureOf(text) {
+export function structureOf(text, options = {}) {
   /* 标题：去掉围栏代码块后再数，否则代码示例里的 `# 注释` 会被当标题。 */
   const withoutFences = text.replace(/(^|\n)(```|~~~)[^\n]*\n[\s\S]*?\n\2[^\n]*(?=\n|$)/g, '\n');
   const levels = [];
@@ -146,8 +149,23 @@ export function structureOf(text) {
     pendingHeader = line.split('|').length - 2;
   }
 
+  /* 链接目标：按出现顺序逐条比（对应上游 `up-translation-pairing.ts:368`
+     的 `sig.links`）。
+     ★ 必须**含绝对 URL** —— 中英两版最容易漂的正是外链（把一个 GitHub 地址
+       只改了一边，读者点到的就是两个不同项目）。只取相对链接会漏掉这一类。
+     ★ 语言切换器 / 配对互链必须跳过：`[English](README.en.md)` 在中文版里、
+       `[中文](README.md)` 在英文版里**本来就该不同**，比它就是纯误报。
+       跳过判据与 `bilingual-links.mjs` 共用 `languageSwitcherTargets`。 */
+  const skip = new Set(options.skipLinkTargets ?? []);
+  const links = [];
+  for (const link of collectRelativeLinks(text, { includeAbsolute: true })) {
+    const name = basename(link.target.split('#')[0].split('?')[0]);
+    if (skip.has(name)) continue;
+    links.push(link.target);
+  }
+
   /* 未被分隔行确认的候选直接丢弃 —— 收进去就是碎片。 */
-  return { levels, fences: Math.floor(fenceLines.length / 2), fenceLangs, tables };
+  return { levels, fences: Math.floor(fenceLines.length / 2), fenceLangs, tables, links };
 }
 
 /**
@@ -178,8 +196,10 @@ export function verifyBilingual(options = {}) {
   for (const pair of list) {
     const primaryPath = join(PACKAGE_ROOT, pair.primary);
     const secondaryPath = join(PACKAGE_ROOT, pair.secondary);
-    const primary = structureOf(read(primaryPath));
-    const secondary = structureOf(read(secondaryPath));
+    /* 语言切换器那两行跳过 —— 中英各指对方，本来就该不同。 */
+    const skipLinkTargets = languageSwitcherTargets(pair);
+    const primary = structureOf(read(primaryPath), { skipLinkTargets });
+    const secondary = structureOf(read(secondaryPath), { skipLinkTargets });
 
     /* 标题层级必须逐条对应。长度不同说明有一版多了/少了节。 */
     if (primary.levels.length !== secondary.levels.length) {
@@ -245,6 +265,29 @@ export function verifyBilingual(options = {}) {
         break;
       }
     }
+
+    /* 链接目标必须逐条对应（对应上游 `sig.links`）。
+       抓的是「一侧改了外链、另一侧没跟上」—— 例如把 GitHub 地址从旧项目
+       改成新项目却只改了一版，于是中英读者点到的**是两个不同项目**。
+       标题 / 代码块 / 表格全都一致时，只有这一项能发现。 */
+    if (primary.links.length !== secondary.links.length) {
+      errors.push(
+        `${pair.key}: 链接数量不一致 —— ${pair.primary} 有 ${primary.links.length} 条，`
+        + `${pair.secondary} 有 ${secondary.links.length} 条。`
+        + '新增或删除链接时两版必须同步（语言切换器那行不计入）。'
+      );
+    } else {
+      for (let i = 0; i < primary.links.length; i += 1) {
+        if (primary.links[i] === secondary.links[i]) continue;
+        errors.push(
+          `${pair.key}: 第 ${i + 1} 条链接目标不一致 —— `
+          + `${pair.primary} 是 ${primary.links[i]}，`
+          + `${pair.secondary} 是 ${secondary.links[i]}。`
+        );
+        /* 只报第一处：链接错位后后面的会成串，全报会把根因淹没。 */
+        break;
+      }
+    }
   }
 
   return { pairs: list.length, errors, warnings };
@@ -255,7 +298,7 @@ export function verifyBilingual(options = {}) {
 function main() {
   const result = verifyBilingual();
   if (result.errors.length === 0) {
-    console.log(`双语文档一致性通过：${result.pairs} 对文件的结构（标题层级、代码块与表格）完全对应。`);
+    console.log(`双语文档一致性通过：${result.pairs} 对文件的结构（标题层级、代码块、表格与链接目标）完全对应。`);
     process.exit(0);
   }
   console.error(`双语文档一致性失败：${result.errors.length} 处`);

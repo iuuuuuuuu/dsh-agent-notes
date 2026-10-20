@@ -74,7 +74,10 @@ function buildClientBundle() {
 const pkgFile = join(PACKAGE_ROOT, 'package.json');
 check(existsSync(pkgFile), 'package.json 不存在');
 const pkg = JSON.parse(readFileSync(pkgFile, 'utf8'));
-check(pkg.name === 'dsh-agent-notes', `包名应为 dsh-agent-notes，实际 ${pkg.name}`);
+/* 包名必须是 npm 上的那个（scope 形式）。
+     ★ 只改 npm 包名，**不动** `cordis.patch.yml` 的 name 与 `lib/client.js`
+       的 loader id —— 那是 DSH 侧的插件标识，改了会让宿主找不到插件。 */
+  check(pkg.name === '@iuuuuuuuu/agent-notes', `包名应为 @iuuuuuuuu/agent-notes，实际 ${pkg.name}`);
 check(pkg.type === 'module', 'type 必须为 module');
 check(typeof pkg.main === 'string' && existsSync(join(PACKAGE_ROOT, pkg.main)), `main 指向的文件不存在: ${pkg.main}`);
 check(pkg.license === 'MIT', 'license 应为 MIT');

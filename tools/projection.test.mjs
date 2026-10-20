@@ -426,7 +426,7 @@ test('侧边栏宿主：component 必须把宿主 props 转交给看板，iframe
   descriptor.component({
     ctx: fakeCtx,
     store: {},
-    scope: { sessionId: 'sess-sidebar-42', cwd: 'D:/WishProject/demo' },
+    scope: { sessionId: 'sess-sidebar-42', cwd: 'D:/work/demo' },
     tab: { id: 'agent-notes-board', type: 'agent-notes-board' },
     visible: true
   });
@@ -434,7 +434,7 @@ test('侧边栏宿主：component 必须把宿主 props 转交给看板，iframe
   assert.ok(frameWithCwd !== undefined, '带 cwd 时也应渲染出 iframe');
   assert.match(
     String(frameWithCwd.props.src),
-    /[?&]cwd=D%3A%2FWishProject%2Fdemo(?:&|$)/,
+    /[?&]cwd=D%3A%2Fwork%2Fdemo(?:&|$)/,
     `iframe src 必须带上 scope.cwd 且做 URL 编码（实际 ${frameWithCwd.props.src}）—— `
     + '不带它，会话未加载时看板只能显示「暂时读不到」'
   );

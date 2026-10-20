@@ -39,12 +39,12 @@ test('target: 省略 cwd 时取会话头里的 cwd（不是 process.cwd）', () 
   const ctx = makeCtx({
     get(id) {
       assert.equal(id, 's1');
-      return { header: { cwd: 'D:/WishProject/sourin-flutter-spike' } };
+      return { header: { cwd: 'D:/work/flutter-spike' } };
     }
   });
   const target = resolveTargetCwd(ctx, { agent: { id: 's1' } }, undefined);
   assert.equal(target.ok, true);
-  assert.equal(target.cwd, 'D:/WishProject/sourin-flutter-spike');
+  assert.equal(target.cwd, 'D:/work/flutter-spike');
   assert.equal(target.source, 'session');
   // 关键：绝不能是当前进程目录
   assert.notEqual(target.cwd, process.cwd());

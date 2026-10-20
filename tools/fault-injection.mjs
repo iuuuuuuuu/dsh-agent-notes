@@ -285,6 +285,7 @@ try {
     ['第三方归属声明', 'notices.test.mjs'],
     ['Markdown 相对链接', 'md-links.test.mjs'],
     ['双语文档结构一致', 'bilingual-docs.test.mjs'],
+    ['双语互链指错语言', 'bilingual-links.test.mjs'],
     ['发版记账一致', 'release-check.test.mjs'],
     ['本地钩子安装与卸载', 'install-hooks.test.mjs'],
     ['sync-upstream 参数解析', 'args-parse.test.mjs'],
