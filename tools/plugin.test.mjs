@@ -18,7 +18,7 @@ import { test } from 'node:test';
 
 import { createStateStore, resolveDshHome, expandHome } from '../lib/state.js';
 import { runGate, runAllGates, stripNodeNoise, inspectTree, GATES } from '../lib/notes.js';
-import { createSkillProvider, parseFrontmatter, SKILL_FILE } from '../lib/skill.js';
+import { createSkillProvider, parseFrontmatter, readSkill, SKILL_FILE } from '../lib/skill.js';
 import { buildPolicyText, POLICY_MARKERS } from '../lib/policy.js';
 
 /** 造一个临时目录。 */
@@ -274,6 +274,74 @@ test('技能：frontmatter 解析对引号与无头都稳', () => {
   const headless = parseFrontmatter('# 没有头\n正文');
   assert.deepEqual(headless.data, {});
   assert.equal(headless.body, '# 没有头\n正文');
+});
+
+/**
+ * 宿主 `@deepseek-ai/dsh-skill-filesystem` 用真 `yaml` 包读同一份 SKILL.md。
+ * 两边对同一份文件理解不同时，模型看到的技能描述就不是文件里写的那个。
+ *
+ * 下面每条期望值都由 `yaml` 包的 parse() 实测得出（探针 `.probe/probe-vs-real-yaml.mjs`
+ * 逐条比对 21/21 一致），不是按「我觉得 YAML 应该这样」手写的。
+ */
+test('技能：frontmatter 解析与宿主真 YAML 口径一致（值，不只是不崩）', () => {
+  const cases = [
+    ['普通标量', '决策笔记方法论'],
+    ['双引号', '决策笔记方法论'],
+    ['单引号', '决策笔记方法论'],
+    ['行尾注释', '决策笔记'],
+    ['引号+行尾注释', '决策笔记'],
+    ['值里 # 前有空格 → 注释开始', 'issue'],
+    ['值里 # 前无空格 → 属于值', 'issue#11'],
+    ['引号里的 # 属于值', 'issue #11 已修'],
+    ['块标量 | 保留换行', '第一行\n第二行\n'],
+    ['块标量 > 折叠成一行', '第一行 第二行\n'],
+    ['块标量 |- 去掉尾部换行', '第一行'],
+    ['单引号内转义单引号', "it's fine"],
+    ['双引号内转义换行', 'line\nbreak'],
+    ['中文键名', '决策笔记']
+  ];
+  const rawOf = {
+    普通标量: '---\nname: x\ndescription: 决策笔记方法论\n---\n正文',
+    双引号: '---\nname: x\ndescription: "决策笔记方法论"\n---\n正文',
+    单引号: "---\nname: x\ndescription: '决策笔记方法论'\n---\n正文",
+    行尾注释: '---\nname: x\ndescription: 决策笔记 # 说明\n---\n正文',
+    '引号+行尾注释': '---\nname: x\ndescription: "决策笔记" # 说明\n---\n正文',
+    '值里 # 前有空格 → 注释开始': '---\nname: x\ndescription: issue #11 已修\n---\n正文',
+    '值里 # 前无空格 → 属于值': '---\nname: x\ndescription: issue#11\n---\n正文',
+    '引号里的 # 属于值': '---\nname: x\ndescription: "issue #11 已修"\n---\n正文',
+    '块标量 | 保留换行': '---\nname: x\ndescription: |\n  第一行\n  第二行\n---\n正文',
+    '块标量 > 折叠成一行': '---\nname: x\ndescription: >\n  第一行\n  第二行\n---\n正文',
+    '块标量 |- 去掉尾部换行': '---\nname: x\ndescription: |-\n  第一行\n---\n正文',
+    单引号内转义单引号: "---\nname: x\ndescription: 'it''s fine'\n---\n正文",
+    双引号内转义换行: '---\nname: x\ndescription: "line\\nbreak"\n---\n正文',
+    中文键名: '---\n名称: x\ndescription: 决策笔记\n---\n正文'
+  };
+  for (const [label, expected] of cases) {
+    assert.equal(parseFrontmatter(rawOf[label]).data.description, expected, label);
+  }
+});
+
+test('技能：YAML 拒绝的写法不得静默给出半截值', () => {
+  /* `notes: write them` 在真 YAML 里是 BLOCK_AS_IMPLICIT_KEY 错误；宿主会整份忽略技能。 */
+  const broken = parseFrontmatter('---\nname: x\ndescription: notes: write them\n---\n正文');
+  assert.equal(broken.data.description, undefined, '不能把 "notes: write them" 当值收下');
+  assert.ok(broken.warnings.length > 0, '必须报告，而不是安静地少一个字段');
+  assert.match(broken.warnings.join(' '), /第 3 行/, '告警要指出行号，否则改不动');
+});
+
+test('技能：未建模的嵌套内容要报告，不得当成顶层键', () => {
+  const nested = parseFrontmatter('---\nname: x\ndescription: 决策笔记\nmetadata:\n  author: someone\n---\n正文');
+  assert.equal(nested.data.description, '决策笔记');
+  assert.equal(nested.data.author, undefined, '缩进行不是顶层键');
+  assert.match(nested.warnings.join(' '), /嵌套内容/, '本解析器不建模，必须说出来');
+});
+
+test('技能：真实 SKILL.md 解析出的描述就是文件里写的那一句', () => {
+  const info = readSkill();
+  assert.deepEqual(info.warnings, [], 'vendored SKILL.md 不该有任何解析告警');
+  assert.ok(info.description.startsWith('Use when a change is non-trivial'), `实得 ${info.description}`);
+  assert.equal(info.description.includes('#'), false, '描述里不该混进注释');
+  assert.equal(info.description.includes('description:'), false, '描述里不该混进键名');
 });
 
 test('规范文本：含关键判据', () => {
