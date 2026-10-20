@@ -120,44 +120,113 @@ export function rewriteTranslationLinkLocales(content, pair, selfName) {
 }
 
 /**
- * 扫描所有双语对，把指错语言的链接**改回来**。
+ * 扫描所有双语对，找出「指错语言」的互链 —— **只读，一个字节都不写**。
+ *
+ * @param {string} [root] 仓库根。
+ * @returns {{ pairs: number, violations: number, missing: string[], findings: Array<{name: string, full: string, before: string, after: string, details: string[]}> }}
+ *   结果。
+ */
+export function scanTranslationLinkLocales(root = PACKAGE_ROOT) {
+  const findings = [];
+  const missing = [];
+  let violations = 0;
+
+  for (const pair of PAIRS) {
+    for (const name of [pair.primary, pair.secondary]) {
+      const full = join(root, name);
+      /* ★ 缺失必须单独记下来，不能只是 `continue` ——
+         空集合上「没有指错语言的链」是个恒真命题，那样子门禁会在一对文件
+         少了一个时照样报绿。本仓库反复栽在「空集合恒绿」上（vendored 三脚本
+         在空树上 exit 0），所以这里主动把它变成失败。 */
+      if (!existsSync(full)) { missing.push(name); continue; }
+      const before = readFileSync(full, 'utf8');
+      const result = rewriteTranslationLinkLocales(before, pair, name);
+      if (result.rewritten === 0) continue;
+      violations += result.rewritten;
+      findings.push({ name, full, before, after: result.content, details: result.details });
+    }
+  }
+
+  return { pairs: PAIRS.length, violations, missing, findings };
+}
+
+/**
+ * 只查不改 —— 门禁走的是这条。
+ *
+ * ★ 为什么必须与「改写」分开：原来只有「改写」一个入口，它接在 check 链里
+ *   且**没有任何参数**，于是每次跑门禁都会写盘。后果是实测出来的 ——
+ *   只要工作区原本就是脏的，随后 `verify.yml` 里那条
+ *   `git status --porcelain` 断言就会红，而报错写的是「某个门禁在仓库里
+ *   留下了改动」，指向的却是**别人的**未提交改动，排查方向完全错。
+ *
+ *   门禁的职责是**判断**，写盘是**修**。两者不能是同一个按钮。
+ *
+ * @param {string} [root] 仓库根。
+ * @returns {{ pairs: number, violations: number, missing: string[], findings: Array<{name: string, details: string[]}> }} 结果。
+ */
+export function checkTranslationLinkLocales(root = PACKAGE_ROOT) {
+  const scanned = scanTranslationLinkLocales(root);
+  return {
+    pairs: scanned.pairs,
+    violations: scanned.violations,
+    missing: scanned.missing,
+    findings: scanned.findings.map(({ name, details }) => ({ name, details }))
+  };
+}
+
+/**
+ * 扫描所有双语对，把指错语言的链接**改回来**（会写盘）。
  *
  * @param {string} [root] 仓库根。
  * @returns {{ pairs: number, rewritten: number, changed: string[], details: string[] }}
  *   `changed` 是被写了盘的文件；`details` 是逐条说明。
  */
 export function fixTranslationLinkLocales(root = PACKAGE_ROOT) {
-  let rewritten = 0;
+  const scanned = scanTranslationLinkLocales(root);
   const changed = [];
   const details = [];
 
-  for (const pair of PAIRS) {
-    for (const name of [pair.primary, pair.secondary]) {
-      const full = join(root, name);
-      if (!existsSync(full)) continue;
-      const before = readFileSync(full, 'utf8');
-      const result = rewriteTranslationLinkLocales(before, pair, name);
-      if (result.rewritten === 0) continue;
-      writeFileSync(full, result.content, 'utf8');
-      rewritten += result.rewritten;
-      changed.push(name);
-      for (const d of result.details) details.push(`${name}: ${d}`);
-    }
+  for (const finding of scanned.findings) {
+    writeFileSync(finding.full, finding.after, 'utf8');
+    changed.push(finding.name);
+    for (const d of finding.details) details.push(`${finding.name}: ${d}`);
   }
 
-  return { pairs: PAIRS.length, rewritten, changed, details };
+  return { pairs: scanned.pairs, rewritten: scanned.violations, changed, details };
 }
 /* ── CLI 入口 ──────────────────────────────────────────────────── */
 
 /**
- * 把双语文档之间「指错语言」的互链改回来。
+ * 双语互链：查（`--check`，不写盘）或修（默认，写盘）。
  *
- * 当前仓库零改动 —— 互链本来是对的。它是防御性完备，不是修现存缺陷。
+ * 当前仓库两种路径都会报「无可做」—— 互链本来是对的。它是防御性完备，
+ * 不是修现存缺陷。
  *
+ * @param {string[]} [argv] 命令行参数。
+ * @param {string} [root] 仓库根（测试用它指向临时目录）。
  * @returns {number} 退出码。
  */
-export function main() {
-  const fix = fixTranslationLinkLocales();
+export function main(argv = process.argv.slice(2), root = PACKAGE_ROOT) {
+  if (argv.includes('--check')) {
+    const check = checkTranslationLinkLocales(root);
+    if (check.missing.length > 0) {
+      console.error(`✖ 双语文档缺失：${check.missing.join(', ')}`);
+      console.error('  一对文件少了一个，互链检查就成了恒真命题 —— 必须两边都在。');
+      return 1;
+    }
+    if (check.violations === 0) {
+      console.log(`双语互链正确：${check.pairs} 对文档里没有指错语言的链。`);
+      return 0;
+    }
+    console.error(`✖ 双语互链指错语言：${check.violations} 条`);
+    for (const finding of check.findings) {
+      for (const d of finding.details) console.error(`  ${finding.name}: ${d}`);
+    }
+    console.error('  修法：npm run docs:fix-links（不带 --check 时才写盘）');
+    return 1;
+  }
+
+  const fix = fixTranslationLinkLocales(root);
   if (fix.rewritten === 0) {
     console.log(`双语互链正确：${fix.pairs} 对文档无需改动。`);
     return 0;

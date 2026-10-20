@@ -102,7 +102,7 @@ implemented/simplification/x.md 里的  ../bug-fix/y.md
 **② `PACKAGE_ROOT` 多上了一层 `dirname`**
 
 `tools/archive-note.mjs` → `tools/` → 仓库根是**两层**，我写了三层，
-结果找的是 `D:\WishProject\skills\...`（上一层目录）。
+结果找的是 `D:\repo\skills\...`（上一层目录）。
 
 ★ 这两个都是**故障注入跑真流程**才暴露的。离线用例全绿时它们都存在 ——
 因为离线用例直接调 `rewriteRelativeLinks`，绕过了入口。

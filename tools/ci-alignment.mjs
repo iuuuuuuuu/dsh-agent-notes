@@ -103,8 +103,9 @@ const WORKFLOWS = [
     /* 下面这些**刻意不跑**，理由必须写清楚，否则将来没人敢动：
        - notices:check / md:links：判上游 vendored 内容与第三方归属。上游内容
          由 sync-upstream 自己按 ref 与哈希保证，归属声明只针对本仓库引入的依赖。
-       - docs:bilingual / doc:budget / release:check：判**人写的**文档与发版
-         记账。这个 job 不改 README/CHANGELOG，跑它们只会因「本来就超预算」误报。
+       - docs:bilingual / docs:links / doc:budget / release:check：判**人写的**
+         文档与发版记账。这个 job 不改 README/CHANGELOG，跑它们只会因
+         「本来就超预算」误报。
        - ci:align：判的是 verify.yml 的步骤完整性，与本 job 无关。
        - text:integrity：判全仓文本，对上游原文无意义（上游原文可能含它自己的字符）。
        - notes:coverage / supersession：判「本次提交范围」，机器人 commit 不经人审。 */
@@ -112,6 +113,7 @@ const WORKFLOWS = [
       'notices:check',
       'md:links',
       'docs:bilingual',
+      'docs:links',
       'text:integrity',
       'release:check',
       'ci:align',

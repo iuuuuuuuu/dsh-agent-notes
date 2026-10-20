@@ -47,10 +47,19 @@
  * @property {string} [identifier] 参考式的标识符（`[ref]` 里的 `ref`）。
  */
 
-/** 跳过的目标形态 —— 与仓库里既有的两处保持同一口径。 */
-function skippable(target) {
+/**
+ * 跳过的目标形态 —— 与仓库里既有的两处保持同一口径。
+ *
+ * @param {string} target 链接目标。
+ * @param {boolean} [includeAbsolute] 为真时**保留**绝对 URL 与协议相对地址。
+ * @returns {boolean} 是否跳过。
+ */
+function skippable(target, includeAbsolute = false) {
   if (target === '') return true;
-  if (target.startsWith('#')) return true;                 /* 纯锚点 */
+  /* 纯锚点永远跳过：它不指向「哪个文件」，跨语言必然不同（`#安装` vs `#install`），
+     比它只会产出误报。这一条与 includeAbsolute 无关。 */
+  if (target.startsWith('#')) return true;
+  if (includeAbsolute) return false;
   if (target.startsWith('//')) return true;                /* 协议相对 */
   if (/^[a-z][a-z0-9+.-]*:/i.test(target)) return true;     /* 绝对 URL / mailto */
   return false;
@@ -96,9 +105,12 @@ export function blankOutFences(content) {
  *   里面的 `[x](y)` 不是真链接。口径与 `tools/md-links.mjs` 一致。
  *
  * @param {string} content Markdown 原文。
+ * @param {{ includeAbsolute?: boolean }} [options] `includeAbsolute` 为真时
+ *   连绝对 URL / 协议相对地址一起返回（双语结构签名要用；查断链不要）。
  * @returns {RelativeLink[]} 相对链接列表，按在原文中的顺序。
  */
-export function collectRelativeLinks(content) {
+export function collectRelativeLinks(content, options = {}) {
+  const includeAbsolute = options.includeAbsolute === true;
   const found = [];
   const consumedRefs = new Set();
 
@@ -112,7 +124,7 @@ export function collectRelativeLinks(content) {
   let m;
   while ((m = inlineRe.exec(scannable)) !== null) {
     const target = m[3];
-    if (skippable(target)) continue;
+    if (skippable(target, includeAbsolute)) continue;
     const start = m.index + m[1].length + m[2].length;
     found.push({ kind: 'inline', start, end: start + target.length, target });
   }
@@ -132,7 +144,7 @@ export function collectRelativeLinks(content) {
   while ((m = defRe.exec(scannable)) !== null) {
     const identifier = m[1];
     const target = m[2] !== undefined ? m[2] : m[3];
-    if (skippable(target)) continue;
+    if (skippable(target, includeAbsolute)) continue;
     const offset = target === m[2] ? m.index + m[0].indexOf('<') + 1
       : m.index + m[0].lastIndexOf(target);
     found.push({
