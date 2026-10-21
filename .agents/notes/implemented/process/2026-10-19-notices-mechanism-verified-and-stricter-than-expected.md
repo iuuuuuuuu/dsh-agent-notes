@@ -57,6 +57,11 @@ Independent: 本篇不改任何门禁行为，只记录实测结论与一处认�
 依赖、声明没更新）走的是同一条判据 —— `renderNotices` 重新渲染，与已提交的
 文件逐字比对。
 
+> ⚠️ **这段结论后来被证明范围过窄，已修**：那次注入只动了**输出**（删一行、
+> 塞一个假包），而漏扫发生在**输入**侧 —— 当年的 `devDependencies()` 只读
+> `devDependencies`。真的加了 `dependencies` 后它不红。
+> 详见 [2026-10-20-notices-missed-runtime-dependencies.md](../bug-fix/2026-10-20-notices-missed-runtime-dependencies.md)。
+
 ### ★ 认知修正：它比我以为的更严
 
 查测试时发现：**node_modules 顶层有 25 个包，声明只列 3 个。**

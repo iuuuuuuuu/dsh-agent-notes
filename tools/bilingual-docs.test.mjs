@@ -16,8 +16,10 @@
  * 让全部红灯用例通过。
  */
 import { strict as assert } from 'node:assert';
-import { readFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 
 import { structureOf, verifyBilingual } from './bilingual-docs.mjs';
@@ -162,6 +164,42 @@ test('bilingual: 闭合围栏不得被当成开启围栏', () => {
   assert.equal(s.fences, 2, '围栏数量仍应是 2');
 });
 
+test('bilingual: 缩进围栏的语言标记不得丢失（数量对但 langs 空是最坑的假阴性）', () => {
+  /* 实测正则口径的分叉（.probe/probe-fence-count.mjs，同一输入两套口径比对）：
+
+     | 输入 | 正则 | mdast |
+     |---|---|---|
+     | 未闭合围栏 | fences=0, langs=["sh"] | fences=1, langs=["sh"] |
+     | 围栏内含围栏标记文本 | fences=1 | fences=2 |
+     | **缩进围栏** | fences=1, **langs=[]** | fences=1, langs=["sh"] |
+
+     ★ 第三种最坑：**数量对得上、语言标记 silently 丢掉**。两版都丢时
+       门禁照样绿 —— 正是「两版同样错 ⇒ 假绿」的形态，比误报危险得多。
+       根因是 `^\\s*` 让缩进围栏进得了 fenceLines，却进不了 marks 的
+       `(?:^|\\n)` 分支：数量与语言标记用了两套边界。 */
+  const s = structureOf(`正文\n\n  \`\`\`sh\n  echo hi\n  \`\`\`\n`);
+  assert.equal(s.fences, 1, '缩进围栏仍应算一个代码块');
+  assert.deepEqual(s.fenceLangs, ['sh'],
+    '缩进围栏的语言标记不得丢失 —— 丢失时两版都错也检测不到');
+});
+
+test('bilingual: 围栏块内含围栏标记文本时，数量按 mdast 判', () => {
+  /* 正则按「行首是 ``` 」计数，会把示例文本里的 ``` 也算成围栏行，
+     于是数量多一倍。mdast 按语法树判，示例里的 ``` 只是代码内容。 */
+  const fence = String.fromCharCode(96, 96, 96);
+  const s = structureOf(`正文\n\n${fence}md\n${fence}\nnested\n${fence}\n`);
+  assert.equal(s.fences, 2, '外层两个围栏各算一个，示例文本里的标记不算');
+});
+
+test('bilingual: 未闭合围栏仍算一个代码块', () => {
+  /* 正则数「围栏行数 / 2」，未闭合时只有一行开启标记 ⇒ 算 0 个。
+     mdast 按 CommonMark 判它延伸到文末、整段是代码 ⇒ 1 个。 */
+  const fence = String.fromCharCode(96, 96, 96);
+  const s = structureOf(`正文\n\n${fence}sh\necho hi\n`);
+  assert.equal(s.fences, 1, '未闭合围栏是一个代码块，不是 0 个');
+  assert.deepEqual(s.fenceLangs, ['sh']);
+});
+
 test('bilingual: 代码块里的 # 注释不得被当成标题', () => {
   /* 这是最容易犯的实现错误：示例里的 shell 注释 `# 安装` 若被数成标题，
      两版注释文字不同就会误报。
@@ -180,6 +218,178 @@ test('bilingual: 代码块里的 # 注释不得被当成标题', () => {
   });
   assert.deepEqual(result.errors, [],
     '代码块内的 # 注释必须被剥离 —— 若被当成标题，中文版会凭空多出一个标题');
+});
+
+test('bilingual: 未闭合围栏里的 # 注释不得被当成标题', () => {
+  /* 接上一条，但换成**未闭合围栏** —— 那是正则会失灵的形态。
+     实测（.probe/probe-bilingual-fence.mjs，同一输入两条路径比对标题层级）：
+
+     | 输入 | 正则 withoutFences | mdast blankOutFences |
+     |---|---|---|
+     | 正常围栏 | [2] | [2] 一致 |
+     | **未闭合围栏** | **[1, 1]** | **[1]** |
+     | 缩进围栏 | [2] | [2] 一致 |
+     | 行内代码含 # | [2] | [2] 一致 |
+
+     正则在未闭合围栏下抹不掉块内内容，于是示例里的 `# 假标题` 被数成
+     **又一个一级标题**；mdast 按 CommonMark 判它一路延伸到文末、
+     整段都是代码（`code@3-5`），只留下真正的 `# 标题`。
+
+     ★ 注意「1」是**一级标题**的合法长度：正文里 `# 标题` 本身就是一级。
+       第一版断言写的是 `[]`，把「真标题的长度」当成了「假标题」，
+       红灯 —— 判据错在自己这边，不在实现。 */
+  const zh = `# 标题
+
+\`\`\`sh
+# 未闭合围栏里的假标题
+`;
+  assert.deepEqual(structureOf(zh).levels, [1],
+    '只剩正文那个一级标题；围栏内的 # 注释不得再贡献一个层级');
+
+  /* 注入前提：正则口径确实会多数一个，否则这条用例分不出实现差异。 */
+  const regexFenced = zh.replace(/(^|\n)(```|~~~)[^\n]*\n[\s\S]*?\n\2[^\n]*(?=\n|$)/g, '\n');
+  const regexLevels = [];
+  for (const line of regexFenced.split('\n')) {
+    const m = /^(#{1,6})\s+\S/.exec(line);
+    if (m) regexLevels.push(m[1].length);
+  }
+  assert.deepEqual(regexLevels, [1, 1],
+    '注入前提：正则口径在未闭合围栏下必须多数出一个标题');
+  assert.notDeepEqual(structureOf(zh).levels, regexLevels,
+    '现行实现必须与正则口径不同，否则这条用例抓不住退化');
+});
+
+test('bilingual: 故障注入 —— 退回正则口径必须被上面那条抓住', () => {
+  /* Owner 硬规则：新门禁先做故障注入证明它会失败。
+     「现行实现 ≠ 正则口径」只证明两者不同，不证明**门禁会红**。
+     这里真跑一次子进程：把共用件的 blankOutFences 退回正则口径
+     （未闭合围栏抹不掉），看 structureOf 的输出。
+
+     ★ 用子进程而不是进程内改源码：模块已加载，改文件不影响已绑定的引用，
+       进程内「注入」会静默失效 —— 那是假绿。 */
+  const dir = mkdtempSync(join(tmpdir(), 'an-bil-fi-'));
+  try {
+    mkdirSync(join(dir, 'tools'), { recursive: true });
+    for (const rel of ['tools/bilingual-docs.mjs', 'tools/markdown-links.mjs', 'tools/bilingual-links.mjs']) {
+      cpSync(join(ROOT, rel), join(dir, rel));
+    }
+    /* mdast 在共用件里被 import，缺 node_modules 会崩在模块解析上 ——
+       那是夹具坏了，不是被测退化。 */
+    symlinkSync(join(ROOT, 'node_modules'), join(dir, 'node_modules'), 'junction');
+
+    const shared = join(dir, 'tools', 'markdown-links.mjs');
+    let src = readFileSync(shared, 'utf8');
+    const anchor = 'export function blankOutFences(content) {';
+    assert.ok(src.includes(anchor), '夹具与实现脱节：找不到 blankOutFences');
+    const fence = String.fromCharCode(96, 96, 96);
+    src = src.replace(anchor, `${anchor}
+  return content.replace(/(^|\\n)(${fence}|~~~)[^\\n]*\\n[\\s\\S]*?\\n\\2[^\\n]*(?=\\n|$)/g,
+    (w) => w.replace(/[^\\n]/g, ' '));`);
+    writeFileSync(shared, src, 'utf8');
+
+    writeFileSync(join(dir, 'run.mjs'), [
+      "import { structureOf } from './tools/bilingual-docs.mjs';",
+      `const zh = '# 标题\\n\\n${fence}sh\\n# 未闭合围栏里的假标题\\n';`,
+      'process.stdout.write(JSON.stringify(structureOf(zh).levels));',
+      ''
+    ].join('\n'), 'utf8');
+
+    const result = spawnSync(process.execPath, ['run.mjs'],
+      { cwd: dir, encoding: 'utf8', windowsHide: true });
+    assert.equal(result.status, 0, `探针必须正常退出：${(result.stderr ?? '').slice(0, 200)}`);
+    /* ★ 注入后期望的正是「红」：共用件被改回正则口径后，未闭合围栏里的
+       假标题必须重新出现在 levels 里（[1,1]）。若它仍是 [1]，说明这次
+       注入没有真的落到执行路径上 —— 那条绿灯是假的。 */
+    assert.equal(result.stdout, '[1,1]',
+      '退化为正则口径后必须多数出假标题（[1,1]）—— 否则注入没生效，上面那条绿是假的');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  /* 反向：确认正则口径确实会多数一个 —— 否则上面那句绿得没有意义，
+     它可能只是两者都对。这一条让「会红」变成可观测的事实。 */
+  const fence = String.fromCharCode(96, 96, 96);
+  const zh = `# 标题
+
+${fence}sh
+# 未闭合围栏里的假标题
+`;
+  const regexFenced = zh.replace(/(^|\n)(```|~~~)[^\n]*\n[\s\S]*?\n\2[^\n]*(?=\n|$)/g, '\n');
+  const regexLevels = [];
+  for (const line of regexFenced.split('\n')) {
+    const m = /^(#{1,6})\s+\S/.exec(line);
+    if (m) regexLevels.push(m[1].length);
+  }
+  assert.deepEqual(regexLevels, [1, 1],
+    '注入前提：正则口径必须真的多数出假标题，否则「现行实现绿」说明不了任何事');
+});
+
+test('bilingual: 故障注入 —— 围栏计数退回正则口径必须被抓住', () => {
+  /* Owner 硬规则：新门禁先做故障注入证明它会失败。
+     上面三条（缩进围栏 / 嵌套标记 / 未闭合）只断言「现在是对的」，
+     而对修复前的正则实现同样成立。这里把 `structureOf` 的围栏计数与
+     语言标记改回正则口径，真跑子进程，看输出是否变红。
+
+     ★ 注入点在 `bilingual-docs.mjs` 而不是共用件：那三处用的是
+       `codeNodes.length` 与 `node.lang`，改回正则即是本次修复前的形态。
+       第一版注入改的是共用件的 blankOutFences，与围栏计数无关，
+       于是「红」证明的是另一件事 —— 注入必须对准被测的那一行。 */
+  const dir = mkdtempSync(join(tmpdir(), 'an-bil-fi2-'));
+  try {
+    mkdirSync(join(dir, 'tools'), { recursive: true });
+    for (const rel of ['tools/bilingual-docs.mjs', 'tools/markdown-links.mjs', 'tools/bilingual-links.mjs']) {
+      cpSync(join(ROOT, rel), join(dir, rel));
+    }
+    symlinkSync(join(ROOT, 'node_modules'), join(dir, 'node_modules'), 'junction');
+
+    const target = join(dir, 'tools', 'bilingual-docs.mjs');
+    let src = readFileSync(target, 'utf8');
+    const anchor = '  return { levels, fences: codeNodes.length, fenceLangs, tables, links };';
+    assert.ok(src.includes(anchor), '夹具与实现脱节：找不到围栏计数的返回行');
+    const fence = String.fromCharCode(96, 96, 96);
+    src = src.replace(anchor, [
+      '  const __lines = text.match(/^\\s*(```|~~~)/gm) ?? [];',
+      '  const __marks = [...text.matchAll(/(?:^|\\n)(?:```|~~~)([^\\n]*)/g)].map((m) => m[1].trim());',
+      '  return { levels, fences: Math.floor(__lines.length / 2), fenceLangs: __marks.filter((_, i) => i % 2 === 0), tables, links };'
+    ].join('\n'));
+    writeFileSync(target, src, 'utf8');
+
+    /* 三个退化形态各跑一次：缩进围栏（langs 丢）、未闭合（fences=0）、
+       嵌套标记（fences 多数一个）。 */
+    const inputs = {
+      '缩进围栏': `正文\n\n  ${fence}sh\n  echo hi\n  ${fence}\n`,
+      '未闭合围栏': `正文\n\n${fence}sh\necho hi\n`,
+      '嵌套标记': `正文\n\n${fence}md\n${fence}\nnested\n${fence}\n`
+    };
+    const expected = { '缩进围栏': 'langs 丢失', '未闭合围栏': 'fences=0', '嵌套标记': 'fences 多数一个' };
+    for (const [name, markdown] of Object.entries(inputs)) {
+      writeFileSync(join(dir, 'run.mjs'), [
+        "import { structureOf } from './tools/bilingual-docs.mjs';",
+        `const s = structureOf(${JSON.stringify(markdown)});`,
+        "process.stdout.write(s.fences + '|' + JSON.stringify(s.fenceLangs));",
+        ''
+      ].join('\n'), 'utf8');
+      const result = spawnSync(process.execPath, ['run.mjs'],
+        { cwd: dir, encoding: 'utf8', windowsHide: true });
+      assert.equal(result.status, 0, `${name} 探针必须正常退出：${(result.stderr ?? '').slice(0, 200)}`);
+      assert.notEqual(result.stdout, '',
+        `${name}：正则口径必须给出非空输出，否则注入没生效（${expected[name]}）`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+
+  /* 反向对照：现行实现在这三个输入上必须给出**正确**答案。
+     否则上面「注入后非空」可能只是正则与现行输出恰好相同。 */
+  const fence = String.fromCharCode(96, 96, 96);
+  const indented = structureOf(`正文\n\n  ${fence}sh\n  echo hi\n  ${fence}\n`);
+  assert.deepEqual([indented.fences, indented.fenceLangs], [1, ['sh']],
+    '现行实现在缩进围栏下必须数量与语言标记都对');
+  const unclosed = structureOf(`正文\n\n${fence}sh\necho hi\n`);
+  assert.deepEqual([unclosed.fences, unclosed.fenceLangs], [1, ['sh']],
+    '现行实现在未闭合围栏下必须算 1 个且语言标记不丢');
+  const nested = structureOf(`正文\n\n${fence}md\n${fence}\nnested\n${fence}\n`);
+  assert.equal(nested.fences, 2, '现行实现下示例文本里的围栏标记不算代码块');
 });
 
 test('bilingual: 两版同步加同一节必须放行（对照）', () => {

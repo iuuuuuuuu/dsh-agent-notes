@@ -13,7 +13,7 @@
  */
 import { strict as assert } from 'node:assert';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -51,6 +51,27 @@ function run(dir, args = []) {
   });
   return { code: r.status ?? -1, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 }
+
+test('doc-budget: 空预算清单必须失败，包括 --update', () => {
+  const dir = makeRepo({});
+  try {
+    const manifest = join(dir, 'tools', 'doc-budget.json');
+    const original = readFileSync(manifest);
+    // 固定到过去，避免文件系统时间精度使同内容重写逃过检查。
+    const sentinel = new Date('2000-01-01T00:00:00Z');
+    utimesSync(manifest, sentinel, sentinel);
+    const originalMtime = statSync(manifest).mtimeMs;
+    for (const args of [[], ['--update']]) {
+      const result = run(dir, args);
+      assert.equal(result.code, 2, `空清单不得通过：${JSON.stringify(args)}\n${result.out}`);
+      assert.match(result.out, /预算清单至少需要一个预算项/);
+      assert.deepEqual(readFileSync(manifest), original, '失败时清单原始内容必须保持不变');
+      assert.equal(statSync(manifest).mtimeMs, originalMtime, '失败时不得重写相同内容');
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('doc-budget: 超预算 → 必须红', () => {
   const dir = makeRepo({ 'AGENTS.md': 10 });
@@ -121,9 +142,16 @@ test('doc-budget: --update 只在超预算时放宽，绝不收紧', () => {
   const dir = makeRepo({ 'AGENTS.md': 100 });
   try {
     writeFileSync(join(dir, 'AGENTS.md'), '短文档', 'utf8');
+    const manifest = join(dir, 'tools', 'doc-budget.json');
+    const original = readFileSync(manifest);
+    const sentinel = new Date('2000-01-01T00:00:00Z');
+    utimesSync(manifest, sentinel, sentinel);
+    const originalMtime = statSync(manifest).mtimeMs;
     assert.equal(run(dir, ['--update']).code, 0, '--update 应成功退出');
-    const after = JSON.parse(readFileSync(join(dir, 'tools', 'doc-budget.json'), 'utf8'));
+    const after = JSON.parse(readFileSync(manifest, 'utf8'));
     assert.equal(after.budgets['AGENTS.md'], 100, '在预算内时不得收紧（必须保持 100，不能变成 3）');
+    assert.deepEqual(readFileSync(manifest), original, '未超预算时原始内容必须保持不变');
+    assert.equal(statSync(manifest).mtimeMs, originalMtime, '未超预算时不得重写相同内容');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

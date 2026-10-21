@@ -15,6 +15,7 @@ import { basename, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { ARCHIVED_CARD_PATCH_ID, DRAWER_PATCH_ID, injectResponsiveCss, RESPONSIVE_CSS, RESPONSIVE_STYLE_ID } from '../lib/board-responsive.js';
+import { MARKDOWN_TABLE_PATCH_ID } from '../lib/board-markdown.js';
 import { buildBoard, buildBoardFromRoots, buildInlineData, parseNote, scanNotes } from '../lib/board.js';
 import { firstLines, isInside, registerBoardRoutes, renderNoticePage, revisionOf } from '../lib/board-route.js';
 import { clearGitProbeCache, listGitChildren, originOf, resolveNotesRoots } from '../lib/notes.js';
@@ -396,14 +397,18 @@ test('board-route: 正文含 HTML 片段时不得破坏注入的脚本块', asyn
     /* ★ 数量从「上游 + 补丁数」算，不写死「补丁 1 个」。
        它原本写死 `upstream + 1`，加归档卡补丁后就少算一个 ——
        而**开闭标签必须配平**才是这条测试真正要守的（数据不能截断脚本块）。
-       写死数量会让「新增一个补丁」变成测试失败，而那不是缺陷。 */
-    const expected = upstream + 2;
-    assert.equal(scriptTags, expected, `注入后 <script 应恰好 ${expected} 个（上游 ${upstream} + 补丁 2），实际 ${scriptTags}`);
+       写死数量会让「新增一个补丁」变成测试失败，而那不是缺陷。
+       2026-10-21 表格补丁落地：+2 → +3（补丁数变了，判据没变）。 */
+    const PATCHES = 3;
+    const expected = upstream + PATCHES;
+    assert.equal(scriptTags, expected, `注入后 <script 应恰好 ${expected} 个（上游 ${upstream} + 补丁 ${PATCHES}），实际 ${scriptTags}`);
     assert.equal(closeTags, expected, `注入后 </script> 应恰好 ${expected} 个，实际 ${closeTags}`);
     assert.equal((html.match(new RegExp(`id="${DRAWER_PATCH_ID}"`, 'g')) ?? []).length, 1,
       '抽屉补丁脚本必须恰好一个');
     assert.equal((html.match(new RegExp(`id="${ARCHIVED_CARD_PATCH_ID}"`, 'g')) ?? []).length, 1,
       '归档卡补丁脚本必须恰好一个');
+    assert.equal((html.match(new RegExp(`id="${MARKDOWN_TABLE_PATCH_ID}"`, 'g')) ?? []).length, 1,
+      '表格补丁脚本必须恰好一个');
 
     // 数据必须能完整解析回来，且正文原样保留。
     const start = html.indexOf('window.__INLINE_DATA__ = ') + 'window.__INLINE_DATA__ = '.length;
@@ -460,11 +465,15 @@ test('board-route: UI 响应里必须带窄屏适配样式，且不破坏上游�
        才是这条断言真正要防的。 */
     /* ★ 两个补丁都要剥。判据（剥干净后与「只注入数据」逐字节一致）一个字没改 ——
        它守的东西没变；只是「干净」的定义要跟着注入物数量更新。
-       原来只剥 DRAWER_PATCH_ID，剥漏了归档卡那个 → 断言失败。 */
+       原来只剥 DRAWER_PATCH_ID，剥漏了归档卡那个 → 断言失败。
+       2026-10-21 表格补丁落地后同样剥漏 → 断言再次失败并现场抓到：
+       这条断言的价值就在于「新增注入必须同时登记到剥离清单」，
+       否则「只加不改」的承诺会悄悄失效。 */
     const stripped = html
       .replace(new RegExp(`<style id="${RESPONSIVE_STYLE_ID}">[\\s\\S]*?</style>\\n?`), '')
       .replace(new RegExp(`<script id="${DRAWER_PATCH_ID}">[\\s\\S]*?</script>\\n?`), '')
-      .replace(new RegExp(`<script id="${ARCHIVED_CARD_PATCH_ID}">[\\s\\S]*?</script>\\n?`), '');
+      .replace(new RegExp(`<script id="${ARCHIVED_CARD_PATCH_ID}">[\\s\\S]*?</script>\\n?`), '')
+      .replace(new RegExp(`<script id="${MARKDOWN_TABLE_PATCH_ID}">[\\s\\S]*?</script>\\n?`), '');
     const expected = original.replace(
       'window.__INLINE_DATA__ = null;',
       () => `window.__INLINE_DATA__ = ${JSON.stringify(JSON.parse(

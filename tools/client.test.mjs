@@ -102,6 +102,7 @@ function loadClient(options = {}) {
     location: { search: options.search ?? '' },
     /* 样式注入短路：getElementById 返回非 null 即视为已注入。 */
     document: {
+      baseURI: options.baseURI ?? 'https://example.test/',
       documentElement: { lang: 'zh' },
       getElementById: () => ({}),
       createElement: () => ({}),
@@ -264,8 +265,8 @@ test('apply: view 座位只登记注册函数，不立即注册（依赖开关�
  * @param {Record<string, any>} [services] 其它可注入服务。
  * @returns {object} 组件、记录与作用域。
  */
-function harness(slotsOptions = {}, services = {}) {
-  const loaded = loadClient();
+function harness(slotsOptions = {}, services = {}, clientOptions = {}) {
+  const loaded = loadClient(clientOptions);
   const { slots, log } = makeSlots(slotsOptions);
   const { ctx, log: ctxLog } = makeCtx(slots, services);
   loaded.client.apply(ctx);
@@ -479,6 +480,26 @@ test('sidebar: 组件必须把宿主 props 原样转交下去', () => {
   assert.match(frame.props.src, /session=s-42/,
     'props 没转交下去的话这里会是空 session —— 正是 409 的成因');
   assert.match(frame.props.src, /cwd=%2Frepo/, '会话目录也要带上去');
+});
+
+test('sidebar: iframe 地址保留页面基址的挂载前缀', () => {
+  for (const baseURI of ['https://example.test/', 'https://example.test/dsh/', 'https://example.test/nested/dsh/']) {
+    const sidebar = makeBetterSidebar();
+    const { Component, react } = harness({}, { betterSidebar: sidebar.service }, { baseURI });
+    Component({ sessionId: 's1', useProjection: () => ({ enabled: true }), bindingOf: () => null });
+    const tab = sidebar.log.registered[0];
+    assert.ok(tab, '必须先通过真实注册路径取得看板');
+    tab.component({ scope: { sessionId: 's /?&中', cwd: '/repo with spaces/中文' }, ctx: {}, visible: true });
+    const frame = react.created.filter((el) => el.type === 'iframe').pop();
+    assert.ok(frame, '必须实际渲染 iframe');
+    const actual = new URL(frame.props.src, baseURI);
+    const expected = new URL('agent-notes/ui', baseURI);
+    assert.equal(actual.origin, expected.origin, 'iframe 必须保持同源');
+    assert.equal(actual.pathname, expected.pathname, `挂载前缀不得丢失：${baseURI}`);
+    assert.equal(actual.searchParams.get('session'), 's /?&中', '会话参数必须完整编码并可还原');
+    assert.equal(actual.searchParams.get('cwd'), '/repo with spaces/中文', '目录参数必须完整编码并可还原');
+    assert.deepEqual([...actual.searchParams.keys()], ['session', 'cwd'], '参数内容不得注入额外查询项');
+  }
 });
 
 test('sidebar: 开关关闭时注销侧边栏 tab', () => {

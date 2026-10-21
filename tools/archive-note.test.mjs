@@ -28,7 +28,7 @@ import { join } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { replaceOutsideFences, rewriteRelativeLinks } from './archive-note.mjs';
+import { rewriteRelativeLinks } from './archive-note.mjs';
 
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SCRIPTS = join(PACKAGE_ROOT, 'skills', 'agent-notes', 'scripts');
@@ -88,13 +88,16 @@ function makeRepo(status = 'Status: implemented') {
  * @param {string} dir 仓库目录。
  * @param {string} script 脚本名。
  * @param {string[]} [args] 参数。
- * @returns {{ code: number, out: string }} 结果。
+ * @returns {{ code: number, signal: string|null, out: string }} 结果。
  */
 function run(dir, script, args = []) {
   const r = spawnSync(NODE, [join(dir, 'skills', 'agent-notes', 'scripts', script), ...args], {
     cwd: dir, encoding: 'utf8', windowsHide: true, env: { ...process.env }
   });
-  return { code: r.status ?? -1, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+  /* 带上 signal：Windows 上子 node 崩溃时 status 会是一个 NTSTATUS 数值
+     （实测见过 3221226505 = 0xC0000409），只有 signal/status 一起看才分得清
+     「脚本按约定 exit 1」和「子进程崩了」。别把崩溃当成「非零就是对的」。 */
+  return { code: r.status ?? -1, signal: r.signal ?? null, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 }
 
 test('archive:note: 归档后门禁绿，且 manifest 由脚本算出', () => {
@@ -167,7 +170,7 @@ test('archive:note: 缺参数时非零退出', () => {
   const dir = makeRepo();
   try {
     const r = run(dir, 'archive-agent-note.ts');
-    assert.equal(r.code, 1, `缺参数必须 exit 1，实际 ${r.code}`);
+    assert.equal(r.code, 1, `缺参数必须 exit 1（崩溃不算，signal=${String(r.signal)}），实际 ${r.code}`);
     assert.match(r.out, /Usage/, '必须打印用法');
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -324,19 +327,54 @@ test('archive-note 链接改写: 幂等 —— 已经是归档后形式的不再
   }
 });
 
-test('archive-note 链接改写: replaceOutsideFences 认两种围栏且不误伤', () => {
+test('archive-note 链接改写: 围栏内的示例不得改写（走真实生产路径）', () => {
+  /* 原先这里测的是 `replaceOutsideFences` —— 一个只被这条测试使用的
+     逐行状态机。它从未进过生产路径（`rewriteRelativeLinks` 走的是共用件
+     `blankOutFences`），于是它成了第五套围栏口径，而测试还写着
+     「与 md-links 完全一致」。实测两套口径在两种输入下分叉：
+
+     | 输入 | 状态机 | mdast |
+     |---|---|---|
+     | 未闭合围栏 | 区内 [3,4,5] | 区内 [3,4] |
+     | 嵌套标记文本 | 区内 [2,3,5,6,7,8] | 区内 [2,3,5,7] |
+
+     第二种会让本该改写的正文链接被跳过 —— 归档后即断链。
+     所以删掉那个函数，改为直接验 `rewriteRelativeLinks` 的真实行为。 */
   const src = [
-    '```js', 'const a = 1;', '```',
-    '外面这行要改',
-    '~~~', 'tilde 围栏内', '~~~',
-    '又一行要改', ''
+    '见 [正常](../bug-fix/a.md)。',
+    '',
+    '```js',
+    'const a = 1;',
+    '见 [示例](../bug-fix/example.md);',
+    '```',
+    '',
+    '~~~',
+    '见 [示例2](../bug-fix/example2.md)',
+    '~~~',
+    '',
+    '见 [另一条](../feature/b.md)。',
+    ''
   ].join('\n');
-  let hits = 0;
-  const out = replaceOutsideFences(src, (line) => {
-    if (line.includes('要改')) hits += 1;
-    return line;
-  });
-  assert.equal(hits, 2, '只该命中两行围栏外的');
-  assert.ok(out.includes('const a = 1;'), 'js 围栏内不动');
-  assert.ok(out.includes('tilde 围栏内'), 'tilde 围栏内也不动');
+
+  const s = sandbox();
+  try {
+    const from = join(s.notes, 'implemented', 'process');
+    const to = join(s.notes, 'archived', 'process');
+    const result = rewriteRelativeLinks(src, from, to, s.notes);
+
+    /* 围栏外两条都要改写（归档后要跨 lifecycle，所以补 implemented/）。 */
+    assert.match(result.content, /\[正常\]\(\.\.\/\.\.\/implemented\/bug-fix\/a\.md\)/,
+      '围栏外的链接必须被改写');
+    assert.match(result.content, /\[另一条\]\(\.\.\/\.\.\/implemented\/feature\/b\.md\)/,
+      '围栏外的链接必须被改写');
+
+    /* 围栏内两条必须原样 —— 那是历史示例，改了会篡改快照。 */
+    assert.ok(result.content.includes('见 [示例](../bug-fix/example.md);'),
+      'js 围栏内的示例不得改写');
+    assert.ok(result.content.includes('见 [示例2](../bug-fix/example2.md)'),
+      'tilde 围栏内的示例不得改写');
+    assert.equal(result.changed, 2, `只该改两条，实际 ${result.changed}`);
+  } finally {
+    rmSync(s.dir, { recursive: true, force: true });
+  }
 });

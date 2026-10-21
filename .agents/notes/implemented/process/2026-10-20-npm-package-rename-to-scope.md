@@ -73,14 +73,18 @@ You may not perform that action with these credentials.
 
 | 改 | 不改 |
 |---|---|
-| `package.json` 的 `name` | `cordis.patch.yml` 的 `name: "dsh-agent-notes"` |
-| `package-lock.json` 两处 `name` | 目录名（仓库仍叫 dsh-agent-notes） |
-| `tools/verify-plugin.mjs` 的包名断言 | README 里的 dsh-agent-notes |
-| `THIRD_PARTY_NOTICES.md` 里的包名 | 所有笔记里的 dsh-agent-notes |
+| `package.json` 的 `name` | 目录名（仓库仍叫 dsh-agent-notes） |
+| `package-lock.json` 两处 `name` | README 里的 dsh-agent-notes |
+| `tools/verify-plugin.mjs` 的包名断言 | 所有笔记里的 dsh-agent-notes |
+| `THIRD_PARTY_NOTICES.md` 里的包名 | |
+| **`cordis.patch.yml` 的 `name`** | |
 
-**改错的后果**：`cordis.patch.yml` 的 `name` 是 **DSH 界面显示的插件名**，
-`lib/client.js` 的 `__ModuleLoader__.load({id:...})` 是 **宿主加载插件用的 id**。
-改了它们，**DSH 会找不到这个插件**。
+> ⚠️ **本表原先把 `cordis.patch.yml` 的 `name` 列在「不改」里，那是错的，
+> 已造成一次线上故障**（插件客户端半边在发版后静默消失）。更正与原因见
+> [2026-10-20-patch-name-is-a-module-specifier.md](2026-10-20-patch-name-is-a-module-specifier.md)。
+> 一句话：`cordis.patch.yml` 的 `name` **不是**界面显示名，而是宿主拿去
+> `import` 的**模块 specifier**；改了包名却不改它，宿主解析不到，
+> 客户端半边被静默跳过。
 
 ★ 而 `lib/client.js` 那处**确实要改**（包名变了，门禁
 `verify-plugin.mjs:130` 要求信封 id 等于 `pkg.name`，否则客户端加载不了）——

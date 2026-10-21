@@ -15,8 +15,10 @@
  * 而声明已经没有内容了。所以这里断言的是**内容事实**，不是文件存在。
  */
 import { strict as assert } from 'node:assert';
-import { readFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 
 import { checkNotices, renderNotices } from './notices.mjs';
@@ -103,6 +105,189 @@ test('notices: 依赖清单必须含传递依赖，且许可证来自真实包�
   /* 直接/传递要能区分：混在一起会让读者无法判断哪些是自己声明的。 */
   assert.match(text, /\|\s*直接\s*\|/, '必须区分直接依赖');
   assert.match(text, /\|\s*传递\s*\|/, '必须区分传递依赖');
+});
+
+/**
+ * 造一个只覆盖 `package.json` 的读取器，其余文件仍读真仓库。
+ *
+ * 用途：往 `dependencies` 里**注入**一个运行时依赖，验证归属声明必须列出它。
+ * 这正是本次踩到的坑 —— `notices.mjs` 原本只读 `devDependencies`
+ * （注释写着「`dependencies` / `peerDependencies` 为空」），于是真的加了
+ * 运行时依赖后，它既不在「随插件发布」清单里也不在「开发依赖」清单里，
+ * 而 `notices:check` 照样绿。
+ *
+ * 同样**不写盘**：改写真 `package.json` 会让并行测试读到改到一半的内容。
+ *
+ * @param {Record<string, Record<string, string>>} patch 要覆盖的依赖字段。
+ * @returns {{ read: (name: string) => string }} `renderNotices` 的参数对象。
+ */
+function withDependencies(patch) {
+  return {
+    read: (name) => (name === 'package.json'
+      ? JSON.stringify({ ...JSON.parse(readFileSync(join(ROOT, name), 'utf8')), ...patch }, null, 2)
+      : readFileSync(join(ROOT, name), 'utf8'))
+  };
+}
+
+test('notices: 运行时依赖必须出现在「随插件发布」清单里', () => {
+  /* 这是真实缺陷的回归用例：加了 `dependencies` 之后，旧实现只扫
+     `devDependencies`，那份依赖从声明里整体消失，而 check 报绿。
+     MIT 的归属义务不区分依赖来自哪个字段。 */
+  const text = renderNotices(withDependencies({
+    dependencies: { 'mdast-util-from-markdown': '^2.1.0' }
+  }));
+
+  const runtime = text.slice(text.indexOf('## 2. 运行时依赖'), text.indexOf('## 3. 开发依赖'));
+  assert.match(runtime, /mdast-util-from-markdown/,
+    '运行时依赖必须列在「随插件发布」清单里 —— 只扫 devDependencies 会静默漏掉它');
+  /* 真实仓库里确实有它，这句同时是「注入真的生效了」的对照。 */
+  assert.ok(text.includes('mdast-util-from-markdown'), '注入必须真的改变了输出');
+});
+
+test('notices: 同一依赖被运行时与开发同时声明时，按运行时记', () => {
+  /* 配置写重了不该让声明漏项 —— 按更保守的一侧（随插件发布）记，
+     读者会以为它被分发出去，那是安全的方向。 */
+  const text = renderNotices(withDependencies({
+    dependencies: { debug: '^4.0.0' },
+    devDependencies: { debug: '^4.0.0' }
+  }));
+
+  /* dev 段要从「开发依赖」切到「本插件自身」，否则文末的本包说明也被算进来
+     —— 那会让这条断言因为别的内容而红，排查方向全错。 */
+  const dev = text.slice(
+    text.indexOf('## 3. 开发依赖'),
+    text.indexOf('## 4. 本插件自身')
+  );
+  const devRows = dev.split('\n').filter((line) => line.startsWith('| `'));
+  assert.ok(devRows.every((row) => !row.includes('`debug`')),
+    `debug 不该同时出现在开发依赖清单里，实际：${devRows.join(' ; ')}`);
+});
+
+test('notices: peerDependencies 也算运行时依赖', () => {
+  /* peerDependencies 装到使用者机器上的方式与 dependencies 相同，
+     归属披露不该漏这一侧。 */
+  const text = renderNotices(withDependencies({
+    peerDependencies: { 'some-peer': '^1.0.0' }
+  }));
+
+  const runtime = text.slice(text.indexOf('## 2. 运行时依赖'), text.indexOf('## 3. 开发依赖'));
+  assert.match(runtime, /some-peer/, 'peerDependencies 必须出现在运行时清单');
+});
+
+test('notices: 声明里的运行时清单必须覆盖真实 package.json', () => {
+  /* 兜底：将来任何人再往 dependencies 加包而忘了跑 npm run notices，
+     这条会红 —— 声明与真实清单脱节，正是本次那个假绿的形态。 */
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+  const text = renderNotices();
+  const runtime = text.slice(text.indexOf('## 2. 运行时依赖'), text.indexOf('## 3. 开发依赖'));
+
+  for (const [name, range] of Object.entries(pkg.dependencies ?? {})) {
+    assert.match(runtime, new RegExp(`\\\`${name.replace(/[/\\\\]/g, '\\\\$&')}\``),
+      `真实声明的运行时依赖 ${name} 必须出现在声明里（跑 npm run notices）`);
+    assert.ok(range.trim() !== '', `${name} 的版本约束不能为空`);
+  }
+});
+
+/**
+ * 造一个可自检的 notices 副本（目录结构与真仓库一致）。
+ *
+ * ★ 两处必需，少了都会让夹具在错误的地方失败：
+ *   1. `tools/upstream-manifest.json` 必须在 `tools/` 下 ——
+ *      `vendoredSource` 按相对路径读它，拍平会得到伪造的 ENOENT；
+ *   2. 必须挂 `node_modules` —— `spdx-expression-parse` 解析不到时
+ *      进程以 ERR_MODULE_NOT_FOUND 崩，那是夹具的问题，不是被测退化。
+ *
+ * @returns {string} 副本根目录。
+ */
+function stageNotices() {
+  const dir = mkdtempSync(join(tmpdir(), 'an-notices-fi-'));
+  mkdirSync(join(dir, 'tools'), { recursive: true });
+  for (const rel of ['tools/notices.mjs', 'tools/upstream-manifest.json', 'package.json', 'upstream.json']) {
+    cpSync(join(ROOT, rel), join(dir, rel));
+  }
+  symlinkSync(join(ROOT, 'node_modules'), join(dir, 'node_modules'), 'junction');
+  return dir;
+}
+
+/**
+ * 在副本里跑一次「注入依赖后的 renderNotices 的结果」，返回输出。
+ *
+ * @param {string} dir 副本根。
+ * @param {(src: string) => string} mutate 对源码的退化改写。
+ * @param {Record<string, Record<string, string>>} injected 注入的依赖字段。
+ * @returns {{ status: number | null, out: string }} 退出码与合并输出。
+ */
+function probeRendered(dir, mutate, injected) {
+  const noticesPath = join(dir, 'tools', 'notices.mjs');
+  writeFileSync(noticesPath, mutate(readFileSync(noticesPath, 'utf8')), 'utf8');
+  const probe = join(dir, 'probe.mjs');
+  writeFileSync(probe, [
+    "import { renderNotices } from './tools/notices.mjs';",
+    "import { readFileSync, writeFileSync } from 'node:fs';",
+    `const injected = ${JSON.stringify(JSON.stringify(injected))};`,
+    'const pkg = JSON.parse(readFileSync("package.json", "utf8"));',
+    'const text = renderNotices({',
+    '  read: (name) => (name === "package.json"',
+    '    ? JSON.stringify({ ...pkg, ...JSON.parse(injected) }, null, 2)',
+    '    : readFileSync(name, "utf8"))',
+    '});',
+    'const rt = text.slice(text.indexOf("## 2."), text.indexOf("## 3."));',
+    'writeFileSync("result.txt", rt.includes("faul-dep") ? "HAS" : "MISSING");',
+    ''
+  ].join('\n'), 'utf8');
+  const result = spawnSync(process.execPath, [probe], { cwd: dir, encoding: 'utf8', windowsHide: true });
+  let marker = '';
+  try { marker = readFileSync(join(dir, 'result.txt'), 'utf8'); } catch { /* 崩了就没有 marker */ }
+  return { status: result.status, out: marker || `${result.stdout ?? ''}${result.stderr ?? ''}` };
+}
+
+test('notices: 退化成「只扫 devDependencies」时运行时依赖必须漏出（故障注入）', () => {
+  /* 这是本次真实缺陷的形态。Owner 硬规则：新门禁必须先证明它会红。
+     只断言「现在是对的」不够 —— 那条断言对上文那个假绿同样成立
+     （它当年也是绿的，只是验错了对象）。 */
+  const dir = stageNotices();
+  try {
+    const scan = `  for (const group of ['dependencies', 'peerDependencies']) {
+    for (const name of Object.keys(pkg[group] ?? {})) walk(name, { direct: true, scope: 'runtime' });
+  }
+`;
+    const { out } = probeRendered(
+      dir,
+      (src) => {
+        assert.ok(src.includes(scan), '夹具与实现脱节：找不到运行时依赖扫描段');
+        return src.replace(scan, '  /* 退化：只扫 devDependencies */\n');
+      },
+      { dependencies: { 'faul-dep': '^1.0.0' } }
+    );
+    assert.equal(out, 'MISSING',
+      '退化成「只扫 devDependencies」时，运行时依赖必须从声明里消失 —— 否则说明新用例抓不住它');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notices: npmDependencies 不接注入的 read 时必须暴露问题（故障注入）', () => {
+  /* 第二个真实缺陷：依赖清单自己读真 package.json，注入的
+     package.json 只被 renderNotices 用了一次。切断注入通道后，
+     注入的 peerDependencies 必须消失；就算实现改成显式抛错，
+     也同样算拦住 —— 崩掉比静默通过好。 */
+  const dir = stageNotices();
+  try {
+    const { status, out } = probeRendered(
+      dir,
+      (src) => {
+        assert.ok(src.includes('const deps = npmDependencies(read);'),
+          '夹具与实现脱节：找不到 npmDependencies(read) 调用');
+        return src.replace('const deps = npmDependencies(read);', 'const deps = npmDependencies();');
+      },
+      { peerDependencies: { 'faul-dep': '^1.0.0' } }
+    );
+    const caught = out === 'MISSING' || status !== 0;
+    assert.ok(caught,
+      `切断注入通道后必须暴露问题（漏项或崩溃），实际 status=${status} out=${JSON.stringify(out)}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('notices: 提交的 THIRD_PARTY_NOTICES.md 与当前内容一致', () => {

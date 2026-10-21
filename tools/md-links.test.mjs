@@ -25,9 +25,10 @@
  * 每批都用 try/finally 还原，避免失败时把仓库改脏。
  */
 import { strict as assert } from 'node:assert';
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 
 import { verifyMarkdownLinks, verifyMarkdownLinksIn } from './md-links.mjs';
@@ -94,6 +95,27 @@ function withAppended(markdown, extraFiles = {}) {
     rmSync(staging, { recursive: true, force: true });
   }
 }
+
+test('md-links: docs/ 里的相对链接也在检查范围内（含嵌套目录）', () => {
+  /* 复审 r1 的 P1：`tools/md-links.mjs` 的 `walk('docs')` **没有任何用例守着**。
+     上面那条真仓库用例只断言 `checked > 20` / `links > 30`，而笔记树自己就
+     远超这个数 —— 把 `walk('docs')` 整行删掉，它照样绿。
+     所以这里造一份迷你仓库：`docs/` 里的断链必须被点名，且必须**恰好一处**
+     （证明扫到了、且没有顺带把别的东西算进来）。 */
+  const root = mkdtempSync(join(tmpdir(), 'an-mdl-docs-'));
+  try {
+    mkdirSync(join(root, 'docs', 'nested'), { recursive: true });
+    writeFileSync(join(root, 'README.md'), '# 顶层\n\n[自指](README.md)\n');
+    writeFileSync(join(root, 'docs', 'nested', 'x.md'), '# x\n\n见 [缺失](gone-zzz.md)。\n');
+    const result = verifyMarkdownLinks({ root });
+    assert.equal(result.checked, 2, `顶层文档 + docs/ 都得算进来，实际 ${result.checked}`);
+    assert.equal(result.errors.length, 1, `必须恰好一处断链，实际：${result.errors.join('; ')}`);
+    assert.match(result.errors[0], /docs\/nested\/x\.md/, '必须指出是 docs/ 里那篇');
+    assert.match(result.errors[0], /gone-zzz\.md/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test('md-links: 当前仓库所有相对链接都可达', () => {
   const result = verifyMarkdownLinks();
@@ -216,6 +238,120 @@ test('md-links: 链接指向目录必须报错，不得崩掉整个门禁', () =
       assert.match(error, /链接指向目录而非文件/, `必须说清是目录问题：${error}`);
       assert.match(error, /要指某个文件请写全文件名/, `必须给出怎么改：${error}`);
     }
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
+  }
+});
+
+test('md-links: 不能双重剥离代码区 —— 否则围栏里的示例被当成断链', () => {
+  /* 真实缺陷：`verifyOne` 原先先用自己的 `stripCodeFences` 剥离一遍，
+     再把结果交给 `collectRelativeLinks`（它内部按 mdast 又清一次）。
+     两道口径不同，前置那次抹不掉「未闭合围栏」「缩进围栏」，
+     于是**围栏内的示例链接被当成断链报出来**。
+
+     实测：未闭合围栏与缩进围栏两种输入下，双重剥离比单次多报一条
+     `fake.md`；而正常围栏/波浪号围栏/嵌套反引号三种输入下两者一致
+     —— 所以这个缺陷不是「每次都错」，而是特定形态下才咬人。 */
+
+  const staging = mkdtempSync(join(tmpdir(), 'an-mddbl-'));
+  try {
+    writeFileSync(join(staging, 'real.md'), '# real\n', 'utf8');
+
+    const cases = [
+      ['正常围栏（对照组，不该报）', 'x [真](real.md)\n\n```js\n[假](fake.md)\n```\n', 0],
+      ['未闭合围栏（缺陷形态）', 'x [真](real.md)\n\n```js\n[假](fake.md)\n', 0],
+      ['缩进围栏（缺陷形态）', 'x [真](real.md)\n\n  ```js\n  [假](fake.md)\n  ```\n', 0],
+      ['波浪号围栏（对照组）', 'x [真](real.md)\n\n~~~js\n[假](fake.md)\n~~~\n', 0]
+    ];
+
+    for (const [name, markdown, expected] of cases) {
+      const doc = join(staging, 'probe.md');
+      writeFileSync(doc, markdown, 'utf8');
+      const result = verifyMarkdownLinksIn([doc], staging);
+      assert.equal(result.errors.length, expected,
+        `${name} 应报 ${expected} 处断链，实际报 ${result.errors.length} 处（${result.errors.join(' | ')}）—— 围栏内的示例不是真链接`);
+    }
+
+    /* 反向对照：把同一个假链接放到围栏**外面**，必须真的报出来。
+       否则上面几条「0 处」可能只是检测器整体失灵。 */
+    writeFileSync(join(staging, 'probe.md'), 'x [假](fake.md)\n', 'utf8');
+    const control = verifyMarkdownLinksIn([join(staging, 'probe.md')], staging);
+    assert.equal(control.errors.length, 1, '对照：围栏外的坏链接必须照常报出');
+  } finally {
+    rmSync(staging, { recursive: true, force: true });
+  }
+});
+
+test('md-links: 故障注入 —— 恢复双重剥离必须被上面的用例抓住', () => {
+  /* Owner 硬规则：新门禁先做故障注入证明它会失败，才承认它是绿的。
+     上面那条只断言「现在是对的」，而对双重剥离修复前那个假绿同样成立
+     （它当年也是绿的，只是验错了对象）。所以这里把实现改回退化形态，
+     真实跑一次子进程，证明用例真的会红。
+
+     场景必须选「未闭合围栏」：正常围栏下 stripCodeFences 与 mdast 口径
+     一致（都抹掉），退化看不出来 —— 第一版注入选错场景，结果恒假。 */
+  const dir = mkdtempSync(join(tmpdir(), 'an-mddbl-fi-'));
+  try {
+    mkdirSync(join(dir, 'tools'), { recursive: true });
+    for (const rel of ['tools/md-links.mjs', 'tools/markdown-links.mjs']) {
+      cpSync(join(ROOT, rel), join(dir, rel));
+    }
+    /* 挂上 node_modules：共用件 import mdast，缺了它进程会在
+       ERR_MODULE_NOT_FOUND 上崩 —— 那是夹具坏了，不是被测退化。 */
+    symlinkSync(join(ROOT, 'node_modules'), join(dir, 'node_modules'), 'junction');
+
+    const anchor = '  for (const missing of undefinedReferences(text)) {';
+    let src = readFileSync(join(dir, 'tools', 'md-links.mjs'), 'utf8');
+    assert.ok(src.includes(anchor), '夹具与实现脱节：找不到 undefinedReferences(text)');
+    assert.ok(src.includes('  const found = extractLinks(text);'),
+      '夹具与实现脱节：找不到 extractLinks(text)');
+    src = src
+      .replace(anchor, [
+        'function stripCodeFences(text) {',
+        "  const blank = (s) => s.replace(/[^\\n]/g, ' ');",
+        '  let out = text.replace(/(^|\\n)(```|~~~)[^\\n]*\\n[\\s\\S]*?\\n\\2[^\\n]*(?=\\n|$)/g, (w) => blank(w));',
+        "  out = out.replace(/`[^`\\n]*`/g, (w) => blank(w));",
+        '  return out;',
+        '}',
+        '  const __stripped = stripCodeFences(text);',
+        '  for (const missing of undefinedReferences(__stripped)) {'
+      ].join('\n'))
+      .replace('  const found = extractLinks(text);', '  const found = extractLinks(__stripped);');
+    writeFileSync(join(dir, 'tools', 'md-links.mjs'), src, 'utf8');
+
+    writeFileSync(join(dir, 'real.md'), '# real\n', 'utf8');
+    writeFileSync(join(dir, 'probe.md'), 'x [真](real.md)\n\n```js\n[假](fake.md)\n', 'utf8');
+    writeFileSync(join(dir, 'run.mjs'), [
+      "import { verifyMarkdownLinksIn } from './tools/md-links.mjs';",
+      "import { join } from 'node:path';",
+      'const r = verifyMarkdownLinksIn([join(process.cwd(), \'probe.md\')], process.cwd());',
+      'process.stdout.write(String(r.errors.length));',
+      ''
+    ].join('\n'), 'utf8');
+
+    const result = spawnSync(process.execPath, ['run.mjs'],
+      { cwd: dir, encoding: 'utf8', windowsHide: true });
+    const reported = Number.parseInt(result.stdout ?? '', 10);
+    assert.ok(Number.isFinite(reported) && reported > 0,
+      `恢复双重剥离后必须报出至少一条断链（实际 ${reported}）—— 否则上面那条用例是恒真的`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('md-links: 未闭合的参考式引用要报，且不能被围栏示例骗过去', () => {
+  /* 同一处代码区剥离也作用于 undefinedReferences。 */
+  const staging = mkdtempSync(join(tmpdir(), 'an-mdref-'));
+  try {
+    writeFileSync(join(staging, 'probe.md'),
+      'x [真](real.md)\n\n```md\n[坏][undefined-ref]\n```\n', 'utf8');
+    writeFileSync(join(staging, 'real.md'), '# real\n', 'utf8');
+    const result = verifyMarkdownLinksIn([join(staging, 'probe.md')], staging);
+    assert.deepEqual(result.errors, [], '围栏内的坏参考式引用是示例，不该报');
+
+    writeFileSync(join(staging, 'probe.md'), 'x [坏][undefined-ref]\n', 'utf8');
+    const control = verifyMarkdownLinksIn([join(staging, 'probe.md')], staging);
+    assert.equal(control.errors.length, 1, '对照：围栏外的坏参考式引用必须报');
   } finally {
     rmSync(staging, { recursive: true, force: true });
   }

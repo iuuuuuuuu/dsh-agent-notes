@@ -102,16 +102,17 @@ dsh plugin add --profile <你的profile> github:iuuuuuuuu/dsh-agent-notes
 > `skills/agent-notes/assets/agent-notes-board.html`，宿主只负责把**当前会话仓库**的
 > 笔记实时注入它预留的 `window.__INLINE_DATA__` 插槽。
 >
-> 这样做的理由：官方看板是 76K 的成熟 UI（交叉引用入度、因果链路、多维筛选），
-> 自己重画一套只会更丑、且必然与上游越走越远。走 iframe 后**视觉与交互完全跟随
-> 上游更新**，本插件只维护数据适配层（`lib/board.js` 的 `buildInlineData`）。
+> 理由：官方看板是 76K 成熟 UI（交叉引用入度、因果链路、多维筛选），自绘只会
+> 更丑、越走越远。iframe 让视觉与交互跟随上游更新，本插件只维护数据适配层
+> （`lib/board.js` 的 `buildInlineData`）与一处正文渲染补丁：上游 `parseMarkdown`
+> 不认 GFM 表格，`lib/board-markdown.js` 只补这一条，其余沿用上游输出。
 
 它读的是**实时磁盘内容**而不是静态快照：宿主注册只读 HTTP 路由
 （`/agent-notes/ui`、`/agent-notes/board`、`/agent-notes/note`、`/agent-notes/health`），
 每次切到该 tab 现读。
 
-> 为什么不用会话投影：投影的 `view` 必须是**同步纯函数**，只能读会话日志折叠出的
-> state，读不到文件系统（已核对源码 `view: state => wire.view(state)`）。
+> 不用会话投影的原因：投影的 `view` 必须是**同步纯函数**，读不到文件系统
+> （已核对源码 `view: state => wire.view(state)`）。
 >
 > 安全边界：路由只接受固定路径，只读 `notesRoot` 之下且拒绝任何 `..`；
 > 会话解析不出笔记根时返回 **409**，绝不猜一个路径或退回进程目录。
@@ -141,6 +142,12 @@ dsh plugin add --profile <你的profile> github:iuuuuuuuu/dsh-agent-notes
 
 > 所以：如果你的会话是在没有工作区的状态下建的，跑门禁请显式传 `cwd`。
 
+### 目标仓库不必是 Node 项目
+
+笔记是 Markdown，校验只认目录、文件名、必备小节与封印，不认语言 —— 任意技术栈的仓库都能用。
+脚本由插件自己的 `node`（`process.execPath`）执行，**不查 PATH**，目标机器没装 Node 也能验。
+边界：仓库内那份 `scripts/*.ts` 是给它自己的 CI 用的，仍需 Node；插件不往你的仓库装依赖。
+
 ### 零篇笔记不算通过
 
 门禁只有在**至少验过一篇笔记**时才可能返回绿：
@@ -152,10 +159,8 @@ dsh plugin add --profile <你的profile> github:iuuuuuuuu/dsh-agent-notes
 | 有笔记且全部合规 | `passed: true`，`noteCount` 为实际篇数 |
 | 有笔记但有违规 | `passed: false`，`exitCode: 1` + 具体诊断 |
 
-底层的三个校验脚本在空目录上都会 `exit 0` 并打印 `ok: 0 note(s) verified`。
-从「脚本没说错」看是真的，但从「我的笔记合规吗」看是空的 ——
-**没东西可验不等于验过了**。所以插件在调用脚本前先拦一道，避免把空集当通过证明。
-返回值里始终带 `noteCount`，让你能分辨这两种情况。
+底层的三个脚本在空目录上都 `exit 0` —— **没东西可验不等于验过了**。插件在调用脚本前
+先拦一道，返回值里始终带 `noteCount`，让你能分辨这两种情况。
 
 ## 笔记长什么样
 
@@ -189,11 +194,9 @@ node skills/agent-notes/scripts/verify-archived-agent-notes.ts  # 归档封印�
 - run: node skills/agent-notes/scripts/verify-agent-note-*.ts
 ```
 
-> ⚠️ **照抄上面两行会得到一条恒绿门禁。** 三个脚本在**空集合**上都 `exit 0` 并打印
-> `ok: 0 note(s) verified` —— 笔记树不存在时 CI 照样绿。它们只回答「已有的笔记合不合规」，
-> 不回答「有没有笔记」。要么先在自己的 CI 里补一步「至少一篇」的前置判断，
-> 要么直接复用本仓库的 `tools/verify-notes.mjs`（它调的 `lib/notes.js` 会把空树判成
-> `NO_NOTES_TREE` / `NO_NOTES_YET`，并且这条行为有回归测试与故障注入守着）。
+> ⚠️ **照抄上面两行会得到一条恒绿门禁。** 三个脚本在**空集合**上都 `exit 0`，只回答
+> 「已有笔记合不合规」，不回答「有没有笔记」。要么在自己 CI 里补一步「至少一篇」的前置
+> 判断，要么直接用 `tools/verify-notes.mjs`（空树报 `NO_NOTES_TREE`，有测试与故障注入守着）。
 
 ## 上游合并
 
@@ -223,7 +226,7 @@ PR 和每日定时任务里跑它。
 退出码语义：`0` 一致，`1` 已落后（真红），`2` 无法核对（网络/限流）。
 **`2` 也让 job 变红** —— 否则「查不到」会被当成「没问题」。
 
-**为什么默认钉 commit 而不是 `main`**：jsDelivr 对分支名的**清单缓存**实测会滞后——锚 `@main` 会拿到重构前的旧目录结构，导致路径枚举失败。但它的**文件读取**是准的（已验证 `@main` 与钉住 commit 的同一文件逐字相同），所以 `--latest` 走「按本地清单逐个取文件内容比对」，不依赖远端枚举。
+**为什么默认钉 commit 而不是 `main`**：jsDelivr 对分支名的**清单缓存**实测会滞后——锚 `@main` 会拿到重构前的旧目录结构，导致路径枚举失败。但它的**文件读取**是准的（已验证同一文件逐字相同），所以 `--latest` 走「按本地清单逐个取文件内容比对」，不依赖远端枚举。
 
 **为什么不用 GitHub API 查 HEAD**：实测未认证请求 60 次/小时就 403（rate limit exceeded），CI 里天天跑必然撞墙。
 
@@ -261,9 +264,9 @@ ci.yml → npm run verify-notes → tsx .agents/skills/agent-notes/scripts/*.ts
 ```
 
 `ci.yml` 里只写 `npm run verify-notes`，**不含版本号或文件清单**。所以同步脚本目录
-就等于更新了 CI 实际执行的校验逻辑，`ci.yml`、`package.json`、`.github/` 都不需要改。
+就等于更新了 CI 实际执行的校验逻辑，`ci.yml`、`package.json`、`.github/` 都不用改。
 
-这些脚本**零外部依赖**，只用 `node:` 内置模块和互相引用，换版本不会引入新的 npm 包。
+这些脚本**零外部依赖**，只用 `node:` 内置模块，换版本不会引入新 npm 包。
 
 ### 技能副本会自己更新（异步，不阻塞启动）
 
@@ -271,10 +274,10 @@ ci.yml → npm run verify-notes → tsx .agents/skills/agent-notes/scripts/*.ts
 `apply` 时**后台**拉一次本仓库的技能目录（`lib/self-update.js`）：
 
 - **绝不阻塞启动**：`scheduleSkillUpdate()` 是 fire-and-forget，网络再慢也不拖慢
-  `apply`。代价是启动那一瞬间技能可能还是旧的。
-- **失败静默**：断网、CDN 不可达、任何一个文件拉不到 → 整批放弃，**保留现有副本**。
-  技能旧一点可以接受，技能不可用不行。
-- **原子写入**：逐文件写 `.tmp` 再 `rename`，中途失败不会留下半套内容。
+  `apply`。代价是启动那一刻技能可能还是旧的。
+- **失败静默**：断网、CDN 不可达、任何文件拉不到 → 整批放弃，**保留现有副本**。
+  技能旧一点可以接受，不可用不行。
+- **原子写入**：逐文件写 `.tmp` 再 `rename`，中途失败不留半套内容。
 - **内容相同不写盘**：避免每次启动都改 mtime、触发无谓的热替换。
 - **热替换**：真的写入新内容后调宿主的 `SkillProviderControl.invalidate()`，
   宿主丢弃缓存并通知消费者重新取，模型下次加载即新内容。
@@ -359,8 +362,7 @@ ci.yml → npm run verify-notes → tsx .agents/skills/agent-notes/scripts/*.ts
 npm test                       # 行为测试（真跑子进程、真写文件）
 npm run gate:fault-injection   # 证明门禁会红，而不是恒绿
 npm run verify                 # 包自检：清单 / patch / 零依赖 / 双语文档与徽标 / vendored 与上游哈希
-npm run sync:latest            # 上游是否已漂移（会真变红）
-npm run sync:check             # 副本与钉住 ref 是否逐字相同
+npm run sync:check             # 上游是否已漂移：副本与钉住 ref 是否逐字相同（会真变红）
 npm run evidence               # 实机证据：用 DSH 自带的真实 SkillRegistry 验证注册
 npm run check                  # 全部纯本地门禁串跑（提交后跑这个）
 npm run check:full             # check + evidence（需本机 DSH）
@@ -381,15 +383,15 @@ npm run doc:budget             # 文档字数预算（超了会红，提示压�
 >
 > 探测不到时 `evidence` **明确失败（退出码 2）**，不假装通过；集成测试则降级为同契约承接器，并在输出里标注实际用的是哪种模式。
 
-## 设计约束（为什么零依赖）
+## 设计约束（为什么零 `@deepseek-ai` 依赖）
 
-本插件**不 import 任何 `@deepseek-ai/*`**。原因是实测的：profile 的 `node_modules` 里 `@deepseek-ai` 只解析到 `cosmokit`/`schemastery`，插件运行时拿不到 DSH 的类型包。因此：
+本插件**不 import 任何 `@deepseek-ai/*`**：profile 的 `node_modules` 里 `@deepseek-ai` 只解析到 `cosmokit`/`schemastery`，插件运行时拿不到 DSH 的类型包。因此：
 
-- 宿主 API 全部按**鸭子类型**使用（`ctx.skills` / `ctx.tools` / `ctx.commands` / `ctx.systemPrompt` / `ctx.agents`），缺失时对应能力降级关闭而不是崩；
-- 只用 node 内建模块；
-- 工具用**裸对象**注册（DSH 接受原始 `ToolDefinition`，MCP 工具就是这么进来的）。
+- 宿主 API 全部按**鸭子类型**使用（`ctx.skills` / `ctx.tools` / `ctx.commands` / `ctx.systemPrompt` / `ctx.agents`），缺失时降级关闭而不是崩；
+- `lib/` 下只用 node 内建模块（浏览器半边与宿主半边都是）；
+- 工具用**裸对象**注册（DSH 接受原始 `ToolDefinition`，MCP 工具就这么进来）。
 
-`tools/verify-plugin.mjs` 会把这条约束当门禁检查：谁往 `lib/` 里加了 `@deepseek-ai/*` import，自检立刻红。
+谁往 `lib/` 里加了 `@deepseek-ai/*` import，`tools/verify-plugin.mjs` 的自检立刻红。唯一运行时依赖 `mdast-util-from-markdown` 只被 `tools/` 下的校验脚本使用，不参与插件运行时。
 
 ## 组件
 
@@ -403,13 +405,13 @@ npm run doc:budget             # 文档字数预算（超了会红，提示压�
 | `lib/commands.js` | `/agent-notes` 命令 |
 | `lib/tools.js` | `agent_notes_gate` / `agent_notes_status` 工具 |
 | `skills/agent-notes/` | vendored 上游内容（SKILL.md、references、templates、scripts、assets） |
-| `tools/` | 上游合并、自检、故障注入、测试 |
+| `tools/` | 上游合并、自检、故障注入、测试（校验脚本在此） |
 
 ## 已知限制
 
 - **看板模板引 Google Fonts 外链**，离线环境下会退化到系统字体；功能不受影响。
 - 上游内容同步依赖 jsDelivr 可访问；不可达时 `sync` 会明确失败而不是静默跳过。
-- DSH 处于 developer preview，`peerDependencies` 未声明（本插件不依赖 DSH 包），但宿主 API 若变更需跟随。
+- DSH 处于 developer preview，宿主 API 若变更需跟随。
 - 会话开关按**会话 id**持久化；会话被删除后其覆盖项仍留在状态文件中，目前不做 GC。
 - 宿主仓库的 CI 接入需自行配置；插件不代为修改仓库。
 
@@ -419,8 +421,7 @@ MIT，全文见 [LICENSE](LICENSE)。
 
 本插件分发的 `skills/agent-notes/` 下 21 个文件是上游
 `czm15053/write-notes-like-deepseek` 的 vendored 副本，版权归其作者 ——
-来源、固定 commit、许可证与文件数逐项列在
-[第三方归属声明](THIRD_PARTY_NOTICES.md)，由 `npm run notices:check` 保证与实际一致。
+来源、固定 commit、许可证与文件数逐项列在 [第三方归属声明](THIRD_PARTY_NOTICES.md)。
 
 ---
 

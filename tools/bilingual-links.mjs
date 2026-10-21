@@ -35,10 +35,10 @@
  *   记在笔记里，免得日后误以为「以前会报错、现在修好了」。
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { collectRelativeLinks } from './markdown-links.mjs';
+import { collectRelativeLinks, referencedDefinitions, languageSwitcherOffset } from './markdown-links.mjs';
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -70,52 +70,38 @@ export function languageSwitcherTargets(pair) {
  * @returns {{ content: string, rewritten: number, details: string[] }} 改写结果。
  */
 export function rewriteTranslationLinkLocales(content, pair, selfName) {
-  /* 本文档不该指向自己 —— 那不是互链。 */
-  const counterpart = selfName === pair.primary ? pair.secondary : pair.primary;
-  const isPrimary = selfName === pair.primary;
-  const switcher = new Set(languageSwitcherTargets(pair));
-
-  /* ★ 语言切换器那行整体跳过：`[English](README.en.md)` 在中文文档里是
-     **正确的**（它的作用就是切到另一版），不是「指向错误语言」。
-     上游用 skipTargets 表达同一件事。 */
-  const switcherLine = content.split('\n')
-    .findIndex((l) => [...switcher].some((t) => l.includes(`](${t})`) || l.includes(`](${basename(t)})`)));
-
-  const links = collectRelativeLinks(content);
+  const source = resolve(PACKAGE_ROOT, selfName);
+  const primary = resolve(PACKAGE_ROOT, pair.primary);
+  const secondary = resolve(PACKAGE_ROOT, pair.secondary);
+  if (source !== primary && source !== secondary) throw new Error("Document is not a translation pair member: " + selfName);
+  const expected = source === primary ? primary : secondary;
+  const portable = (path) => path.split(String.fromCharCode(92)).join("/");
+  const accepted = [primary, secondary].map((path) => portable(relative(dirname(source), path)));
+  const switcherOffset = languageSwitcherOffset(content, accepted);
+  const used = referencedDefinitions(content);
   const edits = [];
   const details = [];
-
-  for (const link of links) {
+  for (const link of collectRelativeLinks(content)) {
+    if (link.start === switcherOffset) continue;
+    if (link.kind === "definition" && !used.has(String(link.identifier).toLowerCase())) continue;
     const target = link.target;
-    if (target.startsWith('#')) continue;
-    /* 只处理「指向我们这一对」的链接 —— 其它链接（仓库内别的文件）
-       没有语言概念，不该被改。 */
-    const bare = target.split('#')[0].split('?')[0];
-    const name = basename(bare);
-
-    /* 语言切换器：那一行整体不动。 */
-    const line = content.slice(0, link.start).split('\n').length - 1;
-    if (line === switcherLine) continue;
-
-    if (name !== basename(pair.primary) && name !== basename(pair.secondary)) continue;
-
-    const shouldBe = isPrimary ? pair.primary : pair.secondary;
-    if (name === shouldBe) continue;              /* 已经对了 */
-
-    const rewritten = bare.replace(name, shouldBe)
-      + target.slice(bare.length);
+    const suffixAt = target.search(/[?#]/);
+    const bare = suffixAt < 0 ? target : target.slice(0, suffixAt);
+    const suffix = suffixAt < 0 ? "" : target.slice(suffixAt);
+    let decoded;
+    try { decoded = decodeURIComponent(bare); } catch { continue; }
+    const resolved = resolve(dirname(source), decoded);
+    if (resolved !== primary && resolved !== secondary) continue;
+    if (resolved === expected) continue;
+    const destination = portable(relative(dirname(source), expected));
+    const rewritten = destination.split("/").map(encodeURIComponent).join("/") + suffix;
     edits.push({ start: link.start, end: link.end, value: rewritten });
-    details.push(`${target} → ${rewritten}`);
+    details.push(target + " → " + rewritten);
   }
-
-  if (edits.length === 0) return { content, rewritten: 0, details };
-
-  /* 从后往前替换。 */
   let out = content;
-  for (const e of edits.sort((a, b) => b.start - a.start)) {
-    out = out.slice(0, e.start) + e.value + out.slice(e.end);
+  for (const edit of edits.sort((a, b) => b.start - a.start)) {
+    out = out.slice(0, edit.start) + edit.value + out.slice(edit.end);
   }
-  void counterpart;
   return { content: out, rewritten: edits.length, details };
 }
 

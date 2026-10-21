@@ -48,10 +48,11 @@
  */
 import { readFileSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
+import { fromMarkdown } from 'mdast-util-from-markdown';
 import { fileURLToPath } from 'node:url';
 
 import { PAIRS, languageSwitcherTargets } from './bilingual-links.mjs';
-import { collectRelativeLinks } from './markdown-links.mjs';
+import { collectRelativeLinks, blankOutFences } from './markdown-links.mjs';
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
@@ -86,20 +87,36 @@ const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const DELIMITER_ROW = /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/;
 
 export function structureOf(text, options = {}) {
-  /* 标题：去掉围栏代码块后再数，否则代码示例里的 `# 注释` 会被当标题。 */
-  const withoutFences = text.replace(/(^|\n)(```|~~~)[^\n]*\n[\s\S]*?\n\2[^\n]*(?=\n|$)/g, '\n');
+  /* 标题与表格都要先排除代码区，否则代码示例里的 `# 注释`、`| a | b |`
+     会被当成结构。这里用共用件的 `blankOutFences`（基于 mdast），
+     **不用自己的正则**：实测正则在「未闭合围栏」下抹不掉围栏内容，
+     于是示例里的 `# 假标题` 被数成一级标题，而 mdast 判它一路延伸到文末、
+     整段都是代码 —— 两套口径分叉过（见 md-links 那次同类修复）。
+     它用等长空白替换，行号与原文一一对应，按行遍历仍然成立。 */
+  const withoutFences = blankOutFences(text);
   const levels = [];
   for (const line of withoutFences.split('\n')) {
     const match = /^(#{1,6})\s+\S/.exec(line);
     if (match !== null) levels.push(match[1].length);
   }
-  /* 代码块：数围栏行数的一半（开 + 闭）。 */
-  const fenceLines = text.match(/^\s*(```|~~~)/gm) ?? [];
+  /* 代码块数量与语言标记都从 mdast 取，不用正则数围栏行。
+     正则口径 `/^\s*(```|~~~)/gm` 实测有三处分叉：
 
-  /* 语言标记：只取**开启**围栏的那些（开闭成对，奇偶位置 0/2/4… 是开）。
-     取全部会让闭合围栏的「空标记」混进来，比对时噪声更大。 */
-  const marks = [...text.matchAll(/(?:^|\n)(?:```|~~~)([^\n]*)/g)].map((m) => m[1].trim());
-  const fenceLangs = marks.filter((_, i) => i % 2 === 0);
+     | 输入 | 正则 | mdast |
+     |---|---|---|
+     | 未闭合围栏 | fences=0, langs=["sh"] | fences=1, langs=["sh"] |
+     | 围栏内含围栏标记文本 | fences=1 | fences=2 |
+     | **缩进围栏** | fences=1, **langs=[]** | fences=1, langs=["sh"] |
+
+     ★ 第三种最坑：数量对得上、语言标记 silently 丢掉 ——
+       两版都丢时门禁照样绿，正是要防的假阴性。
+       `^\s*` 让缩进围栏算得进 fenceLines，却进不了 marks 的
+       `(?:^|\n)` 分支，于是数量与语言标记用了两套边界。 */
+  const codeNodes = [];
+  for (const node of markdownNodes(text)) {
+    if (node.type === 'code') codeNodes.push(node);
+  }
+  const fenceLangs = codeNodes.map((node) => (node.lang ?? '').trim());
 
   /* 列表项数**刻意不比**（实测已确认）：中文常把内容排在列表里、英文排在正文段落里。
      分节实测 25 节里 24 节一致，唯一不一致的第 19 节正是这种排版选择 ——
@@ -165,7 +182,27 @@ export function structureOf(text, options = {}) {
   }
 
   /* 未被分隔行确认的候选直接丢弃 —— 收进去就是碎片。 */
-  return { levels, fences: Math.floor(fenceLines.length / 2), fenceLangs, tables, links };
+  return { levels, fences: codeNodes.length, fenceLangs, tables, links };
+}
+
+/**
+ * 摊平一份 Markdown 的 AST 节点，按文档顺序。
+ *
+ * 为什么需要它：`structureOf` 要按顺序拿代码块（数量与语言标记都依序比对），
+ * 而 mdast 的 `code` 节点**只可能是块级**（行内代码是 `inlineCode`，
+ * 不会有 `lang`），所以摊平后过滤 `type === 'code'` 即得全部围栏块。
+ *
+ * @param {string} text Markdown 原文。
+ * @returns {any[]} 按顺序摊平的节点（含容器节点自身）。
+ */
+function markdownNodes(text) {
+  const out = [];
+  const walk = (node) => {
+    out.push(node);
+    for (const child of node.children ?? []) walk(child);
+  };
+  walk(fromMarkdown(text));
+  return out;
 }
 
 /**

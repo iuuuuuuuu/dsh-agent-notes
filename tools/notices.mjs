@@ -15,7 +15,7 @@
  * `deepseek-ai/deepseek-harness` 的 `gen-third-party-notices.ts` 扫的是
  * **npm 依赖 + Python 依赖 + vendored 包**（它是个 monorepo，三类都有）。
  * 本插件的第三方内容只有一类：vendored 上游文件。所以这里不复制它那套
- * 多生态解析，只做「vendored 来源 + 本包 devDependencies」两件事 ——
+ * 多生态解析，只做「vendored 来源 + npm 依赖（运行时与开发两类）」——
  * 前者是法定义务，后者是事实披露。
  *
  * ## 为什么需要依赖
@@ -82,22 +82,35 @@ function webUrl(repository) {
 }
 
 /**
- * 取本包的开发依赖，**含传递依赖**，用于事实披露。
+ * 取本包**所有**依赖，含传递依赖，用于事实披露。
  *
- * 为什么从 devDependencies 出发：本插件的 `dependencies` / `peerDependencies`
- * 必须为空（`verify-plugin.mjs` 拦 `@deepseek-ai/*`，且装成插件时不该向下
- * 拖依赖树）。
+ * ★ 为什么三类都扫：本函数原名 `devDependencies()`，只读 `devDependencies`。
+ *   它的注释里写着「`dependencies` / `peerDependencies` 必须为空（装成插件时
+ *   不该向下拖依赖树）」—— 那描述的是**当时的仓库状态**，却把自己写成了
+ *   永久的输入约定。一旦真的加了运行时依赖（本次 mdast 就是），那份依赖
+ *   既不在「随插件发布」清单里，也不在「开发依赖」清单里，
+ *   `notices:check` 却照样报绿 —— 归属声明静默漏了一项。
+ *
+ *   注释描述现状，不变量必须由门禁守。这类「注释说它不会发生，
+ *   所以代码不处理」的坑，本仓库已经栽过多次。
+ *
+ * ★ 两个维度都要留：`direct`（本包声明的 vs 被依赖树拉进来的）回答
+ *   「哪些是我们自己选的」；`scope`（随插件发布 vs 仅开发期）回答
+ *   「谁会被分发到哪」。只留一个都会丢掉读者需要的信息。
  *
  * 为什么要递归：直接依赖会带回自己的依赖（`spdx-expression-parse` 就带了
  * `spdx-exceptions` 与 `spdx-license-ids`）。只列直接依赖的「归属声明」是
- * 不完整的 —— 那些传递依赖同样是被分发到开发者机器上的第三方作品，
+ * 不完整的 —— 那些传递依赖同样是被分发出去的第三方作品，
  * 它们的许可证同样该被披露。
  *
- * @returns {{ name: string, version: string, license: string, direct: boolean }[]} 依赖清单。
+ * @param {(name: string) => string} read 读取仓库内相对文件的函数。
+ *   **必须传**：`renderNotices` 已经解析过一份 `package.json`，这里若自己
+ *   再读一次真文件，测试注入的依赖项就会被静默忽略 —— 那是「测试验的是
+ *   真仓库而不是注入值」的假绿形态（本仓库已栽过多次）。
+ * @returns {{ name: string, version: string, license: string, direct: boolean, scope: 'runtime' | 'dev' }[]} 依赖清单。
  */
-function devDependencies() {
-  const pkg = JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8'));
-  const declared = pkg.devDependencies ?? {};
+function npmDependencies(read) {
+  const pkg = JSON.parse(read('package.json'));
 
   /** 读一个已安装包的元数据；未安装时返回 null。 */
   const metaOf = (name) => {
@@ -129,25 +142,42 @@ function devDependencies() {
    * 深度优先收集一个包及其依赖。
    *
    * @param {string} name 包名。
-   * @param {boolean} direct 是否顶层直接依赖。
+   * @param {{ direct: boolean, scope: 'runtime' | 'dev' }} how 本包怎么进来的。
    */
-  const walk = (name, direct) => {
-    if (seen.has(name)) return;
+  const walk = (name, how) => {
+    if (seen.has(name)) {
+      /* 同一个包既被运行时依赖拉、又被开发依赖拉时，按运行时记 ——
+         更保守的那一侧：读者会以为它随插件发布。 */
+      const seenRow = rows.find((row) => row.name === name);
+      if (seenRow !== undefined && how.scope === 'runtime' && seenRow.scope !== 'runtime') {
+        seenRow.scope = 'runtime';
+      }
+      return;
+    }
     seen.add(name);
     const meta = metaOf(name);
     rows.push({
       name,
-      version: direct ? String(declared[name] ?? '') : String(meta?.version ?? ''),
+      version: String(meta?.version ?? ''),
       license: licenseOf(meta),
-      direct
+      direct: how.direct,
+      scope: how.scope
     });
     if (meta === null) return;
     /* 只跟 dependencies：包的 devDependencies 不随它分发给下游。 */
-    for (const child of Object.keys(meta.dependencies ?? {})) walk(child, false);
+    for (const child of Object.keys(meta.dependencies ?? {})) {
+      walk(child, { direct: false, scope: how.scope });
+    }
   };
 
-  for (const name of Object.keys(declared)) walk(name, true);
+  /* 顺序有意：先运行时、再开发。这样「先写先定 scope」与保守侧一致。 */
+  for (const group of ['dependencies', 'peerDependencies']) {
+    for (const name of Object.keys(pkg[group] ?? {})) walk(name, { direct: true, scope: 'runtime' });
+  }
+  for (const name of Object.keys(pkg.devDependencies ?? {})) walk(name, { direct: true, scope: 'dev' });
+
   rows.sort((a, b) => {
+    if (a.scope !== b.scope) return a.scope === 'runtime' ? -1 : 1;
     if (a.direct !== b.direct) return a.direct ? -1 : 1;
     return a.name.localeCompare(b.name);
   });
@@ -202,7 +232,9 @@ export function renderNotices(options = {}) {
      「看起来合规」，而那比没有声明更糟。 */
   const own = requireSpdx(pkg.license, 'package.json');
   const source = vendoredSource(read);
-  const dev = devDependencies();
+  const deps = npmDependencies(read);
+  const runtime = deps.filter((row) => row.scope === 'runtime');
+  const dev = deps.filter((row) => row.scope === 'dev');
 
   const lines = [
     '# 第三方内容归属声明',
@@ -240,15 +272,30 @@ export function renderNotices(options = {}) {
   );
 
   lines.push(
-    '## 2. 开发依赖',
+    '## 2. 运行时依赖',
     '',
-    '以下依赖**不随本插件发布**，只在开发与校验时使用（`dependencies` 与',
-    '`peerDependencies` 为空，`tools/verify-plugin.mjs` 会拦下任何',
-    '`@deepseek-ai/*` 运行时依赖）。列出它们是为了让「这个仓库靠什么构建」',
-    '可被审计。',
+    '以下依赖**随本插件一起发布**，会被装到宿主机上：',
+    ''
+  );
+
+  if (runtime.length === 0) {
+    lines.push('（无）', '');
+  } else {
+    lines.push('| 包 | 类型 | 版本 | 许可证 |', '|---|---|---|---|');
+    for (const row of runtime) {
+      lines.push(`| \`${row.name}\` | ${row.direct ? '直接' : '传递'} | \`${row.version}\` | ${row.license} |`);
+    }
+    lines.push('');
+  }
+
+  lines.push(
+    '## 3. 开发依赖',
+    '',
+    '以下依赖**不随本插件发布**，只在开发与校验时使用。列出它们是为了让',
+    '「这个仓库靠什么构建」可被审计。',
     '',
     '**传递依赖也一并列出**：归属声明只列直接依赖是不完整的 —— 那些被间接',
-    '拉进来的包同样落在开发者机器上，许可证同样该被披露。',
+    '拉进来的包同样落在使用者机器上，许可证同样该被披露。',
     ''
   );
 
@@ -263,7 +310,7 @@ export function renderNotices(options = {}) {
   }
 
   lines.push(
-    '## 3. 本插件自身',
+    '## 4. 本插件自身',
     '',
     `\`${pkg.name}\` 以 ${own} 发布，版权归 dsh-agent-notes contributors，`,
     '全文见 [LICENSE](LICENSE)。',
