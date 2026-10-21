@@ -53,7 +53,7 @@ Independent: 本篇不改任何门禁行为，只把既有判定从「读 script
 | `public-repository-links` | 99 | Reject tracked files that reference an **unavailable legacy repository**（`deepseek-harness-sdk`） | 历史迁移痕迹，本仓库没这问题 |
 | `concrete-terms` | 105 | Reject **one ambiguous origin label**（`prove`+`nance`） | 术语规范，与结构无关 |
 | `runtime-closure` | 237 | 部署清单覆盖**每个 shipped agent preset 的全部插件依赖**与 workspace peer | 本仓库是单插件，无 preset / peer 概念 |
-| `no-top-level-await` | 267 | 可导入模块**顶层无 await** | `lib/` 是 CommonJS，无 ESM 顶层 await |
+| `no-top-level-await` | 267 | 可导入模块**顶层无 await** | ~~`lib/` 是 CommonJS~~ **前提写错了，见下**：`lib/` 是 ESM（`package.json` 的 `"type": "module"`、`main: lib/index.js`），顶层 await 在当前代码里**语法上完全可能**。真正的理由是「现有代码里模块作用域没有 await，而手写判定会漏报」 |
 | `export-jsdoc` | 607 | 每个**非 vendored 导出**都要 JSDoc | 同上，且本仓库明确不发布 TS 类型 |
 
 ## Alternatives considered
@@ -67,11 +67,12 @@ Independent: 本篇不改任何门禁行为，只把既有判定从「读 script
 - **收益**：12 个少数派从「推断」升级为「确认」。**判定全部成立，无需改动** —— 这让收尾笔记的分类表第一次具备「可复核到源码」的性质。
 - **收益**：给三条不适用理由补上了**源码原话**，比原来我自己的概括更准确。例如 `runtime-closure` 不是泛泛的「monorepo 专属」，而是「覆盖每个 shipped agent preset 的插件依赖」—— 本仓库连 preset 概念都没有，所以判据更硬。
 - **代价与已知上限**：**32 道「结构性不适用」仍未做源码级复核** —— 它们各自约 50–200 行，合计约 5000 行。本轮只做少数派是因为**它们才有判定争议**（那 12 条带「不适用」判断的）；32 条是按「读 `packages/` 而本仓库没有该结构」批量归类的。
-- **代价与已知上限**：`no-top-level-await` 与 `export-jsdoc` 的「不适用」**部分依赖本仓库的技术形态**（CommonJS、无 TS 声明）。若将来本仓库改成 ESM 或发布 `.d.ts`，这两条要重新评估。
+- **代价与已知上限**：`no-top-level-await` 与 `export-jsdoc` 的「不适用」**部分依赖本仓库的技术形态**。此处原写「CommonJS、无 TS 声明」是**事实错误**：本仓库是 ESM（`package.json` 的 `"type": "module"`），顶层 await 语法上可用；`export-jsdoc` 的实际边界是「纯 JS、不发布 `.d.ts`、不需要给第三方生成 API 文档」。若将来本仓库改成 CJS 或开始发布 `.d.ts`，这两条要重新评估 —— 而按正确前提，`no-top-level-await` 的判定靠的是「手写判定会漏报（实测漏了 `const x = await`）」和「现有代码模块作用域无 await」，不是「语法上不可能」。
 - **重访信号**：
   - **若要闭合「44 道全部源码级复核」** → 剩下 32 道按同一方法做，产出是一张「每道查什么 + 为何不适用」的完整表。当前不做的理由是：**那 32 道的判定理由同构且可从目录结构直接验证**（它们 import 或 glob `packages/`），逐条读源码的边际价值低。
   - **若本仓库引入 agent preset / 多插件打包** → `runtime-closure` 立即适用。
-  - **若 `lib/` 改成 ESM** → `no-top-level-await` 立即适用。
+  - **若 `lib/` 改成 CJS**（⚠️ 原写「改成 ESM」，方向反了 —— 现在已经是 ESM）→ 顶层 await 在语法上不再可能。
+  - **若开始发布 `.d.ts`** → `export-jsdoc` 立即适用。
   - **若开始发布 `.d.ts`** → `export-jsdoc` 立即适用。
 
 ## Verification

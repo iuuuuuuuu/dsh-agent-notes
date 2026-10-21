@@ -10,4 +10,4 @@
 #   - a session-scoped system-prompt policy section (only while enabled)
 - insert:
     - id: agent-notes
-      name: "dsh-agent-notes"
+      name: "@iuuuuuuuu/agent-notes"

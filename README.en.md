@@ -114,8 +114,11 @@ alternatives vault, decision directory) — **no hand-rolled UI**:
 >
 > Why: the upstream board is a mature 76K UI (cross-reference in-degree, causal
 > chains, multi-dimensional filters). Redrawing it by hand would look worse and drift
-> from upstream forever. Through an iframe, **visuals and interaction follow upstream
-> updates**, and this plugin only maintains the data adapter (`buildInlineData`).
+> from upstream forever. Through an iframe, visuals and interaction follow upstream
+> updates; this plugin only maintains the data adapter (`buildInlineData`) plus one
+> prose-rendering patch: upstream `parseMarkdown` has no GFM table rule, and
+> `lib/board-markdown.js` adds exactly that one rule while every other block keeps the
+> upstream output verbatim.
 
 It reads **live disk content**, not a snapshot: the host registers read-only HTTP
 routes (`/agent-notes/ui`, `/agent-notes/board`, `/agent-notes/note`,
@@ -159,6 +162,18 @@ refuse to produce it.
 
 > So: if your session was created without a workspace, pass an explicit `cwd`
 > when running the gates.
+
+### The target repository need not be a Node project
+
+The gates work on a repository of **any stack**: notes are Markdown, and the
+checks look only at directories, filenames, required sections, and seals — never
+at the language. Scripts run under the plugin's own `node` (`process.execPath`),
+**never by looking up `node` / `npm` on PATH**, so a machine without Node can
+still verify.
+
+Boundary: the `.agents/skills/agent-notes/scripts/*.ts` copy inside your
+repository is for that repository's own CI and still needs Node in that
+environment; this plugin **installs nothing into your repository**.
 
 ### Zero notes is not a pass
 
@@ -414,8 +429,7 @@ old body. To be certain, re-trigger a skill load, or restart the host.
 npm test                       # behavior tests (real subprocesses, real files)
 npm run gate:fault-injection   # prove the gates can go red rather than being always-green
 npm run verify                 # package self-check: manifest / patch / zero-dep / bilingual docs + badge / vendored-vs-upstream digests
-npm run sync:latest            # has upstream drifted? (really goes red)
-npm run sync:check             # bundled copy vs the pinned ref, byte for byte
+npm run sync:check             # has upstream drifted? bundled copy vs the pinned ref, byte for byte (really goes red)
 npm run evidence               # live evidence against DSH's own real SkillRegistry
 npm run check                  # every purely local gate in sequence (run this before pushing)
 npm run check:full             # check + evidence (needs a local DSH)
@@ -436,15 +450,15 @@ npm run doc:budget             # documentation size budget (going over goes red 
 >
 > When detection fails, `evidence` **fails loudly (exit code 2)** rather than pretending to pass; the integration tests degrade to a same-contract harness and state which mode they used in their output.
 
-## Design constraint (why zero dependencies)
+## Design constraint (why zero `@deepseek-ai` dependencies)
 
-This plugin **imports no `@deepseek-ai/*` package**. That is measured, not stylistic: a profile's `node_modules` resolves `@deepseek-ai` only to `cosmokit`/`schemastery`, so a plugin cannot reach the DSH type packages at runtime. Therefore:
+This plugin **imports no `@deepseek-ai/*` package**: a profile's `node_modules` resolves `@deepseek-ai` only to `cosmokit`/`schemastery`, so a plugin cannot reach the DSH type packages at runtime. Therefore:
 
 - host APIs are used **structurally** (`ctx.skills` / `ctx.tools` / `ctx.commands` / `ctx.systemPrompt` / `ctx.agents`), and a missing capability degrades to off instead of crashing;
-- only Node built-ins are used;
-- tools are registered as **plain objects** (DSH accepts a raw `ToolDefinition`; that is how MCP-sourced tools arrive).
+- under `lib/`, only Node built-ins are used (both the browser half and the host half);
+- tools are registered as **plain objects** (DSH accepts a raw `ToolDefinition`; MCP tools arrive that way).
 
-`tools/verify-plugin.mjs` enforces this: any `@deepseek-ai/*` import added under `lib/` turns the self-check red.
+Any `@deepseek-ai/*` import added under `lib/` turns `tools/verify-plugin.mjs` red. The single runtime dependency, `mdast-util-from-markdown`, is used only by the validation scripts under `tools/`, never on the plugin runtime path.
 
 ## Components
 
@@ -464,7 +478,7 @@ This plugin **imports no `@deepseek-ai/*` package**. That is measured, not styli
 
 - The **board template references external Google Fonts**, so offline use falls back to system fonts; functionality is unaffected.
 - Upstream syncing depends on jsDelivr reachability; when unreachable, `sync` fails loudly rather than skipping silently.
-- DSH is in developer preview. No `peerDependencies` are declared (this plugin depends on no DSH package), but host API changes may require follow-up.
+- DSH is in developer preview. Host API changes may require follow-up.
 - Session switches persist **by session id**; after a session is deleted its override remains in the state file, and there is currently no GC.
 - Host-repository CI wiring is left to you; the plugin does not modify repositories.
 
@@ -475,8 +489,7 @@ MIT — see [LICENSE](LICENSE) for the full text.
 The 21 files under `skills/agent-notes/` are a vendored copy of upstream
 `czm15053/write-notes-like-deepseek` and remain under their authors'
 copyright. Source, pinned commit, license, and file count are listed item by item in
-the [third-party notices](THIRD_PARTY_NOTICES.md), kept in sync with reality by
-`npm run notices:check`.
+the [third-party notices](THIRD_PARTY_NOTICES.md).
 
 ---
 

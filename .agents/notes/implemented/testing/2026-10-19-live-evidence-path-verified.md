@@ -60,7 +60,7 @@ DSH 位置: .../dependencies/dsh/node_modules/@deepseek-ai/dsh/lib/bin.js
 | 前提 | 结果 |
 |---|---|
 | 无 DSH 时退出码是 2（「无法进行」而非「通过」） | ✔ exit=2，并说明怎么修 |
-| 用的是**真** DSH 模块，不是 stub | ✔ `createRequire(DSH_DIST)`，全文无 stub/mock |
+| 用的是**真** DSH 模块，不是 stub | ✔ `createRequire(<DSH_DIST>/package.json)`，全文无 stub/mock |
 | 本机实跑通过 | ✔ exit=0，10 项断言全过 |
 
 ### 二、`check:full` 完整跑通
@@ -121,6 +121,7 @@ node tools/live-evidence.mjs; echo $?
 
 # 有 DSH 时：exit 0，10 项断言
 DSH_DIST=<path>/lib/bin.js node tools/live-evidence.mjs
+# 目录形式同样可以（2026-10-21 起）：DSH_DIST=<path> node tools/live-evidence.mjs
 
 # 端到端
 DSH_DIST=<path>/lib/bin.js npm run check:full

@@ -95,6 +95,15 @@ return PACKAGE_ROOT;                                      // cwd 完全不是仓
   而且没有笔记树时明确报 `NO_NOTES_TREE`。
 - **收益**：这条约束（只依赖 Node 内置模块）现在有测试锁住 ——
   以后有人加 `@deepseek-ai/*` 导入会立刻红。
+- **收益**：门禁在**机器上根本没装 node / npm** 时也能跑。插件侧执行
+  门禁用的是 `nodeExecutable()`（即 `process.execPath`，harness 自己的
+  node），不走 PATH 查找；`tools/non-node-project.test.mjs` 把 `PATH`
+  指向一个空目录来证明这点 —— 任何一处去 shell 里找 `node` / `npm`
+  都会立刻红。
+- **边界**：这条保证只覆盖**插件服务路径**（`runAllGates` / `runGate`
+  经 `lib/notes.js` 调脚本）。仓库自带的 `tools/*.mjs`（coverage /
+  supersession / doc-budget）是给目标仓库自己的 CI 用的，仍需
+  `node` 在 PATH 里、仍需 `package.json` 挂脚本 —— 那部分不在本保证内。
 - **代价**：`verify-notes.mjs` 多起一次 `git rev-parse`（可忽略）。
 - **代价**：`--root` 是个新参数，需要知道它存在。默认行为已覆盖绝大多数场景。
 - **已知缺口**：vendored 的 `.ts` 脚本在**没有 `package.json`** 的仓库里
@@ -111,8 +120,21 @@ return PACKAGE_ROOT;                                      // cwd 完全不是仓
 ## Verification
 
 ```sh
-node --test tools/standalone.test.mjs   # 6 项
+node --test tools/standalone.test.mjs        # 6 项
+node --test tools/non-node-project.test.mjs  # 2 项（无 node 环境 / 非 Node 项目）
 ```
+
+后两条断言在**没有 `package.json`、没有 `node_modules`、没有 `.git`、
+`PATH` 指向空目录**的临时项目里，经 `lib/notes.js` 的服务入口跑：
+
+| 断言 | 结果 |
+|---|---|
+| 三道门禁全部 `passed: true` 且 `exitCode: 0` | ✅ |
+| 目标仓库里**不出现** `package.json` / `node_modules`（顶层只剩 `.agents`）| ✅ |
+| 同一非 Node 项目里删掉 `## Alternatives considered` → `format` 门禁红、非零退出码 | ✅ |
+
+最后一条是防「跑成空转」：没有它，上面两条绿也可能只是三条门禁都没真跑。
+
 
 六条断言（全部在**临时构造的独立仓库**里跑，不用桩）：
 

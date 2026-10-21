@@ -94,9 +94,13 @@ npm run notes:supersession:last  # = --range HEAD~1..HEAD
   否掉：多一个选择就多一次选错。默认行为应该是最有用的那个，
   而 `check` 最有用的时候就是提交后跑全量。
 - **`fault-injection` 自动发现测试文件**（扫 `tools/*.test.mjs`）—
-  不会忘登记。否掉：`tools/` 下还有 board / plugin / integration 等
+  不会忘登记。当时否掉：`tools/` 下还有 board / plugin / integration 等
   与门禁无关的测试，自动发现会把它们也算进来，那个清单就失去意义 ——
   它记录的是「**这道门禁**的故障注入在哪」，不是「有哪些测试」。
+  后来这个方案被**部分采纳**：声明表留着，另外加一次「磁盘上的 `*.test.mjs`
+  必须全部登记」的反向对账，因为只做正向检查时，新测试漏登记能一路绿
+  15 个文件。见
+  [2026-10-21-fault-injection-list-must-reconcile-with-disk.md](./2026-10-21-fault-injection-list-must-reconcile-with-disk.md)。
 
 ## Consequences
 

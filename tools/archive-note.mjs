@@ -66,32 +66,6 @@ const UPSTREAM_ARCHIVE = join(
 );
 
 /**
- * 只对**围栏代码块之外**的行应用变换。
- *
- * @param {string} content 原文。
- * @param {(line: string) => string} fn 逐行变换。
- * @returns {string} 处理后的文本。
- */
-export function replaceOutsideFences(content, fn) {
-  const lines = content.split('\n');
-  const out = [];
-  let inFence = false;
-  let fenceMark = '';
-
-  for (const line of lines) {
-    const m = /^\s*(```|~~~)/.exec(line);
-    if (m !== null) {
-      if (!inFence) { inFence = true; fenceMark = m[1]; }
-      else if (m[1] === fenceMark) { inFence = false; }
-      out.push(line);           /* 围栏行本身不动 */
-      continue;
-    }
-    out.push(inFence ? line : fn(line));
-  }
-  return out.join('\n');
-}
-
-/**
  * 改写单个链接目标；不适用时原样返回。
  *
  * @param {string} target 链接目标。
@@ -131,15 +105,6 @@ function rewriteOne(target, fromDir, toDir, notesRoot) {
   return rewritten + suffix;
 }
 
-/**
- * 把一段 markdown 里的相对链接改写成「从归档后的位置也能解析」的形式。
- *
- * @param {string} content 笔记原文（归档**前**）。
- * @param {string} fromDir 归档**前**该笔记所在目录。
- * @param {string} toDir 归档**后**该笔记所在目录。
- * @param {string} notesRoot 笔记根目录。
- * @returns {{ content: string, changed: number }} 改写结果与条数。
- */
 export function rewriteRelativeLinks(content, fromDir, toDir, notesRoot) {
   /* ★ 改用共用件：它同时认行内式与参考式，且内部已做围栏过滤
      （`blankOutFences`），所以这里的围栏语义与 md-links 完全一致。

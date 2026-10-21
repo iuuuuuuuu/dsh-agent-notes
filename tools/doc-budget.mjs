@@ -75,6 +75,9 @@ function loadManifest() {
   if (budgets === null || typeof budgets !== 'object' || Array.isArray(budgets)) {
     return { budgets: undefined, error: '预算清单缺少 budgets 对象。' };
   }
+  if (Object.keys(budgets).length === 0) {
+    return { budgets: undefined, error: '预算清单至少需要一个预算项。' };
+  }
   for (const [file, limit] of Object.entries(budgets)) {
     if (typeof limit !== 'number' || !Number.isInteger(limit) || limit <= 0) {
       return { budgets: undefined, error: `预算项 ${file} 必须是正整数。` };

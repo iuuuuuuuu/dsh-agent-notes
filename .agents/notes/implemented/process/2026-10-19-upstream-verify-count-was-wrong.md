@@ -9,6 +9,14 @@ Status: implemented
 > [2026-10-19-three-upstream-gates-not-applicable.md](../../rejected/architecture/2026-10-19-three-upstream-gates-not-applicable.md)
 > 与
 > [2026-10-19-three-more-upstream-gates-not-applicable.md](../../rejected/architecture/2026-10-19-three-more-upstream-gates-not-applicable.md)。
+>
+> **订正（2026-10-21）：原标题说的「42 就是真实分母」只对了一半。** 42 是
+> 「被 `package.json` 引用的 verify 脚本」这一口径下的计数，而这一口径会漏掉
+> 上游**忘了接进 script** 的脚本（实测含 2 个 SSH 相关脚本）。按磁盘枚举，
+> `scripts/verify-*.ts` 共 76 个，其中 `*.spec.ts` 30 个，**门禁本体 46 个**。
+> 本篇的教训（「按文件名推断会出错」「分类要由脚本断言」）仍然成立且更有价值；
+> 被推翻的只是分母。逐条唯一分类见
+> [2026-10-21-upstream-46-gates-classified-exactly-once.md](./2026-10-21-upstream-46-gates-classified-exactly-once.md)。
 
 Independent: 本篇处理的是**核查清单本身的准确性**，与「某个门禁适不适用」
 是不同层面的问题 —— 后者判得对不对，取决于前者有没有把清单列对。
@@ -115,3 +123,30 @@ const realScripts = [...new Set(
 ```
 
 它只认带 `scripts/` 前缀的真实路径 —— 这正是「不数 script 名」的落地。
+
+## 事后订正（2026-10-21）
+
+复核上游固定提交 `687f282` 的真实目录后，本篇有**两处必须改正**：
+
+**① 分母仍是错的：不是 42，是 46。**
+
+```sh
+cd .probe/upstream-a-687f282/scripts
+ls verify-*.ts | grep -v '\.spec\.ts$' | wc -l      # 46（实现文件）
+ls verify-*.spec.ts | wc -l                          # 30（测试文件，不能算门禁）
+```
+
+46 个实现里，44 个被 `package.json` 或 CI 引用，2 个**没有任何地方引用**：
+`verify-ssh-helper-artifact.ts`、`verify-ssh-helper-ssh.ts`。上一轮数出 42，
+是因为那个 URL 探测把「探测失败」当成了「文件不存在」——**同一个错又被修了一次**。
+
+**② 「本仓库没有 `packages/` 所以不适用」这个判据本身不成立。**
+
+下表左列那些判定当时按**目录是否存在**下的，例如「没有 `packages/client/`
+→ client 三门不适用」「没有 `packages/` → `package-paths` 不适用」。
+缺目录只能说明上游那个**实现路径**不存在，说明不了它**防的问题**不存在：
+本仓库同样是单包发布，包元数据、依赖字段、安装布局这些问题是真存在的，
+只是载体从 `packages/*/package.json` 变成了仓库根 `package.json`。
+逐条重判的结论见
+[2026-10-19-upstream-comparison-complete.md](./2026-10-19-upstream-comparison-complete.md)
+的订正节与本轮 46 项清单。

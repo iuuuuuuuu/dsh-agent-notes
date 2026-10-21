@@ -130,3 +130,7 @@ node .probe/tmp/eval-anchor.mjs       # 216 个标题的字符分布
 ```
 
 这些脚本只读取仓库内容，不写盘、不联网。
+> 2026-10-21 补记：第一节「要正确实现只有两条路」漏了第三条（一次性抓取真实渲染结果
+> 做固定语料、之后离线比对），该条已单独登记为已知缺口：
+> [2026-10-21-anchor-slug-gate-third-path-known-gap.md](../../proposed/process/2026-10-21-anchor-slug-gate-third-path-known-gap.md)。
+> 本篇的结论（不引 slug 库、不联网抓）不变，因此正文不翻转，只加这条指路。

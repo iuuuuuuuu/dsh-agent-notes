@@ -137,6 +137,11 @@ jobs:
       - name: Markdown 链接
         run: npm run md:links
 
+      # `docs/` 里那 46 道判定表的行内 `文件:行号` 引用（链接由上一道管，
+      # 但行内代码引用不是链接，mdast 看不到它）。空集合会红。
+      - name: 行内引用
+        run: npm run doc:refs
+
       - name: 双语文档结构
         run: npm run docs:bilingual
 

@@ -8,7 +8,7 @@
  * 用法：node tools/live-evidence.mjs
  */
 import { createRequire } from 'node:module';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -72,11 +72,24 @@ const DSH_DIST = findDshDist();
 /**
  * 从 DSH 自己的依赖树里解析一个包（这是唯一可解析的位置）。
  *
+ * 关键细节：`createRequire` 的入参必须是**文件名**。传一个目录（例如直接把
+ * `$DSH_DIST` 指到 `.../dependencies/dsh`）时，Node 会退到它的**父目录**去找
+ * `node_modules`，结果是 `Cannot find module '@deepseek-ai/cordis'` ——
+ * 依赖明明就在 `.../dependencies/dsh/node_modules/@deepseek-ai/cordis`。
+ * 所以这里先把目录补成 `package.json`，让解析锚在所给目录内部。
+ *
  * @param {string} specifier 包名。
  * @returns {any} 该包的模块命名空间。
  */
 function loadFromDsh(specifier) {
-  const require = createRequire(DSH_DIST);
+  const anchor = (() => {
+    try {
+      return statSync(DSH_DIST).isDirectory() ? join(DSH_DIST, 'package.json') : DSH_DIST;
+    } catch {
+      return DSH_DIST;
+    }
+  })();
+  const require = createRequire(anchor);
   const resolved = require.resolve(specifier);
   return createRequire(resolved)(specifier);
 }

@@ -16,12 +16,16 @@
  * 上游 `deepseek-ai/deepseek-harness` 用 `scripts/verify-md-links.ts`
  * 覆盖这件事（依赖 mdast 做 AST 解析，还校验 `#fragment` 锚点）。
  *
- * ## 为什么不用 mdast
+ * ## 关于 mdast（本段结论已随实现更新）
  *
- * 本仓库的链接形态很简单：行内链接 `[文字](目标)` 与图片 `![alt](目标)`。
- * 用 mdast 要引入一棵依赖树（以及它的 GFM 扩展）才能覆盖同样的事，
- * 而收益只有「极端边缘情况更准」——例如链接出现在代码块里要不要跳过。
- * 这一点用「跳过围栏代码块」的轻量扫描就能处理，见 `stripCodeFences`。
+ * 原先这里写着「为什么不用 mdast」，理由是链接形态简单、轻量扫描够用、
+ * 收益只在极端边缘情况。**那个判断后来被推翻**：手写正则分不清
+ * 「目标里的成对括号」（`docs/a(b).md`）与「标题里的引号」，
+ * 参考式链接也被漏掉。详见
+ * `.agents/notes/implemented/bug-fix/2026-10-19-i-was-wrong-about-not-needing-mdast.md`。
+ *
+ * 现在提取统一走共用件 `tools/markdown-links.mjs`（基于 mdast），
+ * 本文件只管「扫哪些文件、目标在不在、是否越界」。
  *
  * **不做 `#fragment` 锚点校验**：本仓库当前零处使用锚点链接（实测 grep）。
  * 为不存在的需求增加「标题转 slug」这套逻辑，是纯粹的复杂度 —— 而它一旦
@@ -68,23 +72,23 @@ const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
  *
  * 但**指向**归档笔记的链接必须继续检查 —— 那是活文档里的引用，断了要修。
  */
-function collectDocuments() {
+function collectDocuments(root = PACKAGE_ROOT) {
   const files = [];
 
   /* 顶层文档。 */
-  for (const name of readdirSync(PACKAGE_ROOT)) {
+  for (const name of readdirSync(root)) {
     if (!name.endsWith('.md')) continue;
-    const full = join(PACKAGE_ROOT, name);
+    const full = join(root, name);
     if (statSync(full).isFile()) files.push(name);
   }
 
   /* 笔记树：递归收集，跳过归档区。 */
   const walk = (relDir) => {
-    const full = join(PACKAGE_ROOT, relDir);
+    const full = join(root, relDir);
     if (!existsSync(full)) return;
     for (const name of readdirSync(full)) {
       const childRel = `${relDir}/${name}`;
-      const childFull = join(PACKAGE_ROOT, childRel);
+      const childFull = join(root, childRel);
       const info = statSync(childFull);
       if (info.isDirectory()) {
         /* 归档区不作为校验源（理由见上方）。 */
@@ -97,32 +101,15 @@ function collectDocuments() {
   };
   walk('.agents/notes');
 
+  /* `docs/`：不是笔记、不是顶层文档，长期以来**不在任何引用门禁的范围内**。
+     复审（`.probe/review-final-2.md` 的 P2-6）指出的正是这点：`docs/`
+     里那份 46 道判定表是唯一承载全部 `文件:行号` 判定的产物，
+     而它的引用只有人眼能查 —— 一轮里就漂了四处（`README.md:409→410`、
+     `README.en.md:474→477` 等）。相对链接先纳入本门禁，
+     `文件:行号` 那种行内引用由 `tools/doc-refs.mjs` 承担。 */
+  walk('docs');
+
   return files.sort();
-}
-
-/**
- * 把围栏代码块与行内代码替换成等长空白。
- *
- * 为什么保留长度：替换成等长空白后，报错时给出的行列位置仍然对应原文，
- * 不必做位置换算。
- *
- * 为什么要跳过：文档里常有「链接长这样」的示例（本仓库的笔记里就有），
- * 那些不是真链接。不跳过会产生大量误报，而误报多的门禁会被绕过。
- *
- * @param {string} text 原文。
- * @returns {string} 同长度、代码区域已清空的文本。
- */
-function stripCodeFences(text) {
-  const blank = (s) => s.replace(/[^\n]/g, ' ');
-
-  /* 围栏代码块：``` 或 ~~~ 开头，允许有语言标注。 */
-  let out = text.replace(/(^|\n)(```|~~~)[^\n]*\n[\s\S]*?\n\2[^\n]*(?=\n|$)/g,
-    (whole) => blank(whole));
-
-  /* 行内代码：成对的单反引号（不跨行）。 */
-  out = out.replace(/`[^`\n]*`/g, (whole) => blank(whole));
-
-  return out;
 }
 
 /**
@@ -133,7 +120,7 @@ function stripCodeFences(text) {
  *   - `[文字](<目标>)`（CommonMark 的尖括号目标，用来含空格）
  *   - `![alt](目标)`（图片）
  *
- * @param {string} text 已去掉代码区域的文本。
+ * @param {string} text **原文**（共用件内部会自己清掉代码区）。
  * @returns {{ target: string, raw: string }[]} 链接目标清单。
  */
 function extractLinks(text) {
@@ -166,16 +153,23 @@ function localPathOf(target) {
 /**
  * 执行校验。
  *
+ * `root` 只为测试存在：真实入口一律用包根。给它一个参数，测试才能在
+ * 临时目录里造一份带 `docs/` 的迷你仓库，从而证明 `docs/` **真的被遍历到**
+ * —— 只断言「真仓库扫到 > 20 个文档」是不够的（`tools/md-links.test.mjs`
+ * 的第一条就是这样，删掉 `walk('docs')` 它照样绿）。
+ *
+ * @param {{ root?: string }} [options] 可选仓库根。
  * @returns {{ checked: number, links: number, errors: string[] }} 结果。
  */
-export function verifyMarkdownLinks() {
-  const documents = collectDocuments();
+export function verifyMarkdownLinks(options = {}) {
+  const root = options.root ?? PACKAGE_ROOT;
+  const documents = collectDocuments(root);
   const errors = [];
   let links = 0;
 
   for (const doc of documents) {
-    const full = join(PACKAGE_ROOT, doc);
-    const found = verifyOne(full, doc, errors);
+    const full = join(root, doc);
+    const found = verifyOne(full, doc, errors, root);
     links += found;
   }
 
@@ -198,14 +192,18 @@ export function verifyMarkdownLinks() {
  */
 function verifyOne(full, label, errors, baseRoot = PACKAGE_ROOT) {
   const text = readFileSync(full, 'utf8');
-  const stripped = stripCodeFences(text);
-  /* ★ 未定义的参考式引用是坏引用 —— 渲染出来是字面的 `[文字][ref]`。
-     原实现完全看不见这类（它只认 `](目标)` 形式）。 */
-  for (const missing of undefinedReferences(stripped)) {
+  /* ★ 直接用原文，不要再 `stripCodeFences`。
+     共用件 `collectRelativeLinks` / `undefinedReferences` 内部已经按 mdast
+     清掉代码区（围栏、行内代码、HTML），再前置一层正则剥离是**双重剥离**：
+     两道口径不同，前置那次会把「未闭合围栏」「缩进围栏」后面的真实内容
+     也留在外面，于是**围栏里的示例被当成断链报出来**（误报）。
+     实测：未闭合围栏与缩进围栏两种输入下，双重剥离比单次多查出
+     `fake.md` 这条本不该报的链接。 */
+  for (const missing of undefinedReferences(text)) {
     errors.push(`${label}: 参考式引用 [${missing}] 没有对应的定义行`);
   }
 
-  const found = extractLinks(stripped);
+  const found = extractLinks(text);
   let links = 0;
 
   for (const { target } of found) {

@@ -363,7 +363,8 @@ function createAgentNotesClient(require) {
     } else if (typeof props.cwd === 'string') {
       scopeCwd = props.cwd;
     }
-    var src = '/agent-notes/ui?session=' + encodeURIComponent(String(sessionId ?? ''));
+    // 文档相对地址由浏览器按 document.baseURI 解析，保留子路径挂载前缀。
+    var src = 'agent-notes/ui?session=' + encodeURIComponent(String(sessionId ?? ''));
     if (scopeCwd !== null && scopeCwd !== '') src += '&cwd=' + encodeURIComponent(scopeCwd);
 
     /* `data-conversation-composer-overlay` 是宿主认的「本视图自己占满整块」标记。
