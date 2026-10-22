@@ -105,10 +105,15 @@ Owner 原话：「我说的版本更新，是指这个注入的**笔记规范**�
 - 正文顺序固定为「版本变化 → 项目副本落后」：前者是「你该知道发生了什么」，
   后者是「你可能要做一件事」，先说事实再说动作。
 
-为什么不做成 `systemPrompt.section` 的 `name`：宿主 `PromptSection` 的字段只有
-`name/order/text/interpolate/complete`（`dsh-system-prompt/lib/types/index.d.ts:52-78`），
-没有独立的显示标题；`name` 是唯一标识（重复注册会抛），把它改成随版本变化的字符串
-会让「同一会话里重装 section」的键也跟着漂。所以标签走正文第一行。
+为什么不做成 `systemPrompt.section` 的 `name`：宿主 `PromptSection` 声明的字段只有
+`name` / `order` / `text` / `interpolate` / `complete` 五个（`@deepseek-ai/dsh-system-prompt`
+的类型声明，2026-10-22 实测读的是本机 DSH 安装里的那一份），**没有独立的显示标题**；
+`name` 是唯一标识（重复注册会抛），把它改成随版本变化的字符串会让「同一会话里
+重装 section」的键也跟着漂。所以标签走正文第一行。
+
+（这里刻意不写宿主文件的绝对路径与行号：那是别人机器上的安装位置，
+写进笔记既校验不了、也会在 CI 上被行内引用门禁判红 —— 这个门禁抓的正是
+「引用了不存在的东西」，包括我自己刚犯的这一次。）
 
 ## Verification
 
