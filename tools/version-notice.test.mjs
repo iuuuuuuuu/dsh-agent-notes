@@ -13,6 +13,7 @@ import test from 'node:test';
 
 import {
   buildVersionChangeHint,
+  buildVersionLabel,
   compareCore,
   readPluginVersion
 } from '../lib/version-notice.js';
@@ -90,4 +91,25 @@ test('「上次见到的版本」会落盘，且重复写同一个值不产生�
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test('标签始终带版本号；刚变过才多一个「已更新」', () => {
+  assert.equal(buildVersionLabel({ current: '0.9.0', lastSeen: '0.9.0' }), 'v0.9.0');
+  assert.equal(buildVersionLabel({ current: '0.9.0', lastSeen: '0.8.0' }), 'v0.9.0 · 已更新');
+  assert.equal(buildVersionLabel({ current: '0.9.0' }), 'v0.9.0', '首次运行不标「已更新」');
+  assert.equal(buildVersionLabel({ current: 'bad' }), undefined, '版本号不认识就不加标签');
+});
+
+test('标签落在标题行上，且正文顺序是「版本提示 → 项目副本落后」', async () => {
+  const { buildPolicyText } = await import('../lib/policy.js');
+  const label = buildVersionLabel({ current: '0.9.0', lastSeen: '0.8.0' });
+  const hint = buildVersionChangeHint({ current: '0.9.0', lastSeen: '0.8.0' });
+  const text = buildPolicyText('项目副本落后', label, hint);
+  const firstLine = text.split('\n')[0];
+  assert.match(firstLine, /^# 决策笔记（Agent Notes） · v0\.9\.0 · 已更新$/, '标签必须挂在标题行，不是正文里');
+  assert.ok(text.indexOf('插件版本已') < text.indexOf('项目副本落后'), '版本变化比副本落后更紧要');
+
+  const plain = buildPolicyText(undefined, 'v0.9.0', undefined);
+  assert.match(plain.split('\n')[0], /· v0\.9\.0$/);
+  assert.equal(buildPolicyText(undefined, undefined, undefined).split('\n')[0], '# 决策笔记（Agent Notes）');
 });

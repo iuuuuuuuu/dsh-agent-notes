@@ -85,6 +85,31 @@ Owner 2026-10-22 原话：「版本更新时 agent 对话根本不会触发提�
 - 只看数字三段比大小，预发布后缀不参与排序：`0.9.0-rc.1 → 0.9.0` 会被
   说成「回退」。这是刻意的，提示只回答「变了没有」。
 
+## 补充（同日）：Owner 澄清要的是**标签**，不是正文里的一段话
+
+Owner 原话：「我说的版本更新，是指这个注入的**笔记规范**这个标签，加一个 xxx 更新的提示，
+这样子提示。」⇒ 光在正文里加一段提示不够，要挂在**看得见的那一行**上。
+
+实现（`buildVersionLabel`，改动落在 `lib/policy.js` 的标题行拼接）：
+
+```text
+# 决策笔记（Agent Notes）· v0.9.0            ← 版本没变：只报坐标
+# 决策笔记（Agent Notes）· v0.9.0 · 已更新   ← 刚变过：多一个标记
+```
+
+三条判据（都有用例）：
+
+- 标签**始终**带版本号 —— 于是「我现在跑的是哪个版本」不用去翻 `package.json`。
+- 「已更新」只在 `lastSeen !== current` 那一次出现；下一次挂载 `lastSeen` 已被记录成
+  `current`，标记自动消失。它标记的是**这一次**的变化，不是永久徽章。
+- 正文顺序固定为「版本变化 → 项目副本落后」：前者是「你该知道发生了什么」，
+  后者是「你可能要做一件事」，先说事实再说动作。
+
+为什么不做成 `systemPrompt.section` 的 `name`：宿主 `PromptSection` 的字段只有
+`name/order/text/interpolate/complete`（`dsh-system-prompt/lib/types/index.d.ts:52-78`），
+没有独立的显示标题；`name` 是唯一标识（重复注册会抛），把它改成随版本变化的字符串
+会让「同一会话里重装 section」的键也跟着漂。所以标签走正文第一行。
+
 ## Verification
 
 - `node --test tools/version-notice.test.mjs` ⇒ `pass 8 / fail 0`：
@@ -94,3 +119,7 @@ Owner 2026-10-22 原话：「版本更新时 agent 对话根本不会触发提�
 - 真故障注入：删掉 `lastSeen === current` 那条守卫 ⇒ `pass 7 / fail 1`
   （红的正是「版本没变不提示」）；还原后 `pass 8 / fail 0`，文件逐字还原。
 - `node -e "import('./lib/index.js')"` ⇒ 模块可加载（新增导入不炸插件激活）。
+
+补充验证：`node --test tools/version-notice.test.mjs` ⇒ `pass 10 / fail 0`
+（新增两条：标签始终带版本号、刚变过才带「已更新」；标签必须落在标题行且正文顺序正确）。
+`npm test` ⇒ `tests 578 / pass 578 / fail 0`。
