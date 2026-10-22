@@ -62,11 +62,6 @@ const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const WORKFLOW_DIR = join(PACKAGE_ROOT, '.github', 'workflows');
 
 /**
- * 豁免：这些步骤在 CI 里有**独立**的实现（判据不同），不算缺失。
- *
- * 键是本地链里的步骤名，值说明 CI 用什么替代。
- */
-/**
  * `continue-on-error` 唯一允许的形态：**字面量 false**。
  *
  * 这里刻意用「默认拒绝」而不是「列举所有 true 的写法」。第一版列举了
@@ -103,6 +98,11 @@ function offendingContinueOnError(yml) {
 const CANCEL_ONLY_FOR_PR =
   /^cancel-in-progress:\s*\$\{\{\s*github\.event_name\s*==\s*'pull_request'\s*\}\}\s*(?:#.*)?$/im;
 
+/**
+ * 豁免：这些步骤在 CI 里有**独立**的实现（判据不同），不算缺失。
+ *
+ * 键是本地链里的步骤名，值说明 CI 用什么替代。
+ */
 const CI_ALTERNATIVES = {
   'notes:coverage:last': 'CI 用 `--range "$github.event.before..HEAD"`（覆盖整个 push 的所有提交，更准）',
   'notes:supersession:last': '同上，用 event.before 范围',

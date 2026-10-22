@@ -88,5 +88,12 @@ Status: implemented
   还原后 `32 / 32`。
 - 真实仓库此刻仍全绿：`node tools/ci-alignment.mjs` ⇒ 三道全过、`14 条 CI 安全属性均未被删改`。
 
+补充（同日）：`tools/version-notice.test.mjs` 里那条「判据只有一处」原来只直接调
+`isVersion`，没跑子进程也没写文件 —— 按 `tools/**` 的口径这算没验证到真实路径
+（CodeRabbit 在 PR #30 上指出的是这一点，Minor 但成立）。已补一条端到端用例：
+起真 node 子进程、读写真状态文件，走「首次挂载 → 版本没变 → 真升级 → 再挂载」四步，
+断言提示只在升级那一次出现、标签在那一刻多一个「已更新」。
+真故障注入（让 `buildVersionChangeHint` 恒返回 `undefined`）⇒ 4 条红，含该端到端用例。
+
 相关笔记：[`./2026-10-22-single-form-matching-and-second-source-of-truth.md`](./2026-10-22-single-form-matching-and-second-source-of-truth.md)
 （同一批缺陷的第一版修法，本文更正其中「列举等价写法」那半边）。

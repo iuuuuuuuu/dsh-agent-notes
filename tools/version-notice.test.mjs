@@ -9,6 +9,10 @@
 //   ③ 版本号形态不认识就不猜（宁可不说话）
 
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 
 import {
@@ -124,4 +128,61 @@ test('版本判据只有一处：state 落盘与提示生成共用 isVersion', (
   assert.equal(isVersion('0.9'), false);
   assert.equal(isVersion('v0.9.0'), false);
   assert.equal(isVersion(undefined), false);
+});
+
+test('端到端（真子进程 + 真状态文件）：升级提示只出现一次，第三次消失', () => {
+  /* CodeRabbit 在 PR #30 上指出：上面那条只直接调 isVersion，没有真跑子进程、
+     也没写测试文件 —— 而 `tools/**` 的判据要求测试驱动真实路径。
+     这里改成：起真 node 子进程，读真状态文件，走一遍「装旧版 → 升级 → 再挂载」。 */
+  const dir = mkdtempSync(join(tmpdir(), 'version-e2e-'));
+  const file = join(dir, 'state.json');
+  const script = join(dir, 'run.mjs');
+  try {
+    /* 子进程脚本只做「一次插件挂载」会做的事，然后用 JSON 报结果。
+       路径用 file URL 传进去，避免依赖子进程 cwd。 */
+    writeFileSync(script, `
+const [stateFile, current] = process.argv.slice(2);
+const { createStateStore } = await import(${JSON.stringify(new URL('../lib/state.js', import.meta.url).href)});
+const { buildVersionChangeHint, buildVersionLabel } = await import(${JSON.stringify(new URL('../lib/version-notice.js', import.meta.url).href)});
+const store = createStateStore({}, stateFile);
+const lastSeen = store.pluginVersion();
+const label = buildVersionLabel({ current, lastSeen });
+const hint = buildVersionChangeHint({ current, lastSeen });
+store.setPluginVersion(current);
+process.stdout.write(JSON.stringify({ lastSeen: lastSeen ?? null, label: label ?? null, hint: hint ?? null }));
+`, 'utf8');
+
+    const run = (current) => {
+      const r = spawnSync(process.execPath, [script, file, current], {
+        encoding: 'utf8', windowsHide: true
+      });
+      assert.equal(r.status, 0, `子进程必须成功：${r.stderr}`);
+      return JSON.parse(r.stdout);
+    };
+
+    /* 第一次挂载：没记录过 ⇒ 不提示，标签只有版本号。 */
+    const first = run('0.9.0');
+    assert.equal(first.lastSeen, null, '首次运行没有上次记录');
+    assert.equal(first.hint, null, '首次运行不得提示');
+    assert.equal(first.label, 'v0.9.0');
+
+    /* 版本没变再挂载：仍然不提示（不能每轮刷）。 */
+    const second = run('0.9.0');
+    assert.equal(second.lastSeen, '0.9.0', '上次记录必须来自真状态文件');
+    assert.equal(second.hint, null, '版本没变不得提示');
+    assert.equal(second.label, 'v0.9.0');
+
+    /* 真升级：这次提示一次，标签多一个「已更新」。 */
+    const third = run('0.10.0');
+    assert.match(third.hint, /0\.9\.0/);
+    assert.match(third.hint, /0\.10\.0/);
+    assert.equal(third.label, 'v0.10.0 · 已更新');
+
+    /* 再挂载一次：提示自动消失（它标记的是那一次变化，不是永久徽章）。 */
+    const fourth = run('0.10.0');
+    assert.equal(fourth.hint, null, '同一次升级不得提示第二遍');
+    assert.equal(fourth.label, 'v0.10.0');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
