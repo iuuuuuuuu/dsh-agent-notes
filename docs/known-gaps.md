@@ -80,3 +80,38 @@
   本插件只提供能接的口子，并把「接了会看到什么」写清楚。
 - **重访信号**：下游仓库有人要求「笔记门禁接 CI」时，直接用 `--since origin/main`。
 - 证据：[笔记覆盖门禁](../.agents/notes/implemented/process/2026-10-18-notes-coverage-gate.md)。
+
+## 8. 归档树判据是字面的，不认 front matter
+
+`lib/archive-layout.js` 认 `Archived:` 必须在**第 4 行**、第 3 行是 `Status: implemented`。
+笔记若把归档元数据改放进 front matter（例如 `archived: 2026-10-22`），
+这套判据会判失败 —— 措辞是「布局不对」而不是「格式没被支持」。
+
+- **为什么不修**：本仓库的归档块形状是 vendored 脚本定下的（头块五行布局），
+  front matter 形式的归档需要先改受管脚本的形状约定，那属于改上游。
+- **重访信号**：真有人用 front matter 写归档笔记。那时先把 vendored 的头块判据
+  与 `lib/archive-layout.js` 一起改，并补一条「两种形状都接受」的回归。
+- 证据：[归档树布局、归档日期与封印清单 schema 原本没有任何门禁](../.agents/notes/implemented/bug-fix/2026-10-22-archive-layout-has-no-gate.md)。
+
+## 9. 源码侧文档引用只认字面路径 token
+
+`tools/doc-refs.mjs` 的源码侧判据用正则抽 `docs/…md` / `.agents/notes/…md`
+的**字面** token。源码里若用模板拼接出路径（`` `${dir}/x.md` ``），门禁看不见。
+
+- **为什么不修**：与上游同款限制 —— 上游 `verify-doc-refs.ts:25` 也是字面 token 匹配。
+  要支持拼接就得引入 TS AST 解析，违反「零 `@deepseek-ai/*` 依赖」与「本仓库零
+  TypeScript 工具链」两条硬约束。
+- **重访信号**：本仓库源码里真的开始用拼接拼文档路径时。
+- 证据：[源码里引用的文档路径也要有门禁](../.agents/notes/implemented/process/2026-10-22-source-doc-refs-need-a-gate.md)。
+
+## 10. 三份白名单各自防腐、互不知道
+
+`tools/doc-refs.mjs` 的 `EXTERNAL_REFS`（文档侧）、`SOURCE_EXTERNAL_REFS`（源码侧）、
+`tools/verify-plugin.mjs` 的 `RUNTIME_ARTIFACTS`（豁免名单）三张表各自防腐
+（理由非空 + 必须被命中），但**互不知情**：一条路径在 A 表里被放行，B 表照样会红。
+
+- **为什么不修**：合并三张表会把「文档侧/源码侧/包内产物」三种语义不同的豁免
+  挤进一个键空间，键的形状就不再唯一。当前三张表各自边界清楚，
+  代价是要在三个地方维护同一件事。
+- **重访信号**：出现第四张白名单，或同一路径在三张表里都出现（那时合并的收益就具体了）。
+- 证据：[源码里引用的文档路径也要有门禁](../.agents/notes/implemented/process/2026-10-22-source-doc-refs-need-a-gate.md)。

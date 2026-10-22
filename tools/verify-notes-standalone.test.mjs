@@ -73,8 +73,13 @@ function sandbox(options = {}) {
     cpSync(join(ROOT, 'tools', 'verify-notes.mjs'), join(dir, 'tools', 'verify-notes.mjs'));
   }
   if (options.withLib === true) {
+    /* 拷**整个 lib 目录**，不是只拷 notes.js —— README 承诺的用法是
+       `cp -r dsh-agent-notes/lib`，而 lib/notes.js 会 import 同目录的
+       兄弟模块（archive-layout.js 等）。只拷一个文件时 import 会在
+       模块解析阶段就炸掉，根本走不到「门禁脚本缺失」那条判据，
+       那样测的就不是「缺门禁脚本」而是「模块没拷全」了。 */
     mkdirSync(join(dir, 'lib'), { recursive: true });
-    cpSync(join(ROOT, 'lib', 'notes.js'), join(dir, 'lib', 'notes.js'));
+    cpSync(join(ROOT, 'lib'), join(dir, 'lib'), { recursive: true });
   }
   if (options.withSkill === true) {
     const scripts = join(dir, '.agents', 'skills', 'write-notes-like-deepseek', 'scripts');
@@ -157,6 +162,24 @@ test('独立仓库：脚本缺失时报错要列出找过哪些目录', () => {
   assert.match(result.out, /已查找：/, '必须列出找过哪些目录');
   /* 候选全不存在时不能留空行 —— 「一个都没找到」本身就是关键信息。 */
   assert.doesNotMatch(result.out, /已查找：\s*\n/, '「已查找」不得为空行');
+});
+
+test('独立仓库：只拷 lib/notes.js（漏了兄弟模块）要说清该拷什么，不许抛裸模块错误', () => {
+  /* lib/notes.js 会 import 同目录的兄弟模块（archive-layout.js 等）。
+     只拷一个文件时，动态 import 在模块解析阶段就炸 ——
+     旧实现把 ERR_MODULE_NOT_FOUND 原样抛给用户，只有一句 Node 的
+     模块解析错误，看不出「你少拷了 lib 目录」。 */
+  const dir = sandbox({ withTools: true, withSkill: true });
+  mkdirSync(join(dir, 'lib'), { recursive: true });
+  cpSync(join(ROOT, 'lib', 'notes.js'), join(dir, 'lib', 'notes.js'));
+
+  const result = run(dir, 'tools/verify-notes.mjs');
+  assert.equal(result.code, 2,
+    `模块没拷全属「无法进行」，退出码必须是 2：\n实际 ${result.code}\n${result.out}`);
+  assert.doesNotMatch(result.out, /at file:\/\/|at async |node:internal\/modules/,
+    `不得抛未捕获异常堆栈：\n${result.out}`);
+  assert.match(result.out, /加载失败/, `必须说明是加载失败：\n${result.out}`);
+  assert.match(result.out, /cp -r/, `必须给出怎么办：\n${result.out}`);
 });
 
 test('本仓库：正常路径不受影响', () => {

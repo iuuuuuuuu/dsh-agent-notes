@@ -24,7 +24,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 
-import { collectInlineRefs, verifyDocRefs } from './doc-refs.mjs';
+import { collectInlineRefs, collectSourceScanFiles, verifyDocRefs, verifySourceDocRefs } from './doc-refs.mjs';
 
 /**
  * 造一个 fixture 仓库：`files` 是「相对路径 → 内容」。
@@ -229,4 +229,131 @@ test('doc-refs: 指向 .probe/ 的引用被跳过（探针目录 gitignore，别
   }, (root) => {
     assert.deepEqual(verifyDocRefs({ root }).errors, []);
   });
+});
+
+/* ── 源码侧（上游 A 的 verify-doc-refs 方向） ──────────────────────────────────
+ *
+ * 上游 A 的 `scripts/verify-doc-refs.ts` 扫**源码**里写下的 `docs/*.md` 与
+ * `.agents/notes/*.md` 路径。本仓库原先只做文档侧（行内 `文件:行号`），
+ * 源码侧无人看 —— 源码注释里的文档路径断了也没人知道。
+ */
+
+test('doc-refs: 源码里引用的文档不存在必须红', () => {
+  withRepo({
+    'tools/x.mjs': '// 见 docs/missing.md\n',
+    'docs/ok.md': '# ok\n\n见 `lib/small.js:1`。\n',
+    'lib/small.js': 'const a = 1;\n'
+  }, (root) => {
+    const result = verifySourceDocRefs({ root, sourceExternalRefs: {} });
+    assert.equal(result.errors.length, 1);
+    assert.match(result.errors[0], /tools\/x\.mjs:1 源码里引用的文档不存在：`docs\/missing\.md`/);
+  });
+});
+
+test('doc-refs: 源码里引用的文档存在时必须绿（否则上面那条不是一律报错）', () => {
+  withRepo({
+    'tools/x.mjs': '// 见 docs/ok.md\n',
+    'docs/ok.md': '# ok\n\n见 `lib/small.js:1`。\n',
+    'lib/small.js': 'const a = 1;\n'
+  }, (root) => {
+    assert.deepEqual(verifySourceDocRefs({ root, sourceExternalRefs: {} }).errors, []);
+  });
+});
+
+test('doc-refs: 源码侧白名单必须按文件粒度生效（别的文件引同一路径仍要红）', () => {
+  /* 文件级粒度是刻意的：`.agents/notes/AGENTS.md` 这个名字本仓库将来可能
+     真的补上，路径级白名单会变成永不触发的死规则。 */
+  withRepo({
+    'tools/a.mjs': '// 见 .agents/notes/AGENTS.md\n',
+    'tools/b.mjs': '// 见 .agents/notes/AGENTS.md\n',
+    'docs/ok.md': '# ok\n\n见 `lib/small.js:1`。\n',
+    'lib/small.js': 'const a = 1;\n'
+  }, (root) => {
+    const result = verifySourceDocRefs({
+      root,
+      sourceExternalRefs: { 'tools/a.mjs::.agents/notes/AGENTS.md': '上游 A 的笔记规范文件' }
+    });
+    assert.equal(result.errors.length, 1);
+    assert.match(result.errors[0], /tools\/b\.mjs:1 源码里引用的文档不存在/);
+  });
+});
+
+test('doc-refs: 源码侧白名单条目没有理由必须红（防腐之一）', () => {
+  withRepo({
+    'tools/a.mjs': '// 见 .agents/notes/AGENTS.md\n',
+    'docs/ok.md': '# ok\n\n见 `lib/small.js:1`。\n',
+    'lib/small.js': 'const a = 1;\n'
+  }, (root) => {
+    const result = verifySourceDocRefs({
+      root,
+      sourceExternalRefs: { 'tools/a.mjs::.agents/notes/AGENTS.md': '  ' }
+    });
+    assert.equal(result.errors.length, 1);
+    assert.match(result.errors[0], /白名单条目 `tools\/a\.mjs::\.agents\/notes\/AGENTS\.md` 没有写理由/);
+  });
+});
+
+test('doc-refs: 源码侧白名单条目从未命中必须红（死条目不得当校验）', () => {
+  withRepo({
+    'tools/a.mjs': '// 见 docs/ok.md\n',
+    'docs/ok.md': '# ok\n\n见 `lib/small.js:1`。\n',
+    'lib/small.js': 'const a = 1;\n'
+  }, (root) => {
+    const result = verifySourceDocRefs({
+      root,
+      sourceExternalRefs: { 'tools/a.mjs::.agents/notes/AGENTS.md': '写了理由但没人引用它' }
+    });
+    assert.equal(result.errors.length, 1);
+    assert.match(result.errors[0], /源码侧白名单条目 `tools\/a\.mjs::\.agents\/notes\/AGENTS\.md` 从未命中任何引用/);
+  });
+});
+
+test('doc-refs: 源码侧空语料不得当绿', () => {
+  withRepo({
+    'docs/ok.md': '# ok\n\n没有源码。\n'
+  }, (root) => {
+    const result = verifySourceDocRefs({ root, sourceExternalRefs: {} });
+    assert.ok(result.errors.some((error) => error.includes('没有扫到任何源码文件')));
+  });
+});
+
+test('doc-refs: 源码侧扫到文件但一条文档路径都没有也不得当绿', () => {
+  withRepo({
+    'tools/a.mjs': '// 什么文档都没提\n',
+    'docs/ok.md': '# ok\n\n见 `lib/small.js:1`。\n',
+    'lib/small.js': 'const a = 1;\n'
+  }, (root) => {
+    const result = verifySourceDocRefs({ root, sourceExternalRefs: {} });
+    assert.ok(result.errors.some((error) => error.includes('源码里没有一条文档路径引用')));
+  });
+});
+
+test('doc-refs: 源码侧排除测试文件与生成的 client 产物', () => {
+  /* 测试夹具里**故意**引用不存在的文档路径来证明门禁会红；把它们扫进来
+     就是拿测试数据当仓库语料。`lib/client.js` 是 `src/client.js` 的生成产物，
+     扫两遍等于把同一条引用计两次。 */
+  withRepo({
+    'tools/a.test.mjs': '// 见 docs/missing.md\n',
+    'lib/client.js': '// 见 docs/missing-too.md\n',
+    'tools/b.mjs': '// 见 docs/ok.md\n',
+    'docs/ok.md': '# ok\n\n见 `lib/small.js:1`。\n',
+    'lib/small.js': 'const a = 1;\n'
+  }, (root) => {
+    const result = verifySourceDocRefs({ root, sourceExternalRefs: {} });
+    assert.deepEqual(result.errors, []);
+    /* 被排除的必须是 `tools/a.test.mjs` 与 `lib/client.js`；剩下的两个
+       （`tools/b.mjs` 与 `lib/small.js`）都要扫到。 */
+    const scanned = collectSourceScanFiles(root);
+    assert.ok(!scanned.includes('tools/a.test.mjs'), '测试文件必须被排除');
+    assert.ok(!scanned.includes('lib/client.js'), '生成的 client 产物必须被排除');
+    assert.ok(scanned.includes('tools/b.mjs'));
+    assert.ok(scanned.includes('lib/small.js'));
+  });
+});
+
+test('doc-refs: 真仓库的源码侧文档路径引用全部可解析', () => {
+  const result = verifySourceDocRefs();
+  assert.deepEqual(result.errors, []);
+  assert.ok(result.checked >= 10, `至少要扫到十几个源码文件，实际 ${result.checked}`);
+  assert.ok(result.refs >= 1, `源码里应当有文档路径引用，实际 ${result.refs}`);
 });

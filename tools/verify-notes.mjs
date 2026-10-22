@@ -63,9 +63,23 @@ async function loadGateRunner() {
       : [])
   ];
 
+  const failures = [];
   for (const candidate of candidates) {
     if (!existsSync(candidate.path)) continue;
-    const module = await import(pathToFileURL(candidate.path).href);
+    let module;
+    try {
+      module = await import(pathToFileURL(candidate.path).href);
+    } catch (error) {
+      /* `lib/notes.js` 会 import 同目录的兄弟模块（如 `archive-layout.js`），
+         只拷一个文件就会在这里炸成裸的 ERR_MODULE_NOT_FOUND ——
+         用户看到的是 Node 的模块解析错误，不是「你少拷了哪些文件」。
+         记下来，最后一起报出去。 */
+      failures.push(
+        `${candidate.label}（${candidate.path}）加载失败：`
+        + `${error instanceof Error ? error.message : String(error)}`
+      );
+      continue;
+    }
     if (typeof module.runAllGates === 'function') return module.runAllGates;
   }
 
@@ -74,8 +88,10 @@ async function loadGateRunner() {
       '找不到笔记门禁实现（runAllGates）。',
       '  本脚本只做 CLI 外壳，判定逻辑在 lib/notes.js —— 它是「空集合不算通过」',
       '  的唯一真源，复制一份会立刻产生第二份真相。',
+      ...(failures.length > 0 ? ['', '  尝试过的候选：', ...failures.map((line) => `    - ${line}`)] : []),
       '',
-      '  在别的仓库里用时请把实现一起带过去：',
+      '  在别的仓库里用时请把实现一起带过去（**整个 lib 目录**，',
+      '  lib/notes.js 会 import 同目录的兄弟模块，只拷一个文件跑不起来）：',
       '    cp -r dsh-agent-notes/lib  <目标仓库>/',
       '    cp -r dsh-agent-notes/skills <目标仓库>/',
       '  或用 $DSH_AGENT_NOTES_LIB 指向 lib/notes.js 的绝对路径。',

@@ -35,11 +35,28 @@ function fixture() {
   }
 }
 
+/**
+ * 历史/当前清单里用到的**合法**键与封印。
+ *
+ * ## 为什么不用随手编的假值
+ *
+ * `lib/notes.js` 的 archived 前置校验分两层：`lib/archive-layout.js` 先验**当前**
+ * 清单的封闭 schema（键须 `archived/` 开头、封印须 `sha256:<64 位小写十六进制>`），
+ * 然后才做**历史基线**的封印逐条比对。
+ *
+ * 夹具若写成 `"seal-a"` / `testing/old.md`，第一层就先判红，第二层根本不跑 ——
+ * 测的就不是「封印被改」而是「清单 schema 不合法」，而断言还在等
+ * `Archived seal changed or removed`，于是用例变成一个测不到目标机制的红。
+ */
+const OLD_KEY = 'archived/testing/2026-01-01-old.md';
+const SEAL_A = `sha256:${'a'.repeat(64)}`;
+const SEAL_B = `sha256:${'b'.repeat(64)}`;
+
 for (const [label, historical, current, reason] of [
   ['历史清单损坏必须失败', '{broken', '{"version":1,"files":{}}', /Archive manifest validation failed/],
   ['历史 files 数组必须失败', '{"version":1,"files":[]}', '{"version":1,"files":{}}', /Invalid baseline files map/],
-  ['历史封印删除必须失败', '{"version":1,"files":{"testing/old.md":"seal-a"}}', '{"version":1,"files":{}}', /Archived seal changed or removed/],
-  ['历史封印修改必须失败', '{"version":1,"files":{"testing/old.md":"seal-a"}}', '{"version":1,"files":{"testing/old.md":"seal-b"}}', /Archived seal changed or removed/]
+  ['历史封印删除必须失败', `{"version":1,"files":{"${OLD_KEY}":"${SEAL_A}"}}`, '{"version":1,"files":{}}', /Archived seal changed or removed/],
+  ['历史封印修改必须失败', `{"version":1,"files":{"${OLD_KEY}":"${SEAL_A}"}}`, `{"version":1,"files":{"${OLD_KEY}":"${SEAL_B}"}}`, /Archived seal changed or removed/]
 ]) {
   test(`archived: ${label}`, async () => {
     const { cwd, root } = sealFixture(historical, current);
