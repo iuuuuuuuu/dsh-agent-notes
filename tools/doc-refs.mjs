@@ -106,6 +106,130 @@ const UPSTREAM_PREFIXES = ['apps/', 'packages/', 'vendor/', 'python/', './', 'sc
 const LOCAL_ONLY_PREFIXES = ['.probe/'];
 
 /**
+ * 源码侧扫描的目录（仓库相对路径）。
+ *
+ * 上游 A 的 `scripts/verify-doc-refs.ts` 扫 `packages` 下的全部 `.ts` ——
+ * 那是上游的 workspace 布局。本仓库没有 `packages/`，等价物是 `tools/`（门禁与工具）、
+ * `lib/`（插件运行时）、`src/`（客户端源码）、`.github/workflows/`（CI 定义）。
+ * 全部是**仓库自有**的源码目录，不含 `skills/`（受管上游副本，见下）。
+ */
+const SOURCE_SCAN_DIRS = ['tools', 'lib', 'src', '.github/workflows'];
+
+/**
+ * 源码里要匹配的「文档路径」形态。
+ *
+ * 与上游 A 的 `DOC_REF = /(?:\bdocs|\.agents\/notes)\/[A-Za-z0-9._/-]+\.md/g`
+ * 同口径：**必须带 `.md` 扩展名**，且只认 `docs/` 与 `.agents/notes/` 两棵
+ * 文档树。上游要求扩展名是因为「目录路径」不该被当成文档引用。
+ */
+const SOURCE_DOC_REF = /(?:\bdocs|\.agents\/notes)\/[A-Za-z0-9._/-]+\.md/g;
+
+/**
+ * 源码扫描要排除的文件。
+ *
+ * - `*.test.mjs`：测试夹具里**故意**引用不存在的路径（`docs/x.md`、
+ *   `.agents/notes/implemented/process/2026-01-01-old.md`）来证明门禁会红；
+ *   把它们扫进来就是拿测试数据当仓库语料。
+ * - `lib/client.js`：`build.mjs` 从 `src/client.js` 生成的产物，内容与
+ *   `src/client.js` 重复（`tools/verify-plugin.mjs:179` 已在比对两者是否同步），
+ *   扫两遍等于把同一条引用计两次。
+ * - `skills/**`：受管的上游副本，**不得手改**（`AGENTS.md` 硬约束 3）。
+ *   里面的路径描述的是上游自己的结构。
+ */
+function isSourceScanExcluded(relPath) {
+  if (relPath.endsWith('.test.mjs')) return true;
+  if (relPath === 'lib/client.js') return true;
+  return false;
+}
+
+/**
+ * 源码侧的白名单：看起来是仓库相对路径、其实是**上游 A 语料**或**本文件举例**的路径。
+ *
+ * 键的形状是 `源码文件::路径` —— 比文档侧的 `EXTERNAL_REFS` 更细一档。理由是
+ * 文档侧那些条目指向「别人的仓库里的某个文件」，全仓一致；而源码侧的引用
+ * 天然是**逐文件**的：`tools/notes-supersession.mjs` 引上游的
+ * `.agents/notes/AGENTS.md` 是为了说明规则来源，`tools/doc-refs.mjs` 引同一个
+ * 路径是为了讲白名单的历史。只有用**文件级**粒度才能既放行真正的上游引用、
+ * 又不让别处对同名的本地路径逃逸。
+ *
+ * 用路径级粒度会开一个真实的洞：`.agents/notes/AGENTS.md` 这个名字本仓库
+ * **将来可能真的补上**（`docs/upstream-46-gates.md` 的 P3 行记着「未落地」）。
+ * 一旦它存在，路径级白名单就变成一条永不触发的死规则，而真正该红的引用
+ * 反而被放过。文件级粒度没有这个问题。
+ *
+ * 与文档侧同口径的防腐规则：每条必须写理由，且必须真的被该文件命中一次；
+ * 从未命中的条目判红（死条目请删除）。
+ *
+ * @type {Record<string, string>}
+ */
+export const SOURCE_EXTERNAL_REFS = {
+  'tools/notes-supersession.mjs::.agents/notes/AGENTS.md':
+    '上游 A 的笔记规范文件：本仓库把那条 supersession 规则拆进根 AGENTS.md，文件本身不在本仓',
+  '.github/workflows/verify.yml::.agents/notes/AGENTS.md':
+    '同上游 A 的笔记规范文件：CI 注释里引它作为规则来源',
+  'tools/doc-refs.mjs::.agents/notes/AGENTS.md':
+    '上游 A 的笔记规范文件：本文件的注释在讲上游来源与白名单历史时引用它',
+  'tools/doc-refs.mjs::docs/x.md':
+    '本文件注释里举的测试夹具路径，故意指向不存在的文件',
+  'tools/doc-refs.mjs::.agents/notes/implemented/process/2026-01-01-old.md':
+    '本文件注释里举的测试夹具路径，故意指向不存在的文件'
+};
+
+/**
+ * 收集源码侧的扫描文件（仓库相对路径，正斜杠）。
+ *
+ * @param {string} root 仓库根。
+ * @returns {string[]} 源码文件列表。
+ */
+export function collectSourceScanFiles(root = PACKAGE_ROOT) {
+  const files = [];
+  for (const relDir of SOURCE_SCAN_DIRS) {
+    const base = join(root, relDir);
+    if (!existsSync(base)) continue;
+    /* `readdirSync` 必须传**绝对路径**：传相对路径会按当前工作目录解析，
+       于是 `root` 指向别的目录时（测试夹具在临时目录）扫的其实是 CWD 下的
+       `tools/`，扫到的是本仓库的文件 —— 或者在 CWD 没有该目录时抛 ENOENT。
+       第一版就是这么写的，用例「源码侧排除测试文件与生成的 client 产物」
+       当场把它抓出来。 */
+    const walk = (rel) => {
+      for (const name of readdirSync(join(root, rel))) {
+        const childRel = `${rel}/${name}`;
+        const childFull = join(root, childRel);
+        if (statSync(childFull).isDirectory()) {
+          walk(childRel);
+          continue;
+        }
+        if (!/\.(mjs|js|cjs|ts|yml|yaml)$/.test(name)) continue;
+        if (isSourceScanExcluded(childRel)) continue;
+        files.push(childRel);
+      }
+    };
+    walk(relDir);
+  }
+  return files.sort();
+}
+
+/**
+ * 从一段源码里抽出「文档路径」引用。
+ *
+ * 与上游 A 同口径：只认**字面**路径 token，不解析字符串拼接，也不判断
+ * 上下文是不是注释。上游的判据是「`docs/*.md` 与 `.agents/notes/*.md`
+ * 这两个目录下的 `.md` 路径在源码里必须真实存在」。
+ *
+ * @param {string} content 源码正文。
+ * @returns {Array<{ path: string, at: number }>} 引用。
+ */
+export function collectSourceDocRefs(content) {
+  const refs = [];
+  let match;
+  SOURCE_DOC_REF.lastIndex = 0;
+  while ((match = SOURCE_DOC_REF.exec(content)) !== null) {
+    refs.push({ path: match[0], at: match.index });
+  }
+  return refs;
+}
+
+/**
  * 收集待校验的文档（仓库相对路径，正斜杠）。
  *
  * 收 `docs/` 与 `.agents/notes/`：两者都是**承载判定**的语料 —— 一处写「上游
@@ -184,7 +308,7 @@ function countLines(body) {
 }
 
 /**
- * 执行校验。
+ * 执行**文档侧**校验：行内 `文件:行号` 引用必须可解析。
  *
  * @param {{ root?: string, externalRefs?: Record<string, string> }} options
  *   可选仓库根（测试用临时目录）与白名单覆盖（默认 `EXTERNAL_REFS`）。
@@ -242,6 +366,64 @@ export function verifyDocRefs(options = {}) {
   return { checked: documents.length, refs, errors };
 }
 
+/**
+ * 执行**源码侧**校验：源码里写下的文档路径必须真实存在。
+ *
+ * 判据抄自上游 A 的 `scripts/verify-doc-refs.ts`（`:18` 的 `DOC_REF` 正则 +
+ * `:26-30` 的 `existsSync` 判定），扫描目录换成本仓库的等价物
+ * （`tools/`、`lib/`、`src/`、`.github/workflows/`）。
+ *
+ * 拆成独立函数而不是并进 `verifyDocRefs`：两侧的**语料**、**白名单**、
+ * **空集合判据**全都不同。合在一起会让「文档侧语料为空」和「源码侧语料为空」
+ * 互相掩盖 —— 夹具只想验一侧的时候，另一侧的报错会混进结果里。
+ *
+ * @param {{ root?: string, sourceExternalRefs?: Record<string, string> }} options
+ *   可选仓库根（测试用临时目录）与白名单覆盖（默认 `SOURCE_EXTERNAL_REFS`）。
+ * @returns {{ checked: number, refs: number, errors: string[] }} 结果。
+ */
+export function verifySourceDocRefs(options = {}) {
+  const root = options.root ?? PACKAGE_ROOT;
+  const sourceExternal = options.sourceExternalRefs ?? SOURCE_EXTERNAL_REFS;
+  const sourceFiles = collectSourceScanFiles(root);
+  const errors = [];
+  const usedExternal = new Set();
+  let refs = 0;
+
+  for (const file of sourceFiles) {
+    const content = readFileSync(join(root, file), 'utf8');
+    for (const ref of collectSourceDocRefs(content)) {
+      refs += 1;
+      const lineOf = content.slice(0, ref.at).split('\n').length;
+      const where = `${file}:${lineOf}`;
+      const key = `${file}::${ref.path}`;
+      const reason = sourceExternal[key];
+      if (reason !== undefined) {
+        usedExternal.add(key);
+        if (reason.trim() === '') errors.push(`${where} 白名单条目 \`${key}\` 没有写理由`);
+        continue;
+      }
+      const target = join(root, ref.path);
+      if (!existsSync(target)) {
+        errors.push(`${where} 源码里引用的文档不存在：\`${ref.path}\``);
+        continue;
+      }
+      if (!statSync(target).isFile()) {
+        errors.push(`${where} 源码里引用的路径是目录，不是文件：\`${ref.path}\``);
+      }
+    }
+  }
+
+  for (const key of Object.keys(sourceExternal)) {
+    if (!usedExternal.has(key)) {
+      errors.push(`源码侧白名单条目 \`${key}\` 从未命中任何引用：死条目请删除，或补上真正的引用`);
+    }
+  }
+
+  if (sourceFiles.length === 0) errors.push('没有扫到任何源码文件：源码侧语料为空不得当绿');
+  if (refs === 0) errors.push('源码里没有一条文档路径引用：空集合不得当绿');
+  return { checked: sourceFiles.length, refs, errors };
+}
+
 /* 与本仓库其它工具同口径（`archive-note.mjs:216`、`ci-alignment.mjs:515`）：
    按尾段比对，不在 Windows 上拼 `file://` URL —— 那条路对盘符、反斜杠与
    相对路径都不稳，失败时还会**静默不跑**（exit 0 却一行输出都没有）。 */
@@ -249,11 +431,16 @@ const invokedDirectly = process.argv[1] !== undefined
   && process.argv[1].replace(/\\/g, '/').endsWith('/tools/doc-refs.mjs');
 
 if (invokedDirectly) {
-  const result = verifyDocRefs();
-  if (result.errors.length > 0) {
+  const docResult = verifyDocRefs();
+  const srcResult = verifySourceDocRefs();
+  const errors = [...docResult.errors, ...srcResult.errors];
+  if (errors.length > 0) {
     console.error('行内引用校验失败：');
-    for (const error of result.errors) console.error(`  ✖ ${error}`);
+    for (const error of errors) console.error(`  ✖ ${error}`);
     process.exit(1);
   }
-  console.log(`行内引用校验通过：${result.checked} 个文档、${result.refs} 条 \`文件:行号\` 引用全部可解析。`);
+  console.log(
+    `行内引用校验通过：${docResult.checked} 个文档、${docResult.refs} 条 \`文件:行号\` 引用全部可解析；`
+    + `源码侧 ${srcResult.checked} 个文件、${srcResult.refs} 条文档路径引用全部可解析。`
+  );
 }

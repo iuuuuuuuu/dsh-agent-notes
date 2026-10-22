@@ -87,7 +87,7 @@ $ ls .probe/upstream-a-687f282/scripts/verify-*.spec.ts | wc -l
 | 11 | verify-cordis-config.ts | 578 | `audit-client-architecture.md:58`（「待完整读取及本地对照」） | 不适用·否决 | **结构性不存在**：无 `cordis.yml` 生成链（只有手写 `cordis.patch.yml`），没有 preset/group 树可校验。 上游判据：`:39` `globSync("apps/cli/config/examples/**/*.yml")`，`:107` `globSync("packages/client/*/package.json")`，`:143` 读 `packages/bundle/base/cordis.patch.yml`，`:17-20` 依赖 `packages/boot/app-boot`/`packages/util/package-manifest` 与 TS AST；校验 Loader 的 `config`/`disabled` 插值语义。本地：glob 全不匹配 + import `@deepseek-ai/*` 违反零依赖硬约束。 |
 | 12 | verify-default-product-isolation.ts | 413 | `audit-client-architecture.md:59`（「待完整读取及本地对照」） | 不适用·否决 | **结构性不存在**：无「默认产品」与多产品隔离概念（单插件单产品），隔离对象不存在。 上游判据：`:66-68` `globSync(["apps/*/package.json","packages/*/*/package.json","vendor/*/package.json","native/system/packages/*/package.json","python/sdk-runtime/package.json"])`，`:25-27` `EXTERNAL_KIT_PACKAGES`/`PROFILE_SOURCE`/`PRESET_PATTERN`，`:11` 依赖 `jsdom` + `@deepseek-ai/cordis-plugin-include`；判据是「实验包不得进入默认安装/运行期 import/出厂组合」。本地：单包单产品，无实验/默认二分类。 |
 | 13 | verify-doc-budgets.ts | 58 | `audit-notes-docs.md:16`；上游 `:16-48` | 有意保留差异 | 本仓库有等价门禁 `tools/doc-budget.mjs:49-57`、`:64-87`、`:94-137`（`AGENTS.md` 里 `npm run doc:budget`），但 CJK 计数口径不同。 |
-| 14 | verify-doc-refs.ts | 45 | `audit-notes-docs.md:17`；上游 `:15-45` | 有意保留差异 | 本仓库确有源码内文档引用（`tools/markdown-links.mjs:26`、`tools/md-links.mjs:25`、`tools/notes-supersession.mjs:7`），但 Markdown 门禁不覆盖裸源码路径存在性。 |
+| 14 | verify-doc-refs.ts | 45 | `audit-notes-docs.md:17`；上游 `:15-45`、`:25`、`:28-29` | **已采纳（部分）** | **2026-10-22 由「有意保留差异」改判**：源码侧判据已落地。`tools/doc-refs.mjs` 现有两个方向——文档侧收 `docs/**` + `.agents/notes/**`（跳 `archived/`）判行内 `文件:行号`；源码侧扫 `tools`/`lib`/`src`/`.github/workflows` 判源码里写的文档路径**存在且是文件**。上游判据 `:15` `PATTERNS = ['packages/**/*.ts']`、`:25` `DOC_REF = /(?:\bdocs|\.agents\/notes)\/[A-Za-z0-9._/-]+\.md/g`、`:28-29` `findReferenceViolations` + `existsSync`；本地路径正则与上游**逐字相同**，扫描目录换成本仓库真实存在的四棵源码树。**未采纳**：上游只 `existsSync`（目录也放行），本地额外判 `isFile()`，口径更严；上游不设白名单，本地有 `SOURCE_EXTERNAL_REFS`（文件级粒度 + 理由非空 + 死条目判红）——因为本仓库源码里确有指向本仓不存在路径的引用。决定与代价见 `.agents/notes/implemented/process/2026-10-22-source-doc-refs-need-a-gate.md`。 |
 | 15 | verify-doc-site-fragments.ts | 181 | `audit-notes-docs.md:18`；上游 `:81-140`、`:154-181` | 有意保留差异 | 上游要求先构建文档站再验 HTML 路由/ID/片段；本仓库 `package.json:60-87`、`.github/workflows/verify.yml:9-11` 不构建 VitePress，不能把站点构建前提施加给任意宿主。 |
 | 16 | verify-dsh-package-licenses.ts | 89 | `audit-package-runtime.md:33`；上游 `:32-45`、`:61-72`、`:78-89` | 已采纳 | `tools/verify-plugin.mjs:81` 精确校验 MIT，与上游同口径；仅收窄为单包（不照搬包名前缀发现与 workspace 遍历）。 |
 | 17 | verify-export-jsdoc.ts | 607 | `audit-source-policy.md:29`、`:34`；上游 `:18-21`、`:175-253`、`:383-474` | 有意保留差异 | 保留 JS/鸭子类型与解析成本取舍：本仓库纯 JS 无 `.d.ts`（无 `types` 字段、无 `.ts` 源），上游要求 TS 返回注解，直接移植会改变本地 API 写法。 |
@@ -127,18 +127,22 @@ $ ls .probe/upstream-a-687f282/scripts/verify-*.spec.ts | wc -l
 
 | 分类 | 条数 | 占 46 的比例 |
 |---|---|---|
-| 已采纳 | **7**（含 5 条部分采纳） | 15.2% |
-| 有意保留差异 | **25** | 54.3% |
+| 已采纳 | **8**（含 6 条部分采纳） | 17.4% |
+| 有意保留差异 | **24** | 52.2% |
 | 不适用·否决 | **14** | 30.4% |
 | **合计** | **46** | 100%（= 磁盘枚举的 46 道非 spec `verify-*.ts`） |
 
-对账：`46 = 7 + 25 + 14`（已采纳内部再分 2 条整体 + 5 条部分），无重复、无遗漏。
+对账：`46 = 8 + 24 + 14`（已采纳内部再分 2 条整体 + 6 条部分），无重复、无遗漏。
 
-- **已采纳 7 条**：#4、#16（整体采纳）；#7、#10、#27、#28、#30（部分采纳，其中 #28 为审计「暂定」，见 §5；#30 于 2026-10-21 由「有意保留差异」改判（见 §5D）、#10 由「不适用·否决」改判（见 §3 的 #10 小节））。
-- **有意保留差异 25 条**：#1、#2、#8、#13、#14、#15、#17、#18、#21、#22、#23、#24、#25、#26、#29、#32、#36、#37、#38、#39、#40、#41、#42、#43、#44。
+> 2026-10-22 改判一次：#14 `verify-doc-refs.ts` 由「有意保留差异」改为「已采纳（部分）」
+> ——源码侧文档路径判据已落地（`tools/doc-refs.mjs`），详见 §3 的 #14 小节与
+> `.agents/notes/implemented/process/2026-10-22-source-doc-refs-need-a-gate.md`。
+
+- **已采纳 8 条**：#4、#16（整体采纳）；#7、#10、#14、#27、#28、#30（部分采纳，其中 #28 为审计「暂定」，见 §5；#30 于 2026-10-21 由「有意保留差异」改判（见 §5D）、#10 由「不适用·否决」改判（见 §3 的 #10 小节）、#14 于 2026-10-22 由「有意保留差异」改判（见 §3 的 #14 小节））。
+- **有意保留差异 24 条**：#1、#2、#8、#13、#15、#17、#18、#21、#22、#23、#24、#25、#26、#29、#32、#36、#37、#38、#39、#40、#41、#42、#43、#44。
 - **不适用·否决 14 条**：#3、#5、#6、#9、#11、#12、#19、#20、#31、#33、#34、#35、#45、#46。
 
-**保留差异落在哪些机制层**（对 25 条的归并）：
+**保留差异落在哪些机制层**（对 24 条的归并）：
 
 | 机制层 | 条数 | 涉及 gate |
 |---|---|---|
@@ -148,7 +152,6 @@ $ ls .probe/upstream-a-687f282/scripts/verify-*.spec.ts | wc -l
 | 判据口径较窄（本地实现存在但覆盖更少） | 4 | #1、#2、#18、#26 |
 | 运行时实现形态不同（全局 fetch、运行时声明） | 2 | #21、#38 |
 | 交付形态不同（单语言内联文案，无 locale 文件、无 `.tsx`） | 1 | #8 |
-| 无等价对象但有替代通道 | 1 | #14 |
 
 **不适用·否决 14 条的否定理由类型**：
 
@@ -162,7 +165,7 @@ $ ls .probe/upstream-a-687f282/scripts/verify-*.spec.ts | wc -l
 
 ## 3. 「部分采纳」的边界说明（哪些只采纳了一部分）
 
-七条 `已采纳` 里有五条是部分的（#7、#10、#27、#28、#30），另外两条（#4、#16）是完整采纳。
+八条 `已采纳` 里有六条是部分的（#7、#10、#14、#27、#28、#30），另外两条（#4、#16）是完整采纳。
 
 ### #10 `verify-config-source-ownership.ts` —— 采纳了「随包配置不得内联取值」，没采纳「Cordis 配置源所有权图」
 
@@ -170,6 +173,14 @@ $ ls .probe/upstream-a-687f282/scripts/verify-*.spec.ts | wc -l
 - **为什么不照搬 glob**：上游 `:14-19` 扫 `apps/*/config/**/*.yml`、`packages/*/*/cordis.patch.yml`、`packages/*/*/presets/*.patch.yml`、`python/*/src/**/cordis.yml` —— 本仓库的 `cordis.patch.yml` 在**仓库根**，一条 glob 都不匹配。照搬上游等于给自己装一道永远绿的检查（那正是「会造成假绿」）。本地的做法是把同一原则挂到本仓库真实存在的那个文件上。
 - **仍未采纳**：`:42-56` 的所有权图判定（每个配置值必须由某个源文件拥有）。本仓库只有一个插件声明，没有「多源」这个结构，画不出这张图 —— 这部分是结构性不存在，不是懒得做。
 
+
+### #14 `verify-doc-refs.ts` —— 采纳了「源码里写的文档路径必须存在」，没采纳「上游无白名单」
+
+- **采纳的部分**：上游判据在 `scripts/verify-doc-refs.ts`：`:15` `PATTERNS = ['packages/**/*.ts']`、`:25` `DOC_REF = /(?:\bdocs|\.agents\/notes)\/[A-Za-z0-9._/-]+\.md/g`、`:28-29` 用 `findReferenceViolations`（`scripts/repo-files.ts:272-295`）逐行 `matchAll` 再 `existsSync`。本地 `tools/doc-refs.mjs` 的源码侧判据与它**同构且逐字同正则**：扫 `tools`/`lib`/`src`/`.github/workflows` 四棵源码树（上游是 `packages/`，本仓库没有 `packages/`），抽同样的字面路径 token，逐个判存在。
+- **口径比上游更严一处**：上游只 `existsSync`（`verify-doc-refs.ts:29`），目录也放行；本地额外判 `statSync(target).isFile()`，目录判红。理由是文档侧那道门禁**已经**判目录，两侧口径不一致会让同一类错误在两处得到不同答案。
+- **比上游多一处机制**：本地有 `SOURCE_EXTERNAL_REFS` 白名单（文件级粒度：键是 `源码文件::路径`），每条要求理由非空**且**必须真的被该文件命中一次（死条目判红）。上游不需要白名单，因为它扫的是自己的 `packages/`，引用的路径都在本仓；本仓库源码里确有指向**本仓不存在**的路径的引用（`tools/notes-supersession.mjs:7` 引上游的 `.agents/notes/AGENTS.md` 说明规则来源）。
+- **仍未采纳**：上游用 `findReferenceViolations` 逐行匹配以给出准确行号，本地同样给出 `文件:行号` 定位；但上游的「排除构建产物与 vendored 源」是路径判据（`verify-doc-refs.ts:18-22`），本地改成显式排除 `*.test.mjs`、`lib/client.js` 与 `skills/**`（`tools/doc-refs.mjs` 的 `isSourceScanExcluded`）—— 本仓库的布局与上游不同，没有可照搬的对应物。
+- **决定与代价**：见 `.agents/notes/implemented/process/2026-10-22-source-doc-refs-need-a-gate.md`。
 
 ### #27 `verify-package-dependencies.ts` —— 采纳了「依赖分区里的 DSH 禁令」，没采纳「语法级导入发现」
 
@@ -328,7 +339,10 @@ $ ls .probe/upstream-a-687f282/scripts/verify-*.spec.ts | wc -l
 
 ## 7. 一句话结论
 
-46 道门禁里，本仓库**采纳了 7 道**（归档封印 #4、许可证清单 #16 为整体采纳；依赖分区禁令 #27、包元数据/发布清单 #28、客户端路由按 `baseURI` 解析 #7、README 限制白名单防腐 #30、随包配置禁内联取值 #10 为部分采纳）；**25 道是有意的机制层差异**（宿主侧门禁 vs 维护者工具、单包 vs workspace、纯 JS vs TS 声明、窄口径 vs 全口径）；**14 道在本仓库结构上不成立或被明确否决**。此前笔记里的「44 道 / 32 道结构性不适用」与本表的 46 / 14 不是同一判据体系，引用时须注明口径。
+46 道门禁里，本仓库**采纳了 8 道**（归档封印 #4、许可证清单 #16 为整体采纳；依赖分区禁令 #27、包元数据/发布清单 #28、客户端路由按 `baseURI` 解析 #7、README 限制白名单防腐 #30、随包配置禁内联取值 #10、源码侧文档路径引用 #14 为部分采纳）；**24 道是有意的机制层差异**（宿主侧门禁 vs 维护者工具、单包 vs workspace、纯 JS vs TS 声明、窄口径 vs 全口径）；**14 道在本仓库结构上不成立或被明确否决**。此前笔记里的「44 道 / 32 道结构性不适用」与本表的 46 / 14 不是同一判据体系，引用时须注明口径。
+
+这一层只回答「上游那 46 道要不要」。**本仓库自己**的欠账（已知的空洞、刻意留下的不作为）另见
+[已知缺口与明确不做的项](./known-gaps.md) —— 两份文档的分工见 §8。
 
 ## 8. 分类之后还剩什么
 

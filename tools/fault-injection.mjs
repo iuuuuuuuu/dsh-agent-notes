@@ -52,6 +52,7 @@ const FAULT_SUITES = [
   ['CI 与本地门禁对齐', 'ci-alignment.test.mjs'],
   ['插件包契约自检', 'verify-plugin.test.mjs'],
   ['归档基线的历史封印比对', 'archive-baseline.test.mjs'],
+  ['归档树布局与封印 schema', 'archive-layout.test.mjs'],
   ['非 Node 项目 / 无 node 环境', 'non-node-project.test.mjs'],
   ['看板数据聚合', 'board.test.mjs'],
   ['看板窄屏抽屉与归档卡补丁', 'board-responsive.test.mjs'],
