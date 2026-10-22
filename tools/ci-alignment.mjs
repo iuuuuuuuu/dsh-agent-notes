@@ -67,15 +67,41 @@ const WORKFLOW_DIR = join(PACKAGE_ROOT, '.github', 'workflows');
  * 键是本地链里的步骤名，值说明 CI 用什么替代。
  */
 /**
- * `continue-on-error: true` 的**任何**等价写法。
+ * `continue-on-error` 唯一允许的形态：**字面量 false**。
  *
- * 只认「裸小写 true 且行尾干净」会被三种常见写法绕过，而它们都会把一道门禁
- * 静默降级成警告：`True`、`"true"`、`true # 临时放行`（行尾注释）。
- * 这三种写法 CodeRabbit 在 PR #29 上真的指出来了 —— 白名单式「只匹配一种形态」
- * 在规则文件里天生会漏。
+ * 这里刻意用「默认拒绝」而不是「列举所有 true 的写法」。第一版列举了
+ * `true` / `True` / `"true"` / `${{ true }}`，CodeRabbit 接着就用
+ * `${{ true || false }}` 绕过去了 —— 表达式是图灵完整的，列举永远补不完；
+ * 而 `${{ matrix.experimental }}` 这类写法本质就是「有时把门禁降级」，
+ * 本仓库的政策是门禁不许被降级，任何非 `false` 的值都该让人来解释。
+ *
+ * 代价：将来真要写条件降级，得先改这条判据 —— 那正是要的摩擦。
  */
-const CONTINUE_ON_ERROR_TRUE =
-  /^\s*continue-on-error:\s*['"]?(?:true|\$\{\{\s*true\s*\}\})['"]?\s*(?:#.*)?$/im;
+const CONTINUE_ON_ERROR_ALLOWED = /^\s*continue-on-error:\s*['"]?false['"]?\s*(?:#.*)?$/im;
+
+/**
+ * 找出所有不合约定的 `continue-on-error` 行（空数组才是通过）。
+ *
+ * @param {string} yml workflow 原文。
+ * @returns {string[]} 违规行。
+ */
+function offendingContinueOnError(yml) {
+  return stripComments(yml)
+    .split('\n')
+    .filter((line) => /^\s*continue-on-error:/.test(line))
+    .filter((line) => !CONTINUE_ON_ERROR_ALLOWED.test(line));
+}
+
+/**
+ * `cancel-in-progress` 唯一允许的形态：**等于比较**收窄到 `pull_request`。
+ *
+ * 同样默认拒绝。只要求「这一行里出现 `github.event_name` 与 `pull_request`」
+ * 会放过语义相反的 `${{ github.event_name != 'pull_request' }}` —— 它在 push 上
+ * 才取消，正好取消掉要保住的那些运行；CodeRabbit 在 PR #30 上指出的就是这个。
+ * `&&` / `||` 组合不做语义推导：能自动判对的前提是有解析器，这里没有。
+ */
+const CANCEL_ONLY_FOR_PR =
+  /^cancel-in-progress:\s*\$\{\{\s*github\.event_name\s*==\s*'pull_request'\s*\}\}\s*(?:#.*)?$/im;
 
 const CI_ALTERNATIVES = {
   'notes:coverage:last': 'CI 用 `--range "$github.event.before..HEAD"`（覆盖整个 push 的所有提交，更准）',
@@ -202,14 +228,14 @@ const SAFETY = [
     key: 'no-continue-on-error',
     desc: '任何一步都不得带 continue-on-error: true（那等于把门禁静默降级成警告，'
       + 'CI 照样绿 —— 门禁存在但没人执行等于没有）',
-    test: (yml) => !CONTINUE_ON_ERROR_TRUE.test(stripComments(yml))
+    test: (yml) => offendingContinueOnError(yml).length === 0
   },
   {
     file: 'upstream-sync.yml',
     key: 'no-continue-on-error',
     desc: '任何一步都不得带 continue-on-error: true（同上；这个 workflow 有 '
       + 'contents: write 且会 push main/tag，静默降级一道门禁的代价更大）',
-    test: (yml) => !CONTINUE_ON_ERROR_TRUE.test(stripComments(yml))
+    test: (yml) => offendingContinueOnError(yml).length === 0
   },
   {
     file: 'verify.yml',
@@ -227,15 +253,13 @@ const SAFETY = [
     test: (yml) => {
       const block = concurrencyBlock(yml);
       if (block === null) return false;
-      /* 先去掉注释：注释里出现 `pull_request` 不该被当成「按事件判断」的证据。 */
-      const bare = stripComments(block);
-      /* 无条件 true（含 `True` / `"true"` / 行尾注释）明确禁止。 */
-      if (/cancel-in-progress:\s*['"]?true['"]?\s*(?:#.*)?$/im.test(bare)) return false;
-      /* 只接受「按 github.event_name 收窄到 pull_request」的写法 ——
-         光要求这一行里出现 `pull_request` 太松：一行写成
-         `${{ github.ref != 'refs/heads/main' }}  # 见 pull_request 说明`
-         也能过，而它在 main 上照样会取消正在跑的发布验证。 */
-      return /cancel-in-progress:[^\n]*github\.event_name[^\n]*pull_request/.test(bare);
+      /* 先去掉注释：注释里出现 `pull_request` 不该被当成证据。 */
+      const line = stripComments(block)
+        .split('\n')
+        .find((l) => /^\s*cancel-in-progress:/.test(l));
+      if (line === undefined) return false;
+      /* 只接受**等于**比较那一种写法；`!=`、`&&`、`||`、裸 true 全部拒绝。 */
+      return CANCEL_ONLY_FOR_PR.test(line.trim());
     }
   },
   {

@@ -538,3 +538,36 @@ test('ci-align: cancel-in-progress 只要不是按 event_name 收窄就必须红
   assert.equal(result.code, 1, `宽松写法必须被拦：\n${result.out}`);
   assert.match(result.out, /cancels-only-superseded-pr/);
 });
+
+test('ci-align: 表达式的 continue-on-error 也拦（列举法补不完，默认拒绝）', () => {
+  /* 第二版判据列举了 true/True/"true"/${{ true }}；CodeRabbit 在 PR #30 上
+     立刻用 `${{ true || false }}` 绕过 —— 它求值为 true，而正则不认识。
+     结论：这类判据必须默认拒绝，只放行字面量 false。 */
+  const forms = ['${{ true || false }}', '${{ matrix.experimental }}', 'true && true'];
+
+  for (const form of forms) {
+    const mutated = REAL_WORKFLOW.replace(
+      '      - name: 包自检',
+      `      - name: 包自检
+        continue-on-error: ${form}`
+    );
+    assert.notEqual(mutated, REAL_WORKFLOW, '构造没生效');
+    const result = check({ ...BOTH, 'verify.yml': mutated });
+    assert.equal(result.code, 1, `${form} 必须被发现：${result.out}`);
+    assert.match(result.out, /no-continue-on-error/);
+  }
+});
+
+test('ci-align: 语义相反的 cancel-in-progress 表达式必须红（只认 == 收窄）', () => {
+  /* CodeRabbit 在 PR #30 上的第二条：`${{ github.event_name != 'pull_request' }}`
+     里两个标识符按顺序出现，旧判据就放过了 —— 而它在 push 上才取消，
+     正好取消掉要保住的发布验证。 */
+  const inverted = REAL_WORKFLOW.replace(
+    / {2}cancel-in-progress:[^\n]*/,
+    "  cancel-in-progress: ${{ github.event_name != 'pull_request' }}"
+  );
+  assert.notEqual(inverted, REAL_WORKFLOW, '构造没生效');
+  const result = check({ ...BOTH, 'verify.yml': inverted });
+  assert.equal(result.code, 1, `反向表达式必须被拦：${result.out}`);
+  assert.match(result.out, /cancels-only-superseded-pr/);
+});
