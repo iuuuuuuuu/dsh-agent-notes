@@ -590,6 +590,240 @@ test('notes-coverage: 根目录的非源码文件不受管', () => {
   }
 });
 
+/**
+ * 跑门禁并返回完整结果（供新增用例断言输出文本）。
+ *
+ * 与 {@link gateIn} 的区别：这里要拿到 stderr/stdout，因为新增的几条判定
+ * 「分叉点求不出来必须说清原因」—— 只看退出码无法区分「说了原因」
+ * 和「碰巧也是 2」。
+ *
+ * @param {string} dir 仓库目录。
+ * @param {string[]} args 追加的命令行参数。
+ * @returns {{ code: number, out: string }} 退出码与合并输出。
+ */
+function gateOut(dir, args = []) {
+  const r = spawnSync(NODE, [join(dir, 'tools', 'notes-coverage.mjs'), ...args], {
+    cwd: dir, encoding: 'utf8', windowsHide: true, env: { ...process.env }
+  });
+  return { code: r.status ?? -1, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+}
+
+/**
+ * 造一个**分叉**的仓库：`main` 与 `feature` 各自在分叉点之后有提交。
+ *
+ * ## 为什么要分叉，不能拿一条直线冒充
+ *
+ * `--since` 的全部价值在于「只查本 PR 自己带来的提交」。若历史是一条直线，
+ * 那么 `--since <某个祖先>` 与 `--range <同一个祖先>` 求出的提交集合完全相同，
+ * 测不出任何差别 —— 用例会**假绿**。
+ *
+ * 所以这里造出真实场景：接这道门禁的下游仓库历史里已经堆了大量
+ * 「改了代码但当时还没这道门禁」的提交（`main` 上的 `legacy-no-note`），
+ * 当前 PR 只带 `feature` 上那一个提交。这正是 `--range` 接不上去、
+ * `--since` 能接上的那个形态。
+ *
+ * @param {object} [opts] 选项。
+ * @param {boolean} [opts.featureHasNote] feature 分支上是否带笔记。
+ * @param {boolean} [opts.addFeatureCommit] 是否在 feature 上造提交。
+ * @returns {{ dir: string, featureCommit: string | undefined, legacyCommit: string }} 仓库与相关 sha。
+ */
+function makeDivergedRepo(opts = {}) {
+  const { featureHasNote = false, addFeatureCommit = true } = opts;
+  const dir = makeRepoWithGate();
+  const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true });
+
+  /* 老账先落在 main 上，接门禁之前就存在 —— 且它**必须**是 feature 的祖先，
+     否则「分叉点之前的老提交」根本不在 HEAD 的历史里，任何以 HEAD 为终点的
+     区间都自然查不到它，两种口径就会显得一样（第一版就踩了这个坑）。 */
+  writeFileSync(join(dir, 'lib', 'board.js'), 'export const legacy = 1;\n', 'utf8');
+  git('add', '-A');
+  git('commit', '-q', '--no-verify', '-m', 'legacy-no-note: 接门禁之前的老提交');
+  const legacyCommit = git('rev-parse', 'HEAD').trim();
+
+  /* 显式立一个叫 main 的基准分支：`git init` 的默认分支名可能是 master，
+     硬编码假设 main 会让 `checkout main` 直接报 pathspec 错误。 */
+  git('branch', '-f', 'main', 'HEAD');
+  git('checkout', '-q', '-b', 'feature');
+  let featureCommit;
+  if (addFeatureCommit) {
+    const files = { 'lib/board.js': 'export const b = 2;\n' };
+    if (featureHasNote) {
+      mkdirSync(join(dir, '.agents', 'notes', 'implemented', 'process'), { recursive: true });
+      files['.agents/notes/implemented/process/2026-01-01-feature.md'] =
+        '# Agent Note: feature\n\nStatus: implemented\n';
+    }
+    for (const [rel, content] of Object.entries(files)) {
+      writeFileSync(join(dir, rel), content, 'utf8');
+    }
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'feature: 改行为');
+    featureCommit = git('rev-parse', 'HEAD').trim();
+  }
+
+  /* main 之后再有提交，让 main 与 feature 真的分叉（merge-base 仍有唯一值）。 */
+  git('checkout', '-q', 'main');
+  writeFileSync(join(dir, 'lib', 'board.js'), 'export const mainline = 1;\n', 'utf8');
+  git('add', '-A');
+  git('commit', '-q', '--no-verify', '-m', 'mainline-no-note: 基准分支自身的老账');
+
+  git('checkout', '-q', 'feature');
+  return { dir, featureCommit, legacyCommit };
+}
+
+test('notes-coverage --since: 分叉点之后有代码改动无笔记 → 必须红', () => {
+  const { dir, featureCommit, legacyCommit } = makeDivergedRepo();
+  try {
+    const { code, out } = gateOut(dir, ['--since', 'main']);
+    assert.equal(code, 1, `--since 必须拦下本 PR 漏记的提交，实际 exit=${code}\n${out}`);
+    assert.match(out, /feature: 改行为/, '必须点名本 PR 那个漏记的提交');
+    assert.doesNotMatch(out, /legacy-no-note/,
+      `分叉点之前的老账不属于本 PR，不该被算进来：\n${out}`);
+    assert.match(out, new RegExp(featureCommit.slice(0, 7)), '诊断应带出问题提交的 sha 前缀');
+    assert.doesNotMatch(out, new RegExp(legacyCommit.slice(0, 7)),
+      '老提交的 sha 不该出现在失败清单里');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes-coverage --since: 本 PR 带笔记即绿；字面全历史区间在同一仓库仍红', () => {
+  /* 这一条是 `--since` 存在的**理由**，所以必须测「同一仓库、同一 HEAD，
+     两种区间来源结论不同」。只测「--since 绿」会漏掉「因为它压根没查任何
+     东西所以绿」。
+
+     ⚠️ 一个必须说清的事实（第一版断言写错过，纠正后钉在这里）：
+     在分叉的仓库里 `--range main..HEAD` 与 `--since main` 求出的提交集合
+     **本来就相同** —— git 两点语义的 `A..B` 就是「B 有而 A 没有的」。
+     所以「`--since` 比 `--range main..HEAD` 更准」是**错的说法**。
+
+     `--since` 真正的价值在于：**基准可以随手给一个 ref 或 sha，
+     工具自己去求分叉点**，于是 CI 里不需要先把 base 算对再传进来；
+     而传进来的区间端点一旦比分叉点更早（下游仓库把基准配成初始提交、
+     或 `NOTES_COVERAGE_BASE` 指到很早的位置），`--range` 就会把
+     「接这道门禁之前的老账」一起查出来 ⇒ 第一次接就必红 ⇒ 门禁接不上。
+     那道红改不动（要补几百篇笔记）又拦不住任何东西，最后只会被人
+     `--no-verify` 关掉。本用例用 `--range <初始提交>..HEAD` 复现这个形态。 */
+  const { dir, legacyCommit } = makeDivergedRepo({ featureHasNote: true });
+  try {
+    const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true });
+    const rootSha = git('rev-list', '--max-parents=0', 'HEAD').trim();
+
+    const since = gateOut(dir, ['--since', 'main']);
+    assert.equal(since.code, 0, `本 PR 带笔记就该放行，实际 exit=${since.code}\n${since.out}`);
+    assert.match(since.out, new RegExp(legacyCommit.slice(0, 7)),
+      '通过时必须报出它自己求出的分叉点，让人能核对查的是哪个区间');
+    assert.doesNotMatch(since.out, /mainline-no-note/,
+      '基准分支自己那条线上的提交不在 HEAD 历史里，更不该被算成本 PR 的账');
+
+    const range = gateOut(dir, ['--range', `${rootSha}..HEAD`]);
+    assert.equal(range.code, 1,
+      `字面全历史区间必须仍红（老账在范围内）—— 若这里也绿，说明两种口径没区别：\n${range.out}`);
+    assert.match(range.out, /legacy-no-note/, '字面区间应把接门禁之前的老提交也算进去');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes-coverage --since: 分叉点之后没有代码改动 → 必须绿（空区间不是失败）', () => {
+  /* 空区间是「这次 PR 没改任何东西」，不是「查不到」。两者必须区分：
+     混为一谈会让「PR 什么都没改」变成一道永远红的门禁。 */
+  const { dir } = makeDivergedRepo({ addFeatureCommit: false });
+  try {
+    const { code, out } = gateOut(dir, ['--since', 'main']);
+    assert.equal(code, 0, `本 PR 没有提交就该放行，实际 exit=${code}\n${out}`);
+    assert.match(out, /检查了 0 个提交/, '必须说清「查了 0 个提交」，让人知道它真的查过');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes-coverage --since: base-ref 不存在 → 必须退出 2 且说明原因', () => {
+  const { dir } = makeDivergedRepo();
+  try {
+    const { code, out } = gateOut(dir, ['--since', 'refs/heads/does-not-exist']);
+    assert.equal(code, 2, `base-ref 查不到必须判「无法判定」，实际 exit=${code}\n${out}`);
+    assert.match(out, /merge-base/, '必须说明是 merge-base 出的问题');
+    assert.match(out, /不是「已合规」/, '必须明确这不是通过');
+    assert.doesNotMatch(out, /legacy-no-note/, '判失败时不该继续往下查（更不该顺手放行）');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes-coverage --since: 非 git 目录 → 必须退出 2，不得静默放行', () => {
+  /* 真实成因：CI 里 job 跑错目录、或源码没 checkout 就执行门禁。
+     若此时退化成全绿，那道门禁就在「没检查任何东西」的情况下报通过。 */
+  const dir = mkdtempSync(join(tmpdir(), 'an-coverage-nogit-'));
+  try {
+    const r = spawnSync(NODE, [SCRIPT, '--since', 'main'], {
+      cwd: dir, encoding: 'utf8', windowsHide: true, env: { ...process.env }
+    });
+    const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+    assert.equal(r.status, 2, `非 git 目录必须判「无法判定」，实际 exit=${r.status}\n${out}`);
+    assert.match(out, /merge-base/, `必须说明原因，实际输出：\n${out}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes-coverage --since: 缺基准引用或与 --range 同时给 → 必须退出 2', () => {
+  /* 漏值时若「当成没给」退回暂存区模式，这次 CI 什么都没查却报告通过 ——
+     正是这道门禁唯一要防的失效。所以两类参数错误都判 2。 */
+  const { dir } = makeDivergedRepo();
+  try {
+    for (const args of [['--since'], ['--since', ''], ['--since', 'main', '--range', 'main..HEAD']]) {
+      const r = spawnSync(NODE, [SCRIPT, ...args], {
+        cwd: dir, encoding: 'utf8', windowsHide: true, env: { ...process.env }
+      });
+      const out = `${r.stdout ?? ''}${r.stderr ?? ''}`;
+      assert.equal(r.status, 2,
+        `参数 ${JSON.stringify(args)} 必须判「无法判定」，实际 exit=${r.status}\n${out}`);
+      assert.match(out, /不是「已合规」/, '必须明确这不是通过');
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes-coverage --since: 仍然逐个提交判定，一个提交的笔记不能替另一个顶账', () => {
+  /* `--since` 换了区间来源，但「逐提交判定」这条不能被顺带丢掉 ——
+     丢掉的话，一次 push 三个提交只要有一个带笔记就全部放行。 */
+  const { dir } = makeDivergedRepo({ featureHasNote: true });
+  try {
+    const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true });
+    /* 在 feature 上再加一笔「改代码、漏记」的提交。 */
+    writeFileSync(join(dir, 'lib', 'board.js'), 'export const c = 3;\n', 'utf8');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'feature-2: 又一笔漏记');
+
+    const { code, out } = gateOut(dir, ['--since', 'main']);
+    assert.equal(code, 1, `漏记的那个提交必须被逐个抓出来，实际 exit=${code}\n${out}`);
+    assert.match(out, /feature-2: 又一笔漏记/, '必须点名第二个提交');
+    assert.doesNotMatch(out, /feature: 改行为\s*\n\s+lib\//, '带笔记的第一个提交不该被报');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('notes-coverage: 不带参数时行为与改动前一致（仍只看暂存区）', () => {
+  /* 加了新参数不代表默认口径能变。这里钉住：不给参数 ⇒ 查暂存区，
+     已提交的历史改动一律不查。 */
+  const dir = makeRepoWithGate();
+  try {
+    const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true });
+    writeFileSync(join(dir, 'lib', 'board.js'), 'export const legacy = 1;\n', 'utf8');
+    git('add', '-A');
+    git('commit', '-q', '--no-verify', '-m', 'legacy-no-note: 已提交的老账');
+    assert.equal(gateIn(dir), 0, '已提交的历史不该被暂存区模式翻出来');
+
+    writeFileSync(join(dir, 'lib', 'board.js'), 'export const staged = 1;\n', 'utf8');
+    git('add', '-A');
+    assert.equal(gateIn(dir), 1, '暂存区里改了受管路径仍必须红');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('notes-coverage: 配置文件可覆盖自动检测', () => {
   /* 自动检测不是万能的（比如把源码放在名字奇怪、暂时只有非源码文件的目录里）。
      这时用 .agents/notes-coverage.json 显式声明 —— 但**整体替换**而非叠加，

@@ -46,10 +46,10 @@ function withRepo(files, body) {
   }
 }
 
-test('doc-refs: 真仓库的 docs/ 全部行内引用可解析', () => {
+test('doc-refs: 真仓库的 docs/ 与 .agents/notes/ 全部行内引用可解析', () => {
   const result = verifyDocRefs();
   assert.deepEqual(result.errors, []);
-  assert.ok(result.checked >= 1, '至少要扫到一个 docs/ 文档');
+  assert.ok(result.checked >= 1, '至少要扫到一篇文档');
   assert.ok(result.refs >= 10, `引用数应当是一个有意义的语料，实际 ${result.refs}`);
 });
 
@@ -149,7 +149,7 @@ test('doc-refs: 空 docs/ 目录不得当绿', () => {
     'README.md': '# 只有顶层文档\n\n见 `lib/x.js:1`。\n'
   }, (root) => {
     const result = verifyDocRefs({ root });
-    assert.ok(result.errors.some((error) => error.includes('没有扫到任何 docs/ 文档')));
+    assert.ok(result.errors.some((error) => error.includes('没有扫到任何 `docs/` 或 `.agents/notes/` 文档')));
   });
 });
 
@@ -190,8 +190,43 @@ test('doc-refs: 上游语料前缀与裸行号不进入校验', () => {
     '',
     '上游 `packages/core/session/src/index.ts:34`；',
     '本地 `apps/cli/src/bin.ts:9`；',
+    '上游 A 的 verify 脚本在仓库根 `scripts/verify-plugin-record-callers.ts:37`；',
     '裸行号 `:43` 与 `:59-85`；',
     '只有文件名 `verify-plugin.mjs`。'
   ].join('\n');
   assert.deepEqual(collectInlineRefs(content), []);
+});
+
+test('doc-refs: 笔记正文里的行内引用也要校验（本轮扩的语料）', () => {
+  /* 扩到笔记的直接理由：`docs/` 只有 57 条引用，笔记里还有 14 条 —— 其中 12 条
+     指回本仓、本来可以机械校验，却因为「只扫 docs/」而无人看。 */
+  withRepo({
+    'lib/small.js': 'const a = 1;\n',
+    '.agents/notes/implemented/process/x.md': '# x\n\n见 `lib/small.js:9`。\n'
+  }, (root) => {
+    const result = verifyDocRefs({ root });
+    assert.equal(result.errors.length, 1);
+    assert.match(result.errors[0], /\.agents\/notes\/implemented\/process\/x\.md:\d+ 行号越界：`lib\/small\.js:9`/);
+  });
+});
+
+test('doc-refs: archived/ 下的笔记被跳过（封印过的笔记改不动，红了也修不了）', () => {
+  withRepo({
+    'lib/small.js': 'const a = 1;\n',
+    'docs/ok.md': '# ok\n\n见 `lib/small.js:1`。\n',
+    '.agents/notes/archived/process/old.md': '# old\n\n见 `lib/small.js:99`。\n'
+  }, (root) => {
+    const result = verifyDocRefs({ root });
+    assert.deepEqual(result.errors, []);
+    assert.equal(result.checked, 1, 'archived/ 那篇不该被收进语料');
+  });
+});
+
+test('doc-refs: 指向 .probe/ 的引用被跳过（探针目录 gitignore，别人 clone 里不存在）', () => {
+  withRepo({
+    'lib/small.js': 'const a = 1;\n',
+    'docs/ok.md': '# ok\n\n见 `lib/small.js:1` 与 `.probe/upstream-a/report.md:3`。\n'
+  }, (root) => {
+    assert.deepEqual(verifyDocRefs({ root }).errors, []);
+  });
 });

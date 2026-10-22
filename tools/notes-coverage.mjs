@@ -46,8 +46,30 @@
  *
  *   node <脚本路径>                      # 检查暂存区（提交钩子用）
  *   node <脚本路径> --range A..B         # 检查提交区间（CI 用）
+ *   node <脚本路径> --since <base-ref>   # 只检查「本 PR 自己带来的提交」：
+ *                                        #   先 git merge-base <base-ref> HEAD
+ *                                        #   求分叉点，再查 <分叉点>..HEAD
  *   node <脚本路径> --config <file>      # 显式指定配置（默认读仓库根的
  *                                        #   .agents/notes-coverage.json）
+ *
+ * ## `--range` 与 `--since` 的区别（别用错，那是两种不同的问题）
+ *
+ * `--range A..B` 是**字面**区间：git 怎么解释就怎么查。用它接 CI 时会把
+ * **别人的老提交也一起查** —— 而老仓库里往往有大量「改了代码但当时还没这道
+ * 门禁」的提交，于是第一次接这道门禁就必红，红的是历史而不是这次 PR。
+ * 那道红既改不动（要补几百篇笔记）又拦不住任何东西，最后只会被人 `--no-verify`
+ * 关掉 —— 门禁等于没装。
+ *
+ * `--since <base-ref>`（CI 里通常传 `${{ github.event.pull_request.base.sha }}`
+ * 或 `origin/main`）是**语义**区间：先求分叉点 `git merge-base <base-ref> HEAD`，
+ * 只查 `<分叉点>..HEAD` —— 也就是「这次 PR 自己带来的提交」。
+ * 「没接门禁之前的老账」不在它职责范围内，这才是接得上去的那道门禁。
+ *
+ * 两者都逐个提交判定（一个提交带的笔记不能替另一个提交顶账）。
+ *
+ * 分叉点求不出来时**判失败并说明原因**（退出码 2）：不是 git 仓库、
+ * base-ref 不存在、浅克隆缺对象、空仓库（HEAD 尚未诞生）——
+ * 一律不静默退化成全历史或全绿。
  *
  * 环境变量：
  *   NOTES_COVERAGE_BASE   与 --range 等价（CI 里传 base sha 更方便）
@@ -227,7 +249,7 @@ const MAX_GIT_OUTPUT = 64 * 1024 * 1024;
  * 这个值取自 deepseek-harness 的 change-scope.ts。
  *
  * @param {string[]} args git 参数。
- * @returns {{ ok: boolean, out: string, err: string }} 结果。
+ * @returns {{ ok: boolean, out: string, err: string, statusCode: number|null }} 结果。
  */
 function git(args) {
   const result = spawnSync('git', args, {
@@ -239,7 +261,10 @@ function git(args) {
   return {
     ok: result.status === 0,
     out: String(result.stdout ?? ''),
-    err: String(result.stderr ?? '')
+    err: String(result.stderr ?? ''),
+    /* git 失败时 status 才是有意义的诊断（例如浅克隆缺对象是 128）；
+       被信号杀掉时为 null，调用方拼成 `exit=null` 照样能看出来不是正常退出。 */
+    statusCode: result.status ?? null
   };
 }
 
@@ -285,12 +310,14 @@ function diffPaths(args) {
 /**
  * 取本次要检查的变更文件列表。
  *
- * 两种模式返回的形状不同，因为它们的正确语义本就不同：
+ * 三种模式返回的形状不同，因为它们的正确语义本就不同：
  *   - 暂存区（本地钩子）：一次提交一批，合并看是**对的**；
  *   - 区间（CI）：可能含多次提交，必须**逐个提交**看。
  *     合并看会漏：区间里只要有一次带了笔记，其余改代码的提交全被掩护过去。
  *     实测确认：`base..HEAD` 含「带笔记的 probe1」+「改 lib 无笔记的 probe2」
  *     被判通过 —— 而那正是「一次 push 多个提交」的常见形态。
+ *   - `--since <base-ref>`：区间的一种**来源**，先求 merge-base 分叉点，
+ *     再按上面的区间规则逐个提交判定。
  *
  * @param {string[]} argv 命令行参数。
  * @returns {{ mode: 'staged'|'range', label: string, files?: string[],
@@ -300,21 +327,53 @@ function diffPaths(args) {
 function collectTargets(argv) {
   const rangeFlag = argv.indexOf('--range');
   const rangeValue = rangeFlag >= 0 ? argv[rangeFlag + 1] : undefined;
+  const sinceFlag = argv.indexOf('--since');
   const envBase = process.env.NOTES_COVERAGE_BASE;
+
+  if (sinceFlag >= 0) {
+    const baseRef = argv[sinceFlag + 1];
+    /* `--since` 后面没给出可用的引用（漏了值、给了空串，
+       或者把 `--since=origin/main` 写成了 `--since --range` 这种两段式错位），
+       一律判失败 —— **不能**当成「没给 --since」而退回暂存区模式：
+       那样这次 CI 什么都没查却报告通过，正是这道门禁唯一要防的失效。 */
+    if (typeof baseRef !== 'string' || baseRef === '' || baseRef.startsWith('-')) {
+      return {
+        mode: 'range',
+        label: '--since',
+        headline: '✖ --since 后面缺少基准引用，本次检查无效。',
+        reason: `用法：--since <base-ref>（如 origin/main 或一个 base sha）；收到的下一个参数是 ${JSON.stringify(baseRef ?? null)}。`
+      };
+    }
+    /* 两个区间来源同时给 ⇒ 不知道该信哪个。判失败而不是挑一个 ——
+       「挑一个」的最坏结果是查了另一个区间还报告通过（假绿）。 */
+    if (rangeFlag >= 0 || (typeof envBase === 'string' && envBase !== '')) {
+      return {
+        mode: 'range',
+        label: `--since ${baseRef}（与 --range/NOTES_COVERAGE_BASE 冲突）`,
+        headline: '✖ 区间来源冲突，本次检查无效。',
+        reason: '一次只允许一个区间来源：删掉 --range（或清空 NOTES_COVERAGE_BASE），或删掉 --since。'
+      };
+    }
+    const forked = resolveMergeBase(baseRef);
+    if (!forked.ok) {
+      return {
+        mode: 'range',
+        label: `--since ${baseRef}`,
+        headline: '✖ 求不出 merge-base 分叉点，本次检查无效。',
+        reason: forked.reason
+      };
+    }
+    return collectRangeCommits(
+      `${forked.sha}..HEAD`,
+      `--since ${baseRef}（分叉点 ${forked.sha.slice(0, 7)}）`
+    );
+  }
 
   const range = rangeValue ?? envBase;
   if (typeof range === 'string' && range !== '') {
     /* 允许 `--range <sha>`：自动补成 <sha>..HEAD。 */
     const spec = range.includes('..') ? range : `${range}..HEAD`;
-    const listed = git(['rev-list', '--reverse', spec]);
-    if (!listed.ok) {
-      return { mode: 'range', label: spec, reason: `git rev-list 失败: ${listed.err.trim()}` };
-    }
-    const commits = splitLines(listed.out).map((sha) => ({
-      sha,
-      subject: git(['log', '-1', '--format=%s', sha]).out.trim()
-    }));
-    return { mode: 'range', label: spec, commits };
+    return collectRangeCommits(spec, spec);
   }
 
   /* 本地：默认看暂存区（commit-msg 钩子的语义）。
@@ -324,6 +383,59 @@ function collectTargets(argv) {
     return { mode: 'staged', label: '暂存区', reason: `git diff --cached 失败: ${result.err.trim()}` };
   }
   return { mode: 'staged', label: '暂存区', files: result.files };
+}
+
+/**
+ * 求 `git merge-base <base-ref> HEAD`，即「本次改动从哪里分出去的」。
+ *
+ * ## 为什么求不出来必须判失败（退出码 2），而不是退化成全历史或全绿
+ *
+ * 分叉点求不出来的几种情况，在 CI 里都是**真实**的：
+ *   - base-ref 拼错 / 那个分支已被删（force-push、改名）；
+ *   - 浅克隆（`fetch-depth: 1`）缺对象 —— CI 配浅克隆很常见；
+ *   - 空仓库，HEAD 尚未诞生；
+ *   - 根本不是 git 仓库（跑错目录 / 源码没 checkout）。
+ *
+ * 任何一种如果被当成「没有可查的提交」而放行，就是这道门禁**假绿**：
+ * 它看起来在管，实际什么都没查，而这正是它唯一要防的那种失效
+ * （漏记笔记的提交照过）。所以这里一律把原因报出来并退出 2。
+ *
+ * 多分叉点（criss-cross 合并历史）时 git 会输出多行；取第一行，
+ * 与 `git merge-base A B` 的默认行为一致 —— 取哪一行都是「一个共同祖先」，
+ * 区别只在区间略宽一点，方向是**宁可多查**，不会漏。
+ *
+ * @param {string} baseRef 基准引用（分支名 / sha / tag）。
+ * @returns {{ ok: true, sha: string } | { ok: false, reason: string }} 分叉点或失败原因。
+ */
+function resolveMergeBase(baseRef) {
+  const result = git(['merge-base', baseRef, 'HEAD']);
+  if (!result.ok) {
+    return { ok: false, reason: `git merge-base ${baseRef} HEAD 失败：${result.err.trim() || `exit=${result.statusCode}`}` };
+  }
+  const sha = result.out.trim().split('\n')[0]?.trim() ?? '';
+  if (sha === '') {
+    return { ok: false, reason: `git merge-base ${baseRef} HEAD 没有输出分叉点（base-ref 与 HEAD 无共同祖先，或仓库没有提交）。` };
+  }
+  return { ok: true, sha };
+}
+
+/**
+ * 按字面区间 `A..B` 收集提交，供区间模式逐个判定。
+ *
+ * @param {string} spec rev-list 区间（字面，不做 merge-base 推导）。
+ * @param {string} label 报告里显示的检查范围说明。
+ * @returns {{ mode: 'range', label: string, commits?: {sha: string, subject: string}[], reason?: string }} 检查目标。
+ */
+function collectRangeCommits(spec, label) {
+  const listed = git(['rev-list', '--reverse', spec]);
+  if (!listed.ok) {
+    return { mode: 'range', label, reason: `git rev-list 失败: ${listed.err.trim()}` };
+  }
+  const commits = splitLines(listed.out).map((sha) => ({
+    sha,
+    subject: git(['log', '-1', '--format=%s', sha]).out.trim()
+  }));
+  return { mode: 'range', label, commits };
 }
 
 /**
@@ -621,9 +733,12 @@ if (target.mode === 'staged' && target.files === undefined) {
   process.exit(2);
 }
 if (target.mode === 'range' && target.commits === undefined) {
-  console.error('✖ 无法读取提交区间，本次检查无效。');
+  console.error(target.headline ?? '✖ 无法读取提交区间，本次检查无效。');
+  console.error(`  检查范围：${target.label}`);
   console.error(`  ${target.reason ?? '未知原因'}`);
   console.error('  这不是「已合规」—— 退出码 2。');
+  console.error('  （--since 的分叉点求不出来时不要退化成全历史或全绿：');
+  console.error('    那正是「什么都没查却报告通过」的假绿，见文件头说明。）');
   process.exit(2);
 }
 

@@ -1,6 +1,8 @@
 /**
  * 校验 `docs/` 与笔记正文里的**行内 `文件:行号` 引用**是否还能解析。
  *
+ * 语料范围：`docs/**` + `.agents/notes/**`（**不含 `archived/`**）。
+ *
  * ## 为什么需要
  *
  * 本仓库的判定全是「上游判据 `scripts/x.ts:83`」「本地对照 `lib/notes.js:625`」
@@ -28,9 +30,14 @@
  *   - 冒号后只有行号的裸引用（`:43`、`:59-85`）—— 它指代上文某个文件，
  *     解析它需要理解段落，做不到可靠；
  *   - 指向上游语料的路径（`apps/`、`packages/`、`vendor/`、`python/`、`./`）——
- *     那些文件在本仓库不存在，是本仓库**故意**在描述的别人的结构。
+ *     那些文件在本仓库不存在，是本仓库**故意**在描述的别人的结构；
+ *   - 指向 `.probe/` 的路径 —— 探针目录是 gitignore 的一次性证据
+ *     （`.gitignore` 的「探针/临时」段），在别人的 clone 里根本不存在，
+ *     校验它等于让门禁依赖我的本地残留；
+ *   - `archived/` 下的笔记 —— 已按 SHA-256 封印，改一行就破坏清单，
+ *     校验它们只会产出**无法修复**的红。
  *
- * 这三条排除是**有意收窄**：宁可只查一部分，也不要产出误报 ——
+ * 这几条排除是**有意收窄**：宁可只查一部分，也不要产出误报 ——
  * 误报的门禁会被绕过（同 `AGENTS.md` 对语义判重的论证）。
  *
  * ## 外部路径为什么用白名单而不是前缀
@@ -86,15 +93,30 @@ const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
  */
 export const EXTERNAL_REFS = {};
 
-/** 需要排除的上游语料前缀。 */
-const UPSTREAM_PREFIXES = ['apps/', 'packages/', 'vendor/', 'python/', './'];
+/**
+ * 需要排除的上游语料前缀。
+ *
+ * `scripts/` 也在其中：上游 A 把全部 `verify-*.ts` 放在仓库根的 `scripts/`，
+ * 所以笔记里写 `scripts/verify-*.ts:83` 说的是**上游**的行号，本仓库没有这个
+ * 目录。哪天本仓库真长出 `scripts/`，先把它从这张表里删掉再加引用。
+ */
+const UPSTREAM_PREFIXES = ['apps/', 'packages/', 'vendor/', 'python/', './', 'scripts/'];
+
+/** 只在本地有、别人 clone 里没有的前缀：校验它就会让门禁依赖本地残留。 */
+const LOCAL_ONLY_PREFIXES = ['.probe/'];
 
 /**
  * 收集待校验的文档（仓库相对路径，正斜杠）。
  *
- * 只收 `docs/`：顶层文档与笔记里的行内引用数量巨大且大量指向上游，
- * 先把唯一承载判定表的目录纳入门禁，收益/噪声比最高。
+ * 收 `docs/` 与 `.agents/notes/`：两者都是**承载判定**的语料 —— 一处写「上游
+ * 判据 `scripts/x.ts:83`」，一处写「本地对照 `lib/notes.js:625`」。第一版只收
+ * `docs/`，理由是笔记里引用的绝对数量大且大量指向上游；实测下来这个理由
+ * 只对「宽口径」成立，见 `.agents/notes/implemented/process/2026-10-22-note-refs-join-the-gate.md`
+ * 里的量化（严格口径下笔记里 14 条候选只有 1 条真解析不了，且那是示例）。
  *
+ * 跳过 `archived/`：那批笔记被封印，红了也改不动。
+ *
+ * @param {string} root 仓库根。
  * @returns {string[]} 文档列表。
  */
 export function collectDocRefDocuments(root = PACKAGE_ROOT) {
@@ -103,6 +125,7 @@ export function collectDocRefDocuments(root = PACKAGE_ROOT) {
     const full = join(root, relDir);
     if (!existsSync(full)) return;
     for (const name of readdirSync(full)) {
+      if (name === 'archived') continue;
       const childRel = `${relDir}/${name}`;
       const childFull = join(root, childRel);
       if (statSync(childFull).isDirectory()) walk(childRel);
@@ -110,6 +133,7 @@ export function collectDocRefDocuments(root = PACKAGE_ROOT) {
     }
   };
   walk('docs');
+  walk('.agents/notes');
   return files.sort();
 }
 
@@ -134,6 +158,7 @@ export function collectInlineRefs(content) {
     const path = ref[1];
     if (!path.includes('/')) continue;
     if (UPSTREAM_PREFIXES.some((prefix) => path.startsWith(prefix))) continue;
+    if (LOCAL_ONLY_PREFIXES.some((prefix) => path.startsWith(prefix))) continue;
     const from = Number(ref[2]);
     const to = Number(ref[3] ?? ref[2]);
     refs.push({ path, from, to, at: spanMatch.index });
@@ -212,7 +237,7 @@ export function verifyDocRefs(options = {}) {
     }
   }
 
-  if (documents.length === 0) errors.push('没有扫到任何 docs/ 文档：空集合不得当绿');
+  if (documents.length === 0) errors.push('没有扫到任何 `docs/` 或 `.agents/notes/` 文档：空集合不得当绿');
   if (refs === 0) errors.push('没有扫到任何行内 `文件:行号` 引用：空集合不得当绿');
   return { checked: documents.length, refs, errors };
 }
