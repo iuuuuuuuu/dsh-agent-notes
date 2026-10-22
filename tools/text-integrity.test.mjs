@@ -115,12 +115,36 @@ test('text: 纯中文与 emoji 必须放行（防止误伤正常内容）', () =
   assert.equal(result.ok, true, '正常中文内容不得被误报');
 });
 
-test('text: 空仓库通过（但 checked 为 0，不算有意义的绿）', () => {
-  /* 记录这条是为了说明：空集合下门禁会通过，而那正是需要被看见的情形。
-     测试用「checked 是否为 0」把它显式标出来，避免它冒充成有效覆盖。 */
+test('text: 空仓库必须判失败（空集合不得当绿）', () => {
+  /* 这条用例的前身是「空仓库通过（但 checked 为 0，不算有意义的绿）」——
+     它**把假绿记录下来**却没有拦住它：断言写的是 `ok === true`，
+     于是「空语料报通过」被钉成了**期望行为**。真实空目录跑出来的
+     `checked === 0` + `errors === []`，退出码因此恒为 0。
+     语料为空与内容完好在退出码上不可区分，这是最隐蔽的一种假绿。
+     现在按 `tools/doc-refs.mjs:364-365` 的同族口径判红。 */
   const result = inSandbox({});
-  assert.equal(result.ok, true, '空仓库不该报错');
-  assert.equal(result.checked, 0, '但 checked 为 0 —— 这不是有意义的通过');
+  assert.equal(result.checked, 0, '这里必须是真空目录：collectFiles 一条都没扫到');
+  assert.equal(result.ok, false, '空语料必须判失败 —— 空集合不得当绿');
+  assert.equal(result.errors.length, 1, `必须恰好一条错误，实际：${result.errors.join('; ')}`);
+  assert.match(result.errors[0], /没有扫到任何文本文件/, '必须说明语料为空');
+  assert.match(result.errors[0], /空集合不得当绿/, '必须点明这是空集合判据');
+});
+
+test('text: 只有非目标后缀的文件也算空语料（不得当绿）', () => {
+  /* 语料为空的另一种形态：目录里有文件，但没有一种是 `EXTENSIONS` 认的。
+     只判「目录为空」不够 —— 改掉 `EXTENSIONS`（比如某次重构把 `.mjs`
+     拼错成 `.ms`）会得到同样的假绿，且目录明明有内容。 */
+  const dir = mkdtempSync(join(tmpdir(), 'an-text-nonext-'));
+  try {
+    writeFileSync(join(dir, 'notes.txt'), '只有 txt。\n', 'utf8');
+    writeFileSync(join(dir, 'data.bin'), '二进制。\n', 'utf8');
+    const result = verifyTextIntegrity(dir);
+    assert.equal(result.checked, 0, '.txt/.bin 都不在扫描范围里');
+    assert.match(result.errors.join('\n'), /空集合不得当绿/,
+      '没有可扫文件时必须判红，不许拿「目录非空」当绿');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('text: findProblems 返回的行号能定位到实际内容', () => {

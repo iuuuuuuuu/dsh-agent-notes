@@ -199,8 +199,131 @@ const SAFETY = [
     desc: '任何一步都不得带 continue-on-error: true（同上；这个 workflow 有 '
       + 'contents: write 且会 push main/tag，静默降级一道门禁的代价更大）',
     test: (yml) => !/^\s*continue-on-error:\s*true\s*$/m.test(stripComments(yml))
+  },
+  {
+    file: 'verify.yml',
+    key: 'has-concurrency',
+    desc: '必须声明 concurrency 块（同一个 PR 上新推的提交会让旧的那次验证'
+      + '白跑完并给出过期结论 —— 上游 A 用同一形态）',
+    test: (yml) => concurrencyBlock(yml) !== null
+  },
+  {
+    file: 'verify.yml',
+    key: 'cancels-only-superseded-pr',
+    desc: 'cancel-in-progress 不得无条件为 true：main 上的验证是「这次发布'
+      + '过没过门禁」的唯一凭据（branch protection 强制要求），被下一次运行'
+      + '取消掉就等于发布没有验证记录。只能按事件收窄到 pull_request。',
+    test: (yml) => {
+      const block = concurrencyBlock(yml);
+      if (block === null) return false;
+      /* 无条件 true 明确禁止；只接受「按事件判断」的写法。 */
+      if (/cancel-in-progress:\s*true\s*$/m.test(block)) return false;
+      return /cancel-in-progress:[^\n]*pull_request/.test(block);
+    }
+  },
+  {
+    file: 'verify.yml',
+    key: 'no-persisted-credentials',
+    desc: '每一处 checkout 都必须 persist-credentials: false：这个 job 会跑仓库里'
+      + '的脚本（npm test），脚本若能拿到可写凭据，一次「测试」就可能变成一次 push',
+    test: (yml) => {
+      const blocks = checkoutBlocks(yml);
+      if (blocks.length === 0) return false;
+      return blocks.every((block) => /persist-credentials:\s*false/.test(block));
+    }
+  },
+  {
+    file: 'upstream-sync.yml',
+    key: 'has-concurrency',
+    desc: '必须声明 concurrency 块（两个同步任务同时 push main 会打架）',
+    test: (yml) => concurrencyBlock(yml) !== null
+  },
+  {
+    file: 'upstream-sync.yml',
+    key: 'never-cancels-a-push',
+    desc: 'cancel-in-progress 必须为 false：这个 job 会 push main 与 push tag，'
+      + '中途取消会留下半推状态（tag 推了 main 没推、或反过来）',
+    test: (yml) => {
+      const block = concurrencyBlock(yml);
+      if (block === null) return false;
+      return /cancel-in-progress:\s*false/.test(block);
+    }
+  },
+  {
+    file: 'upstream-sync.yml',
+    key: 'keeps-credentials-for-push',
+    desc: '发布 job 不得关掉 checkout 的凭据：它靠这份凭据 push main 与 push tag。'
+      + '上游 A 的只读 workflow 用 persist-credentials: false，照抄过来会让发布失败。',
+    test: (yml) => {
+      const blocks = checkoutBlocks(yml);
+      if (blocks.length === 0) return false;
+      return blocks.every((block) => !/persist-credentials:\s*false/.test(block));
+    }
   }
 ];
+
+/**
+ * 抽出一个 workflow 里的 `concurrency:` 块。
+ *
+ * 块标量与普通键值两种写法都要认：
+ *
+ * ```yaml
+ * concurrency:
+ *   group: x
+ *   cancel-in-progress: true
+ * ```
+ *
+ * @param {string} yml 原文。函数内部自己去掉整行注释。
+ * @returns {string|null} 块内容；没有该块时返回 null。
+ */
+function concurrencyBlock(yml) {
+  const lines = stripComments(yml).split('\n');
+  const index = lines.findIndex((line) => /^\s*concurrency:\s*$/.test(line));
+  if (index === -1) return null;
+
+  const baseIndent = lines[index].length - lines[index].trimStart().length;
+  const body = [];
+  for (let i = index + 1; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (line.trim() === '') { body.push(''); continue; }
+    const indent = line.length - line.trimStart().length;
+    if (indent <= baseIndent) break;
+    body.push(line);
+  }
+  return body.join('\n');
+}
+
+/**
+ * 抽出每一条 `uses: actions/checkout` 步骤的 `with:` 块。
+ *
+ * 为什么按块收而不是按行找 `persist-credentials:`：判据要问的是
+ * 「**这一处** checkout 关掉凭据了吗」，而不是「文件里有没有出现过
+ * persist-credentials」。按行找会漏掉「一处关掉、一处没关」的情况 ——
+ * 而那正是真实故障形态（复制粘贴加了一处，忘了另一处）。
+ *
+ * @param {string} yml 原文。函数内部自己去掉整行注释。
+ * @returns {string[]} 每个 checkout 步骤的 `with:` 块文本。
+ */
+function checkoutBlocks(yml) {
+  const lines = stripComments(yml).split('\n');
+  const blocks = [];
+
+  for (let i = 0; i < lines.length; i += 1) {
+    if (!/^\s*-?\s*uses:\s*actions\/checkout/.test(lines[i])) continue;
+    const baseIndent = lines[i].length - lines[i].trimStart().length;
+    const body = [];
+    for (let j = i + 1; j < lines.length; j += 1) {
+      const line = lines[j];
+      if (line.trim() === '') { body.push(''); continue; }
+      const indent = line.length - line.trimStart().length;
+      if (indent <= baseIndent) break;
+      body.push(line);
+    }
+    blocks.push(body.join('\n'));
+  }
+
+  return blocks;
+}
 
 /**
  * 去掉整行注释。

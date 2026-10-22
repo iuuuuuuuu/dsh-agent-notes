@@ -412,3 +412,93 @@ test('ci-align: verifyAll 报出 unsafe 与 unknown，且真实仓库此刻为�
   assert.ok(sync, 'upstream-sync.yml 必须出现在结果里');
   assert.equal(sync.mode, 'subset');
 });
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * 以下覆盖本轮新增的六条判据（上游 A 的 CI 安全属性）。
+ *
+ * 病根：`verify.yml` 会跑仓库里的脚本（npm test 会执行 tests/ 与 tools/），
+ * 而 `actions/checkout` 默认把 GITHUB_TOKEN 写进 `.git/config` ——
+ * 被测代码一旦执行 `git push`，那一次「测试」就变成一次 push。
+ * 上游 A 的 9 处 checkout 全部带 `persist-credentials: false`。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+test('ci-align: verify.yml 缺 concurrency 块必须变红', () => {
+  /* 同一个 PR 上新推的提交会让旧的那次验证白跑完，并给出一个过期的结论。 */
+  const mutated = REAL_WORKFLOW.replace(/^concurrency:\n[\s\S]*?^jobs:/m, 'jobs:');
+  assert.notEqual(mutated, REAL_WORKFLOW, '构造没生效');
+
+  const result = check({ ...BOTH, 'verify.yml': mutated });
+  assert.equal(result.code, 1, `缺 concurrency 必须变红：\\n${result.out}`);
+  assert.match(result.out, /has-concurrency/);
+  assert.match(result.out, /verify\.yml/);
+});
+
+test('ci-align: verify.yml 无条件 cancel-in-progress: true 必须变红', () => {
+  /* ★ 这是**刻意不照抄上游**的地方。上游 A 写的是无条件 true
+     （.github/workflows/ci.yml 的 concurrency 块）；我们收窄成按事件判断。
+     理由：我们 main 的绿色是 branch protection 强制的**发布凭据**，
+     一次 main 验证被下一次运行取消掉，就等于那次发布没有验证记录。 */
+  const mutated = REAL_WORKFLOW.replace(
+    /^(\s*)cancel-in-progress:.*$/m,
+    '$1cancel-in-progress: true'
+  );
+  assert.notEqual(mutated, REAL_WORKFLOW, '构造没生效');
+  assert.match(mutated, /^\s*cancel-in-progress: true$/m,
+    '变异必须落在真正的配置行上，而不是注释里');
+
+  const result = check({ ...BOTH, 'verify.yml': mutated });
+  assert.equal(result.code, 1, `无条件取消必须变红：\\n${result.out}`);
+  assert.match(result.out, /cancels-only-superseded-pr/);
+});
+
+test('ci-align: verify.yml 按 pull_request 收窄的取消写法必须通过', () => {
+  /* 不能把判据写成「不许有 cancel-in-progress」—— 那会逼人把整块删掉。
+     合法形态：只在 PR 上取消（同一个 PR 的旧提交验证作废是合理的）。 */
+  const result = check(BOTH);
+  assert.equal(result.code, 0, `按事件收窄必须通过：\\n${result.out}`);
+  assert.match(REAL_WORKFLOW, /cancel-in-progress:.*pull_request/,
+    '真实 workflow 应当按 pull_request 收窄');
+});
+
+test('ci-align: 任一 checkout 缺 persist-credentials: false 必须变红', () => {
+  /* verify.yml 里有**两处** checkout（verify job 与 upstream-drift job）。
+     判据必须逐处查 —— 只查文件里「有没有出现过」会漏掉「一处关一处没关」。 */
+  const mutated = REAL_WORKFLOW.replace(
+    '          persist-credentials: false',
+    '          # persist-credentials: false'
+  );
+  assert.notEqual(mutated, REAL_WORKFLOW, '构造没生效');
+
+  const result = check({ ...BOTH, 'verify.yml': mutated });
+  assert.equal(result.code, 1, `少一处就必须变红：\\n${result.out}`);
+  assert.match(result.out, /no-persisted-credentials/);
+});
+
+test('ci-align: upstream-sync 必须保留凭据（照抄上游的 false 会让发布失败）', () => {
+  /* 反向判据：发布 job 靠这份凭据 push main 与 push tag。
+     上游 A 的只读 workflow 用 persist-credentials: false，
+     照抄到发布 job 上会让发布静默失败 —— 这就是「照抄」要有的判据。 */
+  const mutated = REAL_SYNC.replace(
+    '          token: ${{ secrets.GITHUB_TOKEN }}',
+    '          token: ${{ secrets.GITHUB_TOKEN }}\n          persist-credentials: false'
+  );
+  assert.notEqual(mutated, REAL_SYNC, '构造没生效');
+
+  const result = check({ ...BOTH, 'upstream-sync.yml': mutated });
+  assert.equal(result.code, 1, `发布 job 关掉凭据必须变红：\\n${result.out}`);
+  assert.match(result.out, /keeps-credentials-for-push/);
+});
+
+test('ci-align: upstream-sync 的 cancel-in-progress 必须为 false', () => {
+  /* 那个 job 会 push main 与 push tag。中途取消会留下半推状态
+     （tag 推了 main 没推，或反过来）—— 发布状态是撕裂的。 */
+  const mutated = REAL_SYNC.replace(
+    '  cancel-in-progress: false',
+    '  cancel-in-progress: true'
+  );
+  assert.notEqual(mutated, REAL_SYNC, '构造没生效');
+
+  const result = check({ ...BOTH, 'upstream-sync.yml': mutated });
+  assert.equal(result.code, 1, `发布 job 可取消必须变红：\\n${result.out}`);
+  assert.match(result.out, /never-cancels-a-push/);
+});

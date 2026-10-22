@@ -32,8 +32,12 @@
  *   无论 `files` 写没写 —— 这几个是豁免，否则会造出假红。
  */
 
-import { existsSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/** 包根（`tools/` 的上一级）。 */
+const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 /** npm 恒定包含的文件（与 `files` 无关）。 */
 const ALWAYS_PUBLISHED = /^(package\.json|readme[^/]*|licen[sc]e[^/]*|notice[^/]*)$/i;
@@ -243,3 +247,22 @@ export function checkPublishLayout({ root, pkg }) {
 
   return problems;
 }
+
+/* ── CLI ──────────────────────────────────────────────────────────────── */
+
+function main() {
+  const root = PACKAGE_ROOT;
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
+  const problems = checkPublishLayout({ root, pkg });
+  if (problems.length === 0) {
+    console.log('发布清单通过：files / exports / main / patch 与运行时文件一致。');
+    process.exit(0);
+  }
+  console.error(`发布清单校验失败：${problems.length} 处`);
+  for (const problem of problems) console.error(`  ✖ ${problem}`);
+  process.exit(1);
+}
+
+const invokedDirectly = process.argv[1] !== undefined
+  && process.argv[1].replace(/\\/g, '/').endsWith('/tools/publish-layout.mjs');
+if (invokedDirectly) main();

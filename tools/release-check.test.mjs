@@ -31,6 +31,7 @@ const PKG = join(ROOT, 'package.json');
 
 const changelogBackup = readFileSync(CHANGELOG, 'utf8');
 const pkgBackup = readFileSync(PKG, 'utf8');
+const lockBackup = readFileSync(join(ROOT, 'package-lock.json'), 'utf8');
 
 /**
  * 临时改 CHANGELOG / package.json 的**内容**，跑校验。
@@ -40,13 +41,22 @@ const pkgBackup = readFileSync(PKG, 'utf8');
  * `version.test.mjs`（它读 `package.json` 的 version）与其它测试在
  * 改到一半时读到中间态。这个纪律来自一次真实的偶发失败。
  *
- * @param {{changelog?: string, pkg?: object}} edits 要替换的内容。
+ * `package-lock.json` 也必须一起给：**门禁现在会核 lock 的版本**，
+ * 而「改版本号」这种用例天然要动 lock 的版本。若默认仍读真实 lock，
+ * 改版本号的用例会多出一条与本用例无关的 lock 报错，把「这条用例在验什么」
+ * 搅浑。所以默认给一份**跟随 pkg 版本**的 lock；只有专门验 lock 的用例
+ * 才显式传 `lock`。
+ *
+ * @param {{changelog?: string, pkg?: object, lock?: object}} edits 要替换的内容。
  * @returns {ReturnType<typeof verifyRelease>} 校验结果。
  */
 function withEdits(edits) {
+  const pkg = edits.pkg ?? JSON.parse(pkgBackup);
+  const lock = edits.lock ?? { version: pkg.version, lockfileVersion: 3, packages: { '': { version: pkg.version } } };
   const contents = new Map([
     ['CHANGELOG.md', edits.changelog ?? changelogBackup],
-    ['package.json', JSON.stringify(edits.pkg ?? JSON.parse(pkgBackup), null, 2)]
+    ['package.json', JSON.stringify(pkg, null, 2)],
+    ['package-lock.json', JSON.stringify(lock, null, 2)]
   ]);
   return verifyRelease({
     read: (name) => contents.get(name) ?? readFileSync(join(ROOT, name), 'utf8')
@@ -105,6 +115,33 @@ test('release: 当前仓库的版本 / CHANGELOG 对得上', () => {
   assert.deepEqual(result.errors, [], `记账必须一致，实际：${result.errors.join('; ')}`);
   const pkg = JSON.parse(pkgBackup);
   assert.equal(result.version, pkg.version, '报告的版本应与 package.json 一致');
+});
+
+test('release: package-lock.json 的版本必须与 package.json 一致', () => {
+  /* 这个缺口真实发生过：仓库里 package.json 是 0.8.0、package-lock.json
+     还停在 0.6.0，而整条门禁链全 0 —— 没有任何一道门禁看 lock。
+     后果不是「数字不好看」：npm ci 按 lock 装、npm publish 按 package.json 发，
+     装出来的包与发布的包版本号不同，且全程无报错。 */
+  const stale = withEdits({ pkg: pkgWith('0.8.0'), lock: { version: '0.6.0' } });
+  assert.ok(stale.errors.some((e) => /package-lock\.json/.test(e) && /0\.6\.0/.test(e)),
+    `lock 版本落后必须报错，实际：${stale.errors.join('; ')}`);
+
+  const inSync = withEdits({ pkg: pkgWith('0.8.0'), lock: { version: '0.8.0' } });
+  assert.ok(!inSync.errors.some((e) => /package-lock\.json/.test(e)),
+    `版本一致时不得报 lock 错，实际：${inSync.errors.join('; ')}`);
+});
+
+test('release: package-lock.json 读不出来时必须报错而不是放过', () => {
+  /* 判不了就不能算通过 —— 门禁的通用纪律：脚本缺失、超时算失败。 */
+  const result = verifyRelease({
+    read: (name) => {
+      if (name === 'package-lock.json') throw new Error('模拟读取失败');
+      if (name === 'CHANGELOG.md') return changelogBackup;
+      return readFileSync(join(ROOT, name), 'utf8');
+    }
+  });
+  assert.ok(result.errors.some((e) => /package-lock\.json/.test(e) && /读取或解析失败/.test(e)),
+    `lock 读不出来必须报错，实际：${result.errors.join('; ')}`);
 });
 
 test('release: parseChangelog 能分清版本段与小节', () => {

@@ -136,6 +136,15 @@ export function verifyTextIntegrity(root = PACKAGE_ROOT) {
     }
   }
 
+  /* ★ 空集合不得当绿。
+     语料为空时上面那个循环一次都不进，`errors` 恒为空、退出码恒为 0 ——
+     而「一个字节都没检查过」与「所有字节都完好」在退出码上完全一样。
+     这不是理论可能：`collectFiles` 读的是磁盘目录树，只要根下什么都没扫到
+     （路径写错、在错误目录里跑、扩展名后缀全被改掉），门禁就会安静地报「通过」。
+     措辞与 `tools/doc-refs.mjs:364-365` 同族（那边判的是
+     「没有扫到任何 `docs/` 或 `.agents/notes/` 文档：空集合不得当绿」）。 */
+  if (files.length === 0) errors.push('没有扫到任何文本文件：空集合不得当绿');
+
   return { checked: files.length, errors };
 }
 

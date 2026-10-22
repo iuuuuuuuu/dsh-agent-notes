@@ -94,6 +94,22 @@ if (budgets === undefined) {
   process.exit(2);
 }
 
+/* 只约束本仓库磁盘上完整存在的正式双语对，不要求宿主采用本清单。 */
+const bilingualPairs = [['README.md', 'README.en.md']];
+const activePairs = bilingualPairs.filter((pair) => pair.every((file) => existsSync(join(PACKAGE_ROOT, file))));
+for (const pair of activePairs) {
+  for (const file of pair) {
+    if (!Object.hasOwn(budgets, file)) {
+      console.error(`✖ 双语文档预算缺少 ${file}，必须成对登记。`);
+      process.exit(1);
+    }
+  }
+  if (budgets[pair[0]] !== budgets[pair[1]]) {
+    console.error(`✖ 双语文档 ${pair.join(' / ')} 的预算值必须相同。`);
+    process.exit(1);
+  }
+}
+
 const rows = [];
 for (const [file, limit] of Object.entries(budgets)) {
   const full = join(PACKAGE_ROOT, file);
@@ -124,6 +140,17 @@ if (update) {
     if (row.actual > row.limit) {
       next[row.file] = row.actual;
       raised.push(`${row.file}: ${row.limit} → ${row.actual}`);
+    }
+  }
+
+  /* 自动放宽同样保持双语预算相等，避免本次更新制造下次失败。 */
+  for (const pair of activePairs) {
+    const limit = Math.max(...pair.map((file) => next[file]));
+    for (const file of pair) {
+      if (next[file] !== limit) {
+        raised.push(`${file}: ${next[file]} → ${limit}（双语同步）`);
+        next[file] = limit;
+      }
     }
   }
 
