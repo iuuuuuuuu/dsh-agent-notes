@@ -72,7 +72,17 @@ const WORKFLOW_DIR = join(PACKAGE_ROOT, '.github', 'workflows');
  *
  * 代价：将来真要写条件降级，得先改这条判据 —— 那正是要的摩擦。
  */
-const CONTINUE_ON_ERROR_ALLOWED = /^\s*continue-on-error:\s*['"]?false['"]?\s*(?:#.*)?$/im;
+const CONTINUE_ON_ERROR_ALLOWED = /^\s*(?:-\s+)?continue-on-error\s*:\s*['"]?false['"]?\s*(?:#.*)?$/im;
+
+/**
+ * 「这一行是不是 `continue-on-error` 这个键」的识别式。
+ *
+ * 不能写成 `^\s*continue-on-error:` —— YAML 允许三种等价写法，它们都不匹配：
+ * `- continue-on-error: true`（行内序列表项）、`continue-on-error : true`
+ * （冒号前有空格）。识别式漏掉哪种，那种就整行不进违规列表 ⇒ 门禁假绿。
+ * 这条被 CodeRabbit 在 PR #31 上指出来了，是同一个「只认一种写法」的老毛病。
+ */
+const CONTINUE_ON_ERROR_KEY = /^\s*(?:-\s+)?continue-on-error\s*:/;
 
 /**
  * 找出所有不合约定的 `continue-on-error` 行（空数组才是通过）。
@@ -83,7 +93,7 @@ const CONTINUE_ON_ERROR_ALLOWED = /^\s*continue-on-error:\s*['"]?false['"]?\s*(?
 function offendingContinueOnError(yml) {
   return stripComments(yml)
     .split('\n')
-    .filter((line) => /^\s*continue-on-error:/.test(line))
+    .filter((line) => CONTINUE_ON_ERROR_KEY.test(line))
     .filter((line) => !CONTINUE_ON_ERROR_ALLOWED.test(line));
 }
 

@@ -62,6 +62,14 @@ Status: implemented
 否掉的原因：那个 job 恰好是**最不能**被静默降级的一个 —— 它有 `contents: write`
 且会 push main 与 tag，一道门禁被降级就意味着坏内容可能被直接推上去。
 
+**④ 判据本身被指第三次漏：识别式只认一种 YAML 写法。**
+「默认拒绝」修的是**值**那一半；**键**那一半还是老的「只认 `continue-on-error:`」。
+于是 `- continue-on-error: true`（行内序列表项）与 `continue-on-error : true`
+（冒号前空格）根本不进违规列表 —— 判据连看都没看到。这是 CodeRabbit 在 PR #31
+上的发现，也是同一类缺陷的第三次现形：**识别式与判据值都会「只认一种写法」**。
+现在识别式是 `CONTINUE_ON_ERROR_KEY = /^\s*(?:-\s+)?continue-on-error\s*:/`，
+允许值式同样接受 `- ` 前缀与冒号前空格。
+
 ## Consequences
 
 收益：

@@ -571,3 +571,20 @@ test('ci-align: 语义相反的 cancel-in-progress 表达式必须红（只认 =
   assert.equal(result.code, 1, `反向表达式必须被拦：${result.out}`);
   assert.match(result.out, /cancels-only-superseded-pr/);
 });
+
+test('ci-align: continue-on-error 的三种 YAML 等价写法都要被识别（含 - 前缀与冒号前空格）', () => {
+  /* CodeRabbit 在 PR #31 上指出：识别式写成 `^\s*continue-on-error:` 时，
+     `- continue-on-error: true`（行内序列表项）与 `continue-on-error : true`
+     （冒号前空格）都不会进违规列表 ⇒ 门禁假绿。 */
+  const forms = [
+    '        - continue-on-error: true',
+    '        continue-on-error : true'
+  ];
+  for (const form of forms) {
+    const mutated = REAL_WORKFLOW.replace('      - name: 包自检', `      - name: 包自检\n${form}`);
+    assert.notEqual(mutated, REAL_WORKFLOW, '构造没生效');
+    const result = check({ ...BOTH, 'verify.yml': mutated });
+    assert.equal(result.code, 1, `${form} 必须被发现：${result.out}`);
+    assert.match(result.out, /no-continue-on-error/);
+  }
+});
