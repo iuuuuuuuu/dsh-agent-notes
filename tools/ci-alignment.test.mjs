@@ -704,3 +704,46 @@ test('ci-align: 未闭合的引号不许把后面的键吞掉（shell 片段里�
   assert.equal(result.code, 1, `跨行引号之间的键仍然必须被发现：\n${result.out}`);
   assert.match(result.out, /no-continue-on-error/);
 });
+
+test('ci-align: 字符串里的「键」不算键（run 里的 shell 命令不许被误判红）', () => {
+  /* 笔记里预测过的假红方向：shell 命令里打印的 `continue-on-error: x` 不是 YAML 键，
+     判红会逼人改写命令才发得出去。
+     构造有讲究：键前面必须**先是空白**再是引号（`"log continue-on-error: …`）——
+     写成 `"continue-on-error: …` 时键紧贴引号，`YAML_KEY_ENTRY` 的键起边界
+     根本不匹配它，用例就变成了永恒绿（实测踩过：变异掉豁免它照样过）。 */
+  const inString = REAL_WORKFLOW.replace(
+    '      - name: 包自检',
+    '      - name: 包自检\n        run: echo "log continue-on-error: 只是日志文本"'
+  );
+  assert.notEqual(inString, REAL_WORKFLOW, '构造没生效');
+  const pass = check({ ...BOTH, 'verify.yml': inString });
+  assert.equal(pass.code, 0, `字符串里的键不许判红：\n${pass.out}`);
+
+  /* 但真键不能因为这条豁免一起被放过：同一行先有闭合引号的真键仍要红。 */
+  const realKey = REAL_WORKFLOW.replace(
+    '      - name: 包自检',
+    '      - name: 包自检\n        run: echo "日志"\n        continue-on-error: true'
+  );
+  assert.notEqual(realKey, REAL_WORKFLOW, '构造没生效');
+  const red = check({ ...BOTH, 'verify.yml': realKey });
+  assert.equal(red.code, 1, `闭合引号之后的真键仍必须红：\n${red.out}`);
+  assert.match(red.out, /no-continue-on-error/);
+});
+
+test('ci-align: flow 映射里合法的 cancel-in-progress 不许被尾巴上的别的键带红', () => {
+  /* 笔记里预测过的第二个假红方向：整行取值时 `, group: x` 跟着一起进比较式。 */
+  const flow = REAL_WORKFLOW.replace(
+    /concurrency:\n {2}group:[^\n]*\n {2}cancel-in-progress:[^\n]*/,
+    'concurrency: {group: ${{ github.workflow }}, cancel-in-progress: ${{ github.event_name == \'pull_request\' }}}'
+  );
+  assert.notEqual(flow, REAL_WORKFLOW, '构造没生效');
+  const pass = check({ ...BOTH, 'verify.yml': flow });
+  assert.equal(pass.code, 0, `flow 映射里的合法值必须通过：\n${pass.out}`);
+
+  /* 同一个 flow 映射里换成反向值，仍必须红。 */
+  const flowRed = flow.replace("github.event_name == 'pull_request'", "github.event_name != 'pull_request'");
+  assert.notEqual(flowRed, flow, '构造没生效');
+  const red = check({ ...BOTH, 'verify.yml': flowRed });
+  assert.equal(red.code, 1, `flow 映射里的反向值必须判红：\n${red.out}`);
+  assert.match(red.out, /cancels-only-superseded-pr/);
+});

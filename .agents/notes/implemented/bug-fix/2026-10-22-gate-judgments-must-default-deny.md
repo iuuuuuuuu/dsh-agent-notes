@@ -106,9 +106,24 @@ Status: implemented
 在同一轮一并改成「只取值、不看键的写法」：`cancelInProgressValues()` 全篇取值，
 逐个与允许值比对。这样两条判据的失效面收敛成同一个：**只剩键名拼写**。
 
-残留误差：`run:` 里若出现字符串字面量 `continue-on-error: 某个值`，会被当成真键而判红；
-flow-style 的 `cancel-in-progress` 若不写在行尾，行尾残留的 `, group: …` 会让它判红。
-两者都偏向失败（要人来解释），与政策一致。
+### 判据不能只会「更严」：两个预测过的假红方向已修
+
+收紧判据的第一步总要问「这样会不会把合法写法也判红」。本文预测过两处，当时写着
+「偏向失败，可接受」，后来发现它们不是纸面风险 —— 都是真会让人被迫改写仓库的假红：
+
+1. `run:` 里的 shell 字符串 `echo "log continue-on-error: 文本"` 会被当成真键而判红。
+   修法是 `insideQuotedScalar()`：只数**本行**前缀里未转义的引号，奇数即视为在字符串里。
+   判据刻意做得浅（不解析 YAML），拿不准时仍然判红，方向不变。
+2. flow 映射 `concurrency: {group: x, cancel-in-progress: ${{ … }}}` 里，值后面还跟着
+   `, group: x`；原先整行取值后与允许值比 ⇒ 合法写法被判红。修法是 `firstScalarValue()`
+   只取第一个完整标量（有 `${{` 时取到配对 `}}`）。同一处还补了 `concurrencyBlock()`
+   对 flow 写法的识别，否则连 `has-concurrency` 都会判「没有 concurrency 块」。
+
+**顺带记一条关于用例自己的教训。** 第一版「字符串里的键不算键」用例写的是
+`run: echo "continue-on-error: 文本"` —— 键紧贴引号，`YAML_KEY_ENTRY` 的键起边界
+根本不匹配它，于是**把判据里的豁免注释掉，这条用例照样绿**。是「跑一遍变异看它红不红」
+把它揪出来的：改写成 `echo "log continue-on-error: 文本"`（键前先是空白）之后变异才红。
+这正是「用例看着在测，其实测的是恒真」的形态 —— 纸面上有断言，判别力是零。
 
 ## Consequences
 
@@ -130,9 +145,9 @@ flow-style 的 `cancel-in-progress` 若不写在行尾，行尾残留的 `, grou
 
 ## Verification
 
-- `node --test tools/ci-alignment.test.mjs` ⇒ `38 / pass 38 / fail 0`（含转义键、`\U` 转义键、
-  行尾注释、跨行引号不许吞键四组）。
-- **真故障注入**（四条，都已还原）：
+- `node --test tools/ci-alignment.test.mjs` ⇒ `40 / pass 40 / fail 0`（含转义键、`\U` 转义键、
+  行尾注释、跨行引号不许吞键、字符串内的键不判红、flow 映射六组）。
+- **真故障注入**（六条，都已还原）：
   1. 判据换回「列举 true 各写法」的旧正则 ⇒ `pass 28 / fail 4`，红的四条正是
      continue-on-error 相关的四条（含表达式用例）。
   2. 把扫描式换回「全文扫、引号可跨行」的旧实现 ⇒ `pass 35 / fail 1`，红的正是
@@ -142,7 +157,12 @@ flow-style 的 `cancel-in-progress` 若不写在行尾，行尾残留的 `, grou
      「YAML 转义键（`\u002d` 解码成连字符）与裸键是同一个键」。
   4. 去掉 `stripInlineComment()`（改回直接 trim）⇒ 带行尾注释的合法条件被判红，
      红的正是「合法取消表达式后面的行尾注释不算改条件」。
-  还原后 `38 / 38`，且 `grep -c MUTANT` 为 `0`（无残留变异）。
+  5. 把 `insideQuotedScalar()` 的豁免短路掉 ⇒ 红的正是「字符串里的「键」不算键」。
+     **第一次跑这条变异时它没红**（用例构造让键紧贴引号，压根不匹配），改构造后才红 ——
+     这一步本身就是「用例必须有判别力」的证据。
+  6. 把 `concurrencyBlock()` 的 flow 分支短路掉 ⇒ 红的正是
+     「flow 映射里合法的 cancel-in-progress 不许被尾巴上的别的键带红」。
+  还原后 `40 / 40`，且 `grep -c MUTANT` 为 `0`（无残留变异）。
 - 真实仓库此刻仍全绿：`node tools/ci-alignment.mjs` ⇒ 三道全过、`14 条 CI 安全属性均未被删改`。
 
 补充（同日）：`tools/version-notice.test.mjs` 里那条「判据只有一处」原来只直接调

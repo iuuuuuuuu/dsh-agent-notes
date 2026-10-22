@@ -153,11 +153,66 @@ function stripInlineComment(value) {
 }
 
 /**
+ * 键前面那一行的前缀里，引号是不是还没闭合（= 这个「键」其实在字符串里）。
+ *
+ * 这是本文预测过的假红方向里最实的一个：`- run: echo "continue-on-error: x"`
+ * 里那个「键」在 shell 字符串里，压根不是 YAML 键，判红会让人被迫改写命令。
+ *
+ * 判据刻意做得浅：只数**本行**前缀里未转义的双引号与单引号，奇数就算在字符串里。
+ * 不追求正确解析 YAML（那是 Alternative ② 的路，零依赖约束下不做），只要能把
+ * 「明显的字符串内命中」排除掉；拿不准时仍然判红（方向不变）。
+ *
+ * @param {string} text 去掉整行注释后的全文。
+ * @param {number} index 匹配起点。
+ * @returns {boolean} 是否落在未闭合的引号里。
+ */
+function insideQuotedScalar(text, index) {
+  const lineStart = text.lastIndexOf('\n', index - 1) + 1;
+  const prefix = text.slice(lineStart, index);
+  const countUnescaped = (ch) => {
+    let count = 0;
+    for (let i = 0; i < prefix.length; i += 1) {
+      if (prefix[i] === '\\') { i += 1; continue; }
+      if (prefix[i] === ch) count += 1;
+    }
+    return count;
+  };
+  return countUnescaped('"') % 2 === 1 || countUnescaped("'") % 2 === 1;
+}
+
+/**
+ * 一个键的值里，**第一个完整的标量**。
+ *
+ * 两个来源：
+ * - 有 `${{ … }}` 时取到与之配对的 `}}`（表达式内部可以含空格与逗号，
+ *   `${{ github.event_name == 'pull_request' }}` 直接按空白切会切成三段）。
+ * - 否则取到第一个空白 / `,` / `}` 为止（flow 映射里后面的键从 `,` 起）。
+ *
+ * 为什么需要它：`cancel-in-progress` 的值原先只 `trim()`，于是 flow 映射里
+ * 合法写法 `{cancel-in-progress: ${{ … }}, group: x}` 因为尾巴带 `, group: x`
+ * 被判红 —— 也是本文预测过的假红方向。
+ *
+ * @param {string} raw 冒号右边到行尾（已剥行尾注释）。
+ * @returns {string} 第一个标量的原文。
+ */
+function firstScalarValue(raw) {
+  const value = raw.trim();
+  const open = value.indexOf('${{');
+  if (open !== -1) {
+    const close = value.indexOf('}}', open + 3);
+    if (close !== -1) return value.slice(open, close + 2);
+  }
+  return (value.split(/[\s,}#]/u)[0] ?? '');
+}
+
+/**
  * 扫出全篇所有键的出现处（键名已解码，值取冒号右边到行尾）。
  *
  * 值用「从 match 结束处往后取到行尾」算出来，而不是被正则一起吃掉 ——
  * 否则 flow 映射里后续的键（`{a: 1, cancel-in-progress: true}`）会被第一个
  * 匹配连值带键一起吞掉，判据就永远看不到它。
+ *
+ * 落在字符串里的命中直接丢掉（见 `insideQuotedScalar`）。
  *
  * @param {string} yml workflow 原文。
  * @returns {{key: string, value: string}[]} 键与值。
@@ -166,6 +221,7 @@ function yamlKeyEntries(yml) {
   const bare = stripComments(yml);
   const entries = [];
   for (const match of bare.matchAll(YAML_KEY_ENTRY)) {
+    if (insideQuotedScalar(bare, match.index)) continue;
     const key = match.groups.quoted !== undefined
       ? decodeYamlQuoted(match.groups.quoted)
       : match.groups.bare;
@@ -189,9 +245,8 @@ function yamlKeyEntries(yml) {
 function offendingContinueOnError(yml) {
   return yamlKeyEntries(yml)
     .filter((entry) => entry.key === 'continue-on-error')
-    /* 值先在首个空白/逗号/`}` 处截断（`trim` 后取第一个词，
-       否则冒号后的那个空格会被当成「值为空」）。 */
-    .map((entry) => ({ ...entry, value: (entry.value.trim().split(/[\s,}#]/u)[0] ?? '') }))
+    /* 值取第一个完整标量（`false,` / `${{ … }}` 都能正确截断）。 */
+    .map((entry) => ({ ...entry, value: firstScalarValue(entry.value) }))
     .filter((entry) => !CONTINUE_ON_ERROR_VALUE_OK.test(entry.value))
     .map((entry) => `continue-on-error: ${entry.value}`);
 }
@@ -210,13 +265,17 @@ const CANCEL_ONLY_FOR_PR =
 /**
  * 取出所有 `cancel-in-progress` 的**值**（不含键、位置、引号与转义）。
  *
+ * 用 `firstScalarValue` 而不是 `trim()`：flow 映射里合法写法后面还跟着别的键
+ * （`{cancel-in-progress: ${{ … }}, group: x}`），整行取值会因为尾巴带
+ * `, group: x` 被判红 —— 本文预测过的假红方向之一。
+ *
  * @param {string} yml workflow 原文。
- * @returns {string[]} 各处的值（仅去行尾空白）。
+ * @returns {string[]} 各处的第一个标量值。
  */
 function cancelInProgressValues(yml) {
   return yamlKeyEntries(yml)
     .filter((entry) => entry.key === 'cancel-in-progress')
-    .map((entry) => entry.value.trim());
+    .map((entry) => firstScalarValue(entry.value));
 }
 
 
@@ -425,19 +484,26 @@ const SAFETY = [
 /**
  * 抽出一个 workflow 里的 `concurrency:` 块。
  *
- * 块标量与普通键值两种写法都要认：
+ * 两种写法都要认：
  *
  * ```yaml
  * concurrency:
  *   group: x
  *   cancel-in-progress: true
+ * concurrency: {group: x, cancel-in-progress: true}   # flow 映射，一行写完
  * ```
  *
+ * 只认块写法会把合法的 flow 映射判成「没有 concurrency 块」——
+ * 那是本文预测过的假红方向之一，实测确实红（`has-concurrency` + `cancels-only-superseded-pr`）。
+ *
  * @param {string} yml 原文。函数内部自己去掉整行注释。
- * @returns {string|null} 块内容；没有该块时返回 null。
+ * @returns {string|null} 块内容（flow 写法时是花括号里的原文）；没有该块时返回 null。
  */
 function concurrencyBlock(yml) {
   const lines = stripComments(yml).split('\n');
+  /* flow 映射：`concurrency: {…}`，同一行收尾。 */
+  const flow = lines.find((line) => /^\s*concurrency:\s*\{.*\}\s*$/.test(line));
+  if (flow !== undefined) return flow.replace(/^\s*concurrency:\s*/u, '').trim();
   const index = lines.findIndex((line) => /^\s*concurrency:\s*$/.test(line));
   if (index === -1) return null;
 
