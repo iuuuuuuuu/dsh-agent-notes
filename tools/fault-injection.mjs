@@ -51,6 +51,7 @@ const FAULT_SUITES = [
   ['commit-msg 钩子正文', 'hook-body.test.mjs'],
   ['CI 与本地门禁对齐', 'ci-alignment.test.mjs'],
   ['插件包契约自检', 'verify-plugin.test.mjs'],
+  ['发布清单（files/exports）与产物一致性', 'publish-layout.test.mjs'],
   ['归档基线的历史封印比对', 'archive-baseline.test.mjs'],
   ['归档树布局与封印 schema', 'archive-layout.test.mjs'],
   ['非 Node 项目 / 无 node 环境', 'non-node-project.test.mjs'],

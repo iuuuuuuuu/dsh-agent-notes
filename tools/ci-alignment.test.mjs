@@ -344,6 +344,64 @@ test('ci-align: 未登记的 workflow 要报出来，但不判失败', () => {
   assert.match(result.out, /未登记/);
 });
 
+test('ci-align: 任何一步加 continue-on-error 必须变红（门禁不许被静默降级）', () => {
+  /* `continue-on-error: true` 是 CI 配置里最容易手滑加上的字段：加了它，
+     那一步失败只会在日志里留一行警告，**job 照样绿**。本仓库的 `ci:align`
+     原有 6 条安全属性都不看这个字段 —— 缺口扫描实测：给「文本完整性」步
+     加这一行，完整链 exit 0。 */
+  const mutated = REAL_WORKFLOW.replace(
+    /      - name: 文本完整性\n        run: npm run text:integrity/,
+    '      - name: 文本完整性\n        continue-on-error: true\n        run: npm run text:integrity'
+  );
+  assert.notEqual(mutated, REAL_WORKFLOW, '构造没生效');
+
+  const result = check({ ...BOTH, 'verify.yml': mutated });
+  assert.equal(result.code, 1, `加 continue-on-error 必须变红：\n${result.out}`);
+  assert.match(result.out, /no-continue-on-error/);
+  assert.match(result.out, /verify\.yml/);
+});
+
+test('ci-align: upstream-sync 里的 continue-on-error 同样必须变红', () => {
+  /* 那个 workflow 有 contents: write 且会 push main/tag —— 静默降级一道门禁
+     的代价比 verify.yml 更大，所以两个文件都要判。 */
+  const mutated = REAL_SYNC.replace(
+    '        run: |\n          npm run verify',
+    '        continue-on-error: true\n        run: |\n          npm run verify'
+  );
+  assert.notEqual(mutated, REAL_SYNC, '构造没生效');
+
+  const result = check({ ...BOTH, 'upstream-sync.yml': mutated });
+  assert.equal(result.code, 1, `加 continue-on-error 必须变红：\n${result.out}`);
+  assert.match(result.out, /no-continue-on-error/);
+  assert.match(result.out, /upstream-sync\.yml/);
+});
+
+test('ci-align: 注释里写 continue-on-error 不算（不算数的是被执行的字段）', () => {
+  /* 整行注释掉的字段不会被 YAML 执行，不能因为它存在就判红。
+     这条同时钉住判据读的是「会被执行的内容」而不是全文。 */
+  const mutated = REAL_WORKFLOW.replace(
+    '      - name: 文本完整性',
+    '      # continue-on-error: true\n      - name: 文本完整性'
+  );
+  assert.notEqual(mutated, REAL_WORKFLOW, '构造没生效');
+
+  const result = check({ ...BOTH, 'verify.yml': mutated });
+  assert.equal(result.code, 0, `注释里出现不该判红：\n${result.out}`);
+});
+
+test('ci-align: continue-on-error: false 是允许的（不降级）', () => {
+  /* 不能把判据写成「出现 continue-on-error 就红」—— 显式写 false 的人
+     表达的是「这道不许降级」，与本门禁的意图一致。 */
+  const mutated = REAL_WORKFLOW.replace(
+    /      - name: 文本完整性\n        run: npm run text:integrity/,
+    '      - name: 文本完整性\n        continue-on-error: false\n        run: npm run text:integrity'
+  );
+  assert.notEqual(mutated, REAL_WORKFLOW, '构造没生效');
+
+  const result = check({ ...BOTH, 'verify.yml': mutated });
+  assert.equal(result.code, 0, `continue-on-error: false 不该判红：\n${result.out}`);
+});
+
 test('ci-align: verifyAll 报出 unsafe 与 unknown，且真实仓库此刻为空', () => {
   const result = verifyAll();
   assert.deepEqual(result.missing, [], '真实仓库不得有缺失步骤');

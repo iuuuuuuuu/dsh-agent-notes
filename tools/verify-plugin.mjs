@@ -17,6 +17,9 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { checkPublishLayout } from './publish-layout.mjs';
+import { buildClientBundle } from '../build.mjs';
+
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const problems = [];
 
@@ -40,7 +43,12 @@ function check(condition, message) {
 }
 
 /**
- * 用与 build.mjs 完全相同的规则重建客户端 bundle。
+ * 客户端 bundle 的比对基准。
+ *
+ * 直接用 `build.mjs` 导出的纯函数，而不是在这里**再抄一份**重建逻辑。
+ * 抄一份的后果实测过：把 `build.mjs` 写坏（改掉信封 id 的写法），
+ * 这道门禁仍拿自己那份实现去比对磁盘上的 `lib/client.js`，于是照样全绿 ——
+ * 门禁正在验证一份和构建脚本可能已经分叉的副本。
  *
  * 目的不是替代构建，而是**比对**：只要 lib/client.js 与这次重建的结果不一致，
  * 就说明「改了 src/client.js 却忘了 build」——那种情况下浏览器跑的是旧代码，
@@ -48,26 +56,8 @@ function check(condition, message) {
  *
  * @returns {string} 重建出的 bundle 文本。
  */
-function buildClientBundle() {
-  const pkg = JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8'));
-  const source = readFileSync(join(PACKAGE_ROOT, 'src', 'client.js'), 'utf8');
-  const marker = 'function createAgentNotesClient(require) {';
-  const at = source.indexOf(marker);
-  if (at === -1) throw new Error('src/client.js: 找不到 createAgentNotesClient(require) 入口');
-  let body = source.slice(at + marker.length);
-  const tail = body.lastIndexOf('}');
-  if (tail === -1) throw new Error('src/client.js: 函数体没有收尾');
-  body = body.slice(0, tail);
-  return [
-    `window.__ModuleLoader__.load({id:${JSON.stringify(pkg.name)},factory:function(require){`,
-    '"use strict";',
-    'var __dshAgentNotes = (function(){',
-    body.trim(),
-    '})();',
-    'return __dshAgentNotes;',
-    '}});',
-    ''
-  ].join('\n');
+function rebuildClientBundle() {
+  return buildClientBundle(PACKAGE_ROOT);
 }
 
 // 1. 包清单
@@ -82,6 +72,14 @@ check(pkg.license === 'MIT', 'license 应为 MIT');
 check(pkg.dsh?.bundle?.patch === './cordis.patch.yml', 'dsh.bundle.patch 应指向 ./cordis.patch.yml');
 check(Array.isArray(pkg.files) && pkg.files.includes('lib'), 'files 应包含 lib');
 check(existsSync(join(PACKAGE_ROOT, pkg.dsh.bundle.patch)), `patch 文件不存在: ${pkg.dsh.bundle.patch}`);
+
+/* 1b. 发布清单与运行时文件必须自洽。
+   「仓库里什么都有」与「装出来之后什么都有」是两件事 —— 实测把 `"skills"`
+   从 `files` 里删掉，仓库里每条测试仍然全绿，而产物里根本没有 `skills/`，
+   插件装上去技能整个消失。所以这里比对的是**产物会包含什么**。 */
+for (const problem of checkPublishLayout({ root: PACKAGE_ROOT, pkg })) {
+  fail(problem);
+}
 
 // 零 @deepseek-ai 运行时依赖
 // optionalDependencies 也算运行时依赖：它在安装时真的会被写进 profile，
@@ -175,7 +173,7 @@ if (existsSync(clientBundled)) {
   // 构建产物可能落后于源码——这正是要拦的「改了源码忘了 build」。
   const hostOnly = `"${pkg.name}"`;
   check(bundle.includes(hostOnly), 'lib/client.js 应引用包名');
-  const rebuilt = buildClientBundle();
+  const rebuilt = rebuildClientBundle();
   check(rebuilt === bundle, 'lib/client.js 与 src/client.js 不同步（请跑 npm run build）');
 }
 

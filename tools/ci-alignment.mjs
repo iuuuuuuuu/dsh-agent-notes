@@ -185,6 +185,20 @@ const SAFETY = [
          这里再查两者都被 `if: steps.sync.outputs.changed` 这类条件约束。 */
       return /\bif:[^\n]*changed/m.test(body) || !/^\s*git push/m.test(body);
     }
+  },
+  {
+    file: 'verify.yml',
+    key: 'no-continue-on-error',
+    desc: '任何一步都不得带 continue-on-error: true（那等于把门禁静默降级成警告，'
+      + 'CI 照样绿 —— 门禁存在但没人执行等于没有）',
+    test: (yml) => !/^\s*continue-on-error:\s*true\s*$/m.test(stripComments(yml))
+  },
+  {
+    file: 'upstream-sync.yml',
+    key: 'no-continue-on-error',
+    desc: '任何一步都不得带 continue-on-error: true（同上；这个 workflow 有 '
+      + 'contents: write 且会 push main/tag，静默降级一道门禁的代价更大）',
+    test: (yml) => !/^\s*continue-on-error:\s*true\s*$/m.test(stripComments(yml))
   }
 ];
 
