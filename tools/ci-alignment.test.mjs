@@ -579,8 +579,10 @@ test('ci-align: continue-on-error 的位置写法都要被识别（列表项/冒
   const forms = [
     '        - continue-on-error: true',
     '        continue-on-error : true',
-    /* flow-style 映射：键不在行首，位置这一维度上最后的漏法（CodeRabbit PR #31）。 */
-    '        - {name: 包自检副本, run: exit 1, continue-on-error: true}'
+    /* flow-style 映射：键不在行首，位置这一维度上的漏法（CodeRabbit PR #31）。 */
+    '        - {name: 包自检副本, run: exit 1, continue-on-error: true}',
+    /* 引号键：YAML 解析成同一个键，但键名外面多了一层引号（CodeRabbit PR #31）。 */
+    '        "continue-on-error": true'
   ];
   for (const form of forms) {
     const mutated = REAL_WORKFLOW.replace('      - name: 包自检', `      - name: 包自检\n${form}`);
@@ -589,4 +591,25 @@ test('ci-align: continue-on-error 的位置写法都要被识别（列表项/冒
     assert.equal(result.code, 1, `${form} 必须被发现：${result.out}`);
     assert.match(result.out, /no-continue-on-error/);
   }
+});
+
+test('ci-align: cancel-in-progress 的引号键与 flow 映射也要被认（键的写法不是证据）', () => {
+  /* 与 continue-on-error 同一个教训：判据不能要求键在行首、无引号。
+     这里用「引号键 + 语义相反的值」一次性证明两件事都成立。 */
+  const quoted = REAL_WORKFLOW.replace(
+    / {2}cancel-in-progress:[^\n]*/,
+    '  "cancel-in-progress": ${{ github.event_name != \'pull_request\' }}'
+  );
+  assert.notEqual(quoted, REAL_WORKFLOW, '构造没生效');
+  const r1 = check({ ...BOTH, 'verify.yml': quoted });
+  assert.equal(r1.code, 1, `引号键里的反向值必须被拦：\n${r1.out}`);
+  assert.match(r1.out, /cancels-only-superseded-pr/);
+
+  /* 引号键 + 合法值：键的写法不该让它变红。 */
+  const ok = REAL_WORKFLOW.replace(
+    / {2}cancel-in-progress:[^\n]*/,
+    '  "cancel-in-progress": ${{ github.event_name == \'pull_request\' }}'
+  );
+  const r2 = check({ ...BOTH, 'verify.yml': ok });
+  assert.equal(r2.code, 0, `引号键 + 合法值必须通过：\n${r2.out}`);
 });

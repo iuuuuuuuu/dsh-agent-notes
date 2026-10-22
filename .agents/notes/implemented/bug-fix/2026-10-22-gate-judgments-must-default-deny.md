@@ -73,8 +73,16 @@ CodeRabbit 又给出 flow-style 映射 `- {name: build, run: exit 1, continue-on
 全篇扫 `continue-on-error\s*:\s*<值>`，只看冒号右边的值是不是字面量 `false`。
 键出现在哪一行、行内第几列都不影响判定。
 
-残留误差：`run:` 里若出现字符串字面量 `continue-on-error: 某个值`，会被当成真键而判红 ——
-偏向失败（要人来解释），与政策一致。
+**第五次：引号键。** `"continue-on-error": true` 被 YAML 解析成同一个键，但键名外多了引号。
+扫描式已同时容忍可选引号。
+
+`cancel-in-progress` 那条也有同一族的病（键绑定「行首、无引号、块映射」），
+在同一轮一并改成「只取值、不看键的写法」：`cancelInProgressValues()` 全篇取值，
+逐个与允许值比对。这样两条判据的失效面收敛成同一个：**只剩键名拼写**。
+
+残留误差：`run:` 里若出现字符串字面量 `continue-on-error: 某个值`，会被当成真键而判红；
+flow-style 的 `cancel-in-progress` 若不写在行尾，行尾残留的 `, group: …` 会让它判红。
+两者都偏向失败（要人来解释），与政策一致。
 
 ## Consequences
 

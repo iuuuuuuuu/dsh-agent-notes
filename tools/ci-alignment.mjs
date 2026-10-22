@@ -84,9 +84,11 @@ const CONTINUE_ON_ERROR_VALUE_OK = /^(?:false|"false"|'false')$/;
  * - `- continue-on-error: true`（行内列表项）
  * - `continue-on-error : true`（冒号前有空格）
  * - `- {name: build, run: exit 1, continue-on-error: true}`（flow-style 映射）
+ * - `"continue-on-error": true`（引号键 —— YAML 解析成同一个键）
  *
  * 每补一种就等下次被绕过。改成**全篇扫键名、只看冒号右边的值**：键出现在
- * 哪一行、行内第几列都不影响。这样「位置」这一维度不再有漏法。
+ * 哪一行、行内第几列、有没有加引号都不影响。这样「位置」与「引号」这两个
+ * 维度一起消失 —— 剩下的只有键名拼写本身。
  *
  * 残留的误判方向：`run:` 里如果出现字符串字面量 `continue-on-error: 某个值`，
  * 会被当成真的键而判红。偏向失败（要人来解释），与政策一致。
@@ -96,15 +98,16 @@ const CONTINUE_ON_ERROR_VALUE_OK = /^(?:false|"false"|'false')$/;
  */
 function offendingContinueOnError(yml) {
   const offenders = [];
-  /* `[^\s,}#]*` 让值在空格、逗号（flow-style 分隔）、`}`（flow-style 收尾）处停下。 */
-  for (const match of stripComments(yml).matchAll(/continue-on-error\s*:\s*([^\s,}#]*)/g)) {
+  /* `["']?…["']?` 容纳引号键；`[^\s,}#]*` 让值在空格、逗号（flow-style 分隔）、
+     `}`（flow-style 收尾）处停下。 */
+  for (const match of stripComments(yml).matchAll(/["']?continue-on-error["']?\s*:\s*([^\s,}#]*)/g)) {
     if (!CONTINUE_ON_ERROR_VALUE_OK.test(match[1] ?? '')) offenders.push(match[0]);
   }
   return offenders;
 }
 
 /**
- * `cancel-in-progress` 唯一允许的形态：**等于比较**收窄到 `pull_request`。
+ * `cancel-in-progress` 唯一允许的**值**：等于比较收窄到 `pull_request`。
  *
  * 同样默认拒绝。只要求「这一行里出现 `github.event_name` 与 `pull_request`」
  * 会放过语义相反的 `${{ github.event_name != 'pull_request' }}` —— 它在 push 上
@@ -112,7 +115,28 @@ function offendingContinueOnError(yml) {
  * `&&` / `||` 组合不做语义推导：能自动判对的前提是有解析器，这里没有。
  */
 const CANCEL_ONLY_FOR_PR =
-  /^cancel-in-progress:\s*\$\{\{\s*github\.event_name\s*==\s*'pull_request'\s*\}\}\s*(?:#.*)?$/im;
+  /^\$\{\{\s*github\.event_name\s*==\s*'pull_request'\s*\}\}\s*[,}]*$/;
+
+/**
+ * 取出所有 `cancel-in-progress` 的**值**（不含键、位置与引号）。
+ *
+ * 与 `offendingContinueOnError` 同一个教训：键不能绑定「行首、无引号、块映射」。
+ * 值的形态有两种，这里统一按「冒号右边到行尾」取再剥掉 flow-style 的收尾：
+ * 块映射 `cancel-in-progress: ${{ … }}`、flow 映射 `{cancel-in-progress: ${{ … }}, …}`。
+ *
+ * @param {string} yml workflow 原文。
+ * @returns {string[]} 各处的值（已去空白与 flow-style 收尾符）。
+ */
+function cancelInProgressValues(yml) {
+  const values = [];
+  for (const match of stripComments(yml).matchAll(/["']?cancel-in-progress["']?\s*:\s*([^\n]*)/g)) {
+    /* 只去行尾空白：flow-style 的收尾 `}` / `,` 由允许值式自己容忍，
+       不能在这里剥 —— 剥了会把表达式自身的 `}}` 一起吃掉。 */
+    values.push((match[1] ?? '').trim());
+  }
+  return values;
+}
+
 
 /**
  * 豁免：这些步骤在 CI 里有**独立**的实现（判据不同），不算缺失。
@@ -267,15 +291,12 @@ const SAFETY = [
       + '过没过门禁」的唯一凭据（branch protection 强制要求），被下一次运行'
       + '取消掉就等于发布没有验证记录。只能按事件收窄到 pull_request。',
     test: (yml) => {
-      const block = concurrencyBlock(yml);
-      if (block === null) return false;
-      /* 先去掉注释：注释里出现 `pull_request` 不该被当成证据。 */
-      const line = stripComments(block)
-        .split('\n')
-        .find((l) => /^\s*cancel-in-progress:/.test(l));
-      if (line === undefined) return false;
-      /* 只接受**等于**比较那一种写法；`!=`、`&&`、`||`、裸 true 全部拒绝。 */
-      return CANCEL_ONLY_FOR_PR.test(line.trim());
+      if (concurrencyBlock(yml) === null) return false;
+      /* 键的位置与引号一律不管（同 `offendingContinueOnError` 的教训），只看值。 */
+      const values = cancelInProgressValues(yml);
+      if (values.length === 0) return false;
+      /* 只接受**等于**比较那一种值；`!=`、`&&`、`||`、裸 true 全部拒绝。 */
+      return values.every((value) => CANCEL_ONLY_FOR_PR.test(value));
     }
   },
   {
