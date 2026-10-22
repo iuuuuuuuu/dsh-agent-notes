@@ -47,7 +47,7 @@
  * 绝不用 `test.skip()` 掩盖环境问题 —— 那样等于把「没验到」写成「通过了」。
  */
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, symlinkSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -385,5 +385,31 @@ test('notes-layout: 根层 INDEX.md 插件侧放行但端到端仍然红（vendo
     assert.match(`${result.reason}\n${result.stderr}`, /INDEX\.md/);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('notes-layout: 根层符号链接必须报出来（否则它在门禁视野之外）', () => {
+  /* 符号链接既不是 isDirectory() 也不是 isFile()，原来会被两道判断一起跳过：
+     等于允许在笔记根挂一份「任何门禁都看不见」的内容进来。 */
+  const root = mkdtempSync(join(tmpdir(), 'notes-link-'));
+  try {
+    for (const name of NOTE_ROOT_LIFECYCLES) mkdirSync(join(root, name));
+    writeFileSync(join(root, 'AGENTS.md'), '# 说明\n');
+    const target = join(root, 'outside.md');
+    writeFileSync(target, '# 外部内容\n');
+    let made = true;
+    try {
+      symlinkSync(target, join(root, 'linked.md'), 'file');
+    } catch {
+      made = false; /* Windows 未开开发者模式时建不了链接：跳过而不是假绿 */
+    }
+    if (!made) return;
+    const result = checkNotesLayout({ notesRoot: root });
+    assert.ok(
+      result.errors.some((line) => line.includes('符号链接')),
+      `根层符号链接必须被判出来：${JSON.stringify(result.errors)}`
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

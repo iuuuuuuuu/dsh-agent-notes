@@ -502,3 +502,39 @@ test('ci-align: upstream-sync 的 cancel-in-progress 必须为 false', () => {
   assert.equal(result.code, 1, `发布 job 可取消必须变红：\\n${result.out}`);
   assert.match(result.out, /never-cancels-a-push/);
 });
+
+test('ci-align: continue-on-error 的等价写法都要被拦（True / "true" / 行尾注释）', () => {
+  /* 本轮 CodeRabbit 在 PR #29 上指出的真实绕过面：原判据只认
+     「裸小写 true 且行尾干净」这一种形态，于是下面三种都能静默降级一道门禁。 */
+  const forms = [
+    'continue-on-error: True',
+    'continue-on-error: "true"',
+    'continue-on-error: true # 临时放行，稍后修'
+  ];
+
+  for (const form of forms) {
+    /* 挂在第一条真正跑门禁的步骤上：那一步被降级等于门禁变成警告。 */
+    const mutated = REAL_WORKFLOW.replace(
+      '      - name: 包自检',
+      `      - name: 包自检\n        ${form}`
+    );
+    assert.notEqual(mutated, REAL_WORKFLOW, '构造没生效');
+    const result = check({ ...BOTH, 'verify.yml': mutated });
+    assert.equal(result.code, 1, `${form} 必须被发现：\n${result.out}`);
+    assert.match(result.out, /no-continue-on-error/);
+  }
+});
+
+test('ci-align: cancel-in-progress 只要不是按 event_name 收窄就必须红', () => {
+  /* 原判据只要求这一行里出现 `pull_request`，于是一行
+     `${{ github.ref != 'refs/heads/main' }}  # 见 pull_request 说明`
+     也能过关 —— 而它在 main 上照样会取消正在跑的发布验证。 */
+  const loose = REAL_WORKFLOW.replace(
+    / {2}cancel-in-progress:[^\n]*/,
+    "  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }} # 见 pull_request 说明"
+  );
+  assert.notEqual(loose, REAL_WORKFLOW, '构造没生效');
+  const result = check({ ...BOTH, 'verify.yml': loose });
+  assert.equal(result.code, 1, `宽松写法必须被拦：\n${result.out}`);
+  assert.match(result.out, /cancels-only-superseded-pr/);
+});
