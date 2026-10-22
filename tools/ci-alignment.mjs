@@ -107,20 +107,49 @@ const YAML_KEY_ENTRY =
 /**
  * 解码 YAML double-quoted 标量里的转义。
  *
- * 只实现「会产生不同键名」的那几种（`\uXXXX`、`\xXX`）与常见字符转义；
- * 不认识的转义原样保留 —— 宁可解不出来也不猜。
+ * 只实现「会产生不同键名」的那几种（`\uXXXX`、`\UXXXXXXXX`、`\xXX`）与常见字符转义。
+ *
+ * `\U`（8 位十六进制）必须一起处理：CodeRabbit 在 PR #31 上指出
+ * `"continue\U0000002don-error": true` 会被 YAML 解码成同一个键，而漏掉 `\U`
+ * 的结果是**放行** —— 与本门禁「默认拒绝」的方向相反，不能按「解不出来就原样保留」处理。
+ *
+ * 非法码点（代理区 / 超出 U+10FFFF）会让 `String.fromCodePoint` 抛 `RangeError`，
+ * 所以先判范围，超界的那个转义**原样保留**（键名对不上就是不放行，方向一致）。
  *
  * @param {string} raw 引号内的原文。
  * @returns {string} 解码后的键名。
  */
 function decodeYamlQuoted(raw) {
-  return raw.replace(/\\(?:u([0-9A-Fa-f]{4})|x([0-9A-Fa-f]{2})|([0nt"\\/]))/g, (whole, u, x, simple) => {
-    if (u !== undefined) return String.fromCharCode(parseInt(u, 16));
-    if (x !== undefined) return String.fromCharCode(parseInt(x, 16));
-    if (simple === 'n') return '\n';
-    if (simple === 't') return '\t';
-    return simple;
-  });
+  return raw.replace(
+    /\\(?:u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|x([0-9A-Fa-f]{2})|([0nt"\\/]))/g,
+    (whole, u, bigU, x, simple) => {
+      if (u !== undefined) return String.fromCharCode(parseInt(u, 16));
+      if (bigU !== undefined) {
+        const codePoint = parseInt(bigU, 16);
+        if (codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) return whole;
+        return String.fromCodePoint(codePoint);
+      }
+      if (x !== undefined) return String.fromCharCode(parseInt(x, 16));
+      if (simple === 'n') return '\n';
+      if (simple === 't') return '\t';
+      return simple;
+    }
+  );
+}
+
+/**
+ * 切掉 YAML 的行尾注释（`#` 前面必须有空白，否则是值的一部分）。
+ *
+ * 不切会把合法写法判红：`cancel-in-progress: ${{ … == 'pull_request' }} # 仅取消 PR`
+ * 的取消条件没变，但值里带上注释就过不了允许值式（CodeRabbit 在 PR #31 上指出）。
+ *
+ * @param {string} value 冒号右边到行尾的原文。
+ * @returns {string} 去掉行尾注释后的值。
+ */
+function stripInlineComment(value) {
+  const at = value.search(/(?:^|[ \t])#/u);
+  if (at === -1) return value;
+  return value.slice(0, at);
 }
 
 /**
@@ -141,7 +170,7 @@ function yamlKeyEntries(yml) {
       ? decodeYamlQuoted(match.groups.quoted)
       : match.groups.bare;
     const tail = bare.slice(match.index + match[0].length);
-    entries.push({ key, value: tail.slice(0, tail.search(/\n|$/u)) });
+    entries.push({ key, value: stripInlineComment(tail.slice(0, tail.search(/\n|$/u))) });
   }
   return entries;
 }

@@ -638,6 +638,54 @@ test('ci-align: YAML 转义键（\\u002d 解码成连字符）与裸键是同一
   assert.match(r2.out, /cancels-only-superseded-pr/);
 });
 
+test('ci-align: \\U（8 位）转义键同样必须被判据看见（漏解等于放行）', () => {
+  /* CodeRabbit 在 PR #31 上补的：YAML 双引号标量还支持 `\UXXXXXXXX`。
+     `\U0000002d` 就是 `-`。少解这一种，结果是**放行** —— 与本门禁
+     「默认拒绝」的方向相反，所以不能按「解不出来就原样保留」处理。 */
+  const bigU = REAL_WORKFLOW.replace(
+    '      - name: 包自检',
+    '      - name: 包自检\n        "continue\\U0000002don-error": true'
+  );
+  assert.notEqual(bigU, REAL_WORKFLOW, '构造没生效');
+  const r1 = check({ ...BOTH, 'verify.yml': bigU });
+  assert.equal(r1.code, 1, `\\U 转义键必须判红：\n${r1.out}`);
+  assert.match(r1.out, /no-continue-on-error/);
+
+  /* 非法码点不是同一个键（真解析器也会拒这份 workflow），所以它不该被当成
+     `continue-on-error` 判红 —— 但**绝不允许抛 RangeError 把门禁打成崩溃**：
+     崩了既不是通过也不是判红，调用方拿不到结论。 */
+  const bad = REAL_WORKFLOW.replace(
+    '      - name: 包自检',
+    '      - name: 包自检\n        "continue\\U00110000on-error": true'
+  );
+  assert.notEqual(bad, REAL_WORKFLOW, '构造没生效');
+  const r2 = check({ ...BOTH, 'verify.yml': bad });
+  assert.ok(r2.code === 0 || r2.code === 1, `必须是正常判定，实际退出码 ${r2.code}：\n${r2.out}`);
+  assert.doesNotMatch(`${r2.out}${r2.err ?? ''}`, /RangeError|Invalid code point/i);
+});
+
+test('ci-align: 合法取消表达式后面的行尾注释不算改条件', () => {
+  /* 注释不是配置：`cancel-in-progress: ${{ … == 'pull_request' }} # 仅取消 PR`
+     的取消条件一个字都没变，判红就是误报（CodeRabbit 在 PR #31 上指出）。 */
+  const commented = REAL_WORKFLOW.replace(
+    / {2}cancel-in-progress:[^\n]*/,
+    '  cancel-in-progress: ${{ github.event_name == \'pull_request\' }} # 仅取消 PR'
+  );
+  assert.notEqual(commented, REAL_WORKFLOW, '构造没生效');
+  const pass = check({ ...BOTH, 'verify.yml': commented });
+  assert.equal(pass.code, 0, `带行尾注释的合法条件必须通过：\n${pass.out}`);
+
+  /* 剥注释不能顺手放过真内容：注释前面还有别的表达式片段时仍必须红。 */
+  const sneaky = REAL_WORKFLOW.replace(
+    / {2}cancel-in-progress:[^\n]*/,
+    '  cancel-in-progress: ${{ github.event_name == \'pull_request\' || true }} # 看似合法'
+  );
+  assert.notEqual(sneaky, REAL_WORKFLOW, '构造没生效');
+  const red = check({ ...BOTH, 'verify.yml': sneaky });
+  assert.equal(red.code, 1, `剥注释不得放过额外表达式：\n${red.out}`);
+  assert.match(red.out, /cancels-only-superseded-pr/);
+});
+
 test('ci-align: 未闭合的引号不许把后面的键吞掉（shell 片段里的引号不是 YAML 键引号）', () => {
   /* 实测过的真事故：改成「全文扫带引号的键」后，`verify.yml` 里
      `if [ "$NOTES_SUPERSESSION_BASE" = "000…" ]; then` 的引号与后面某一行的
