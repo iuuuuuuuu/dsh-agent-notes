@@ -4,6 +4,28 @@
 版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
 
+## [0.8.0] - 2026-10-22
+
+### 新增
+
+- **笔记正文的行内位置引用也进门禁**：`npm run doc:refs` 的语料从 `docs/` 扩到
+  `.agents/notes/**`（跳过 `archived/`），本仓库受检引用从 57 条增到 73 条。
+  三类引用按位置跳过，不靠白名单：`.probe/`（探针目录被 gitignore，别人 clone 里不存在）、
+  上游 `scripts/` 前缀（上游 A 的 verify 脚本在仓库根）、`archived/`（已封印，红了也改不动）。
+- **`notes-coverage --since <base-ref>`**：先 `git merge-base <base-ref> HEAD` 求分叉点，
+  只查「本 PR 自己带来的提交」。分叉点求不出来（浅克隆、base-ref 已删、非 git 目录）
+  一律退出 2 并说明原因，不静默退化成全历史或全绿。现有 `--range` 行为不变。
+- **`docs/known-gaps.md`**：把已经判定过、明确不做的缺口写成清单（每条带「为什么不修」
+  与「什么情况下重访」），防止同一批问题被反复重新讨论。
+- **`tools/notes-gate-vacuity.test.mjs`**：用测试钉住「vendored 三道门禁在空集合上
+  `exit 0`，而 `lib/notes.js` 外壳判红」这个对照，连带钉住「有合规笔记时外壳必须真绿」。
+
+### 修复
+
+- 覆盖门禁 `--since` 路径上一处遗留的故障注入改动被清掉（`resolveMergeBase` 曾把
+  分叉点换成 `HEAD`，等价于永远查空区间）。
+
+
 ## [0.7.0] - 2026-10-22
 
 ### 新增

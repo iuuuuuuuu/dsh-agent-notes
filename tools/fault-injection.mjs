@@ -61,6 +61,7 @@ const FAULT_SUITES = [
   ['真 Cordis 上下文集成', 'integration.test.mjs'],
   ['链接解析的括号与引用式定义', 'markdown-links.test.mjs'],
   ['空树不得伪装成绿', 'no-fake-green.test.mjs'],
+  ['vendored 门禁在空集合上 exit 0 与外壳判红的对照', 'notes-gate-vacuity.test.mjs'],
   ['插件状态持久化', 'plugin.test.mjs'],
   ['项目内技能副本落后提示', 'project-skill.test.mjs'],
   ['开关投影与裸调用', 'projection.test.mjs'],
