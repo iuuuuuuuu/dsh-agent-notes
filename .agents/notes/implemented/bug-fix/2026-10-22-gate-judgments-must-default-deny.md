@@ -76,6 +76,22 @@ CodeRabbit 又给出 flow-style 映射 `- {name: build, run: exit 1, continue-on
 **第五次：引号键。** `"continue-on-error": true` 被 YAML 解析成同一个键，但键名外多了引号。
 扫描式已同时容忍可选引号。
 
+**第五次的写法改成「先解码键名再比字符串」之后，又冒出来两个必须一起处理的事实。**
+
+第六个：**转义键**。`"continue\u002don-error": true` 与裸键是同一个键（双引号里的
+`\u002d` 解码就是 `-`）。这不是再补一种引号形态 —— 只要还在「按字面拼写比对」，
+就永远有下一种。所以判据改成 `yamlKeyEntries()`：先扫出候选键、把 double-quoted
+里的转义**解码**成真实键名，再与判据要的键名比字符串。仅解 `\uXXXX`、`\xXX`
+与 `\0\n\t\"\\/` 这几种会产生不同键名的转义，不认识的转义原样保留（宁可解不出来也不猜）。
+
+第七个（是**我自己改出来的**，不是 CodeRabbit 指的）：第一版「先解码」是**全文扫**，
+带引号的候选键允许跨行配对。实测立刻炸在真仓库上：`verify.yml` 里有 shell 片段
+`if [ "$NOTES_SUPERSESSION_BASE" = "000…" ]; then`，`"` 与后面某一行的 `"` 被配成一对，
+**跨行吞掉十几行**，中间新插的 `continue-on-error: true` 一起消失 —— 判据看不见它，
+用例红在「本该红」。修法是把「一个键从这里开始」这条语法约束显式写出来：
+引号必须**同行**闭合（`[^\\\n]`），键只能起于行首、空白、`{`、`,`、`-`
+（`(?<=^|[\s{,\-])`）。这不是补第 N 种写法，而是承认「键从哪儿开始」本身是语法。
+
 `cancel-in-progress` 那条也有同一族的病（键绑定「行首、无引号、块映射」），
 在同一轮一并改成「只取值、不看键的写法」：`cancelInProgressValues()` 全篇取值，
 逐个与允许值比对。这样两条判据的失效面收敛成同一个：**只剩键名拼写**。
@@ -104,10 +120,17 @@ flow-style 的 `cancel-in-progress` 若不写在行尾，行尾残留的 `, grou
 
 ## Verification
 
-- `node --test tools/ci-alignment.test.mjs` ⇒ `32 / pass 32 / fail 0`。
-- **真故障注入**：把 `CONTINUE_ON_ERROR_ALLOWED` 换回「列举 true 各写法」的旧正则 ⇒
-  `pass 28 / fail 4`，红的四条正是 continue-on-error 相关的四条（含新加的表达式用例）；
-  还原后 `32 / 32`。
+- `node --test tools/ci-alignment.test.mjs` ⇒ `36 / pass 36 / fail 0`（含新增的转义键与
+  「跨行引号不许吞键」两条）。
+- **真故障注入**（三条，都已还原）：
+  1. 判据换回「列举 true 各写法」的旧正则 ⇒ `pass 28 / fail 4`，红的四条正是
+     continue-on-error 相关的四条（含表达式用例）。
+  2. 把扫描式换回「全文扫、引号可跨行」的旧实现 ⇒ `pass 35 / fail 1`，红的正是
+     「任何一步加 continue-on-error 必须变红（门禁不许被静默降级）」—— 即真仓库里
+     插进去的那个键被跨行引号吞掉。这条证明「同行闭合 + 键起边界」不是多余的收紧。
+  3. 让 `decodeYamlQuoted()` 变成恒等函数 ⇒ `pass 35 / fail 1`，红的正是
+     「YAML 转义键（`\u002d` 解码成连字符）与裸键是同一个键」。
+  还原后 `36 / 36`，且 `grep -c MUTANT` 为 `0`（无残留变异）。
 - 真实仓库此刻仍全绿：`node tools/ci-alignment.mjs` ⇒ 三道全过、`14 条 CI 安全属性均未被删改`。
 
 补充（同日）：`tools/version-notice.test.mjs` 里那条「判据只有一处」原来只直接调

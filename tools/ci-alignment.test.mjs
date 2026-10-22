@@ -613,3 +613,46 @@ test('ci-align: cancel-in-progress 的引号键与 flow 映射也要被认（键
   const r2 = check({ ...BOTH, 'verify.yml': ok });
   assert.equal(r2.code, 0, `引号键 + 合法值必须通过：\n${r2.out}`);
 });
+
+test('ci-align: YAML 转义键（\\u002d 解码成连字符）与裸键是同一个键', () => {
+  /* CodeRabbit 在 PR #31 上指出的第五种写法：双引号里的 `\u002d` 解码后就是
+     `-`，GitHub Actions 把它当成同一个键。列举写法补不完，所以判据改成
+     「先把键名解码，再比字符串」。 */
+  const escaped = REAL_WORKFLOW.replace(
+    '      - name: 包自检',
+    '      - name: 包自检\n        "continue\\u002don-error": true'
+  );
+  assert.notEqual(escaped, REAL_WORKFLOW, '构造没生效');
+  const r1 = check({ ...BOTH, 'verify.yml': escaped });
+  assert.equal(r1.code, 1, `转义键必须被解码成同一个键并判红：\n${r1.out}`);
+  assert.match(r1.out, /no-continue-on-error/);
+
+  /* 同一个解码规则也要覆盖 cancel-in-progress：`\u002din\u002d` 全是连字符。 */
+  const cancelEscaped = REAL_WORKFLOW.replace(
+    / {2}cancel-in-progress:[^\n]*/,
+    '  "cancel\\u002din\\u002dprogress": ${{ github.event_name != \'pull_request\' }}'
+  );
+  assert.notEqual(cancelEscaped, REAL_WORKFLOW, '构造没生效');
+  const r2 = check({ ...BOTH, 'verify.yml': cancelEscaped });
+  assert.equal(r2.code, 1, `转义的 cancel-in-progress 反向值必须判红：\n${r2.out}`);
+  assert.match(r2.out, /cancels-only-superseded-pr/);
+});
+
+test('ci-align: 未闭合的引号不许把后面的键吞掉（shell 片段里的引号不是 YAML 键引号）', () => {
+  /* 实测过的真事故：改成「全文扫带引号的键」后，`verify.yml` 里
+     `if [ "$NOTES_SUPERSESSION_BASE" = "000…" ]; then` 的引号与后面某一行的
+     引号被配成一对，**跨行吞掉十几行**，中间新插的 continue-on-error 一起消失
+     —— 判据看不见它，用例红在「本该红」。
+     所以引号必须同行闭合，且键只能起于行首、空白、`{`、`,`、`-`。 */
+  const mutated = REAL_WORKFLOW.replace(
+    '      - name: 包自检',
+    /* 一对一：前面一个**没闭合**的引号，后面几行再来一个引号。
+       允许引号跨行配对的实现会从第一个引号一路配到后面的引号，
+       把中间的键整段吞掉 —— 这正是改造时的真事故。 */
+    '      - name: 包自检\n        run: echo "开头\n        continue-on-error: true\n        run: echo 结尾"'
+  );
+  assert.notEqual(mutated, REAL_WORKFLOW, '构造没生效');
+  const result = check({ ...BOTH, 'verify.yml': mutated });
+  assert.equal(result.code, 1, `跨行引号之间的键仍然必须被发现：\n${result.out}`);
+  assert.match(result.out, /no-continue-on-error/);
+});

@@ -75,35 +75,96 @@ const WORKFLOW_DIR = join(PACKAGE_ROOT, '.github', 'workflows');
 const CONTINUE_ON_ERROR_VALUE_OK = /^(?:false|"false"|'false')$/;
 
 /**
+ * 候选键：可以带引号，也可以是裸标识符，后面跟冒号。
+ *
+ * ## 为什么不再用「键名 + 冒号」的正则
+ *
+ * 那个写法被 CodeRabbit 连着指出五次缺口，每次都是同一个毛病的另一面：
+ * 它把「键在源码里长什么样」当成了证据，而 YAML 允许同一个键有很多长相 ——
+ * 位置（行首 / 列表项 / flow 映射）、引号（无 / `"…"` / `'…'`）、
+ * 以及**双引号里的转义**（`"continue\u002don-error"` 解码后就是同一个键）。
+ *
+ * 所以这里改成：先把候选键**解码**成真实键名，再与判据要的键名比字符串。
+ * 位置、引号、转义这三个维度因此一起消失。
+ *
+ * 只解码 double-quoted 的转义（YAML 规范里单引号只有 `''` 一种转义，
+ * 其余一律字面量）—— 这是有边界的，不是「再来一种正则」。
+ *
+ * ## 为什么逐行扫、而且要求前面是「键可以出现的位置」
+ *
+ * 第一版是全文扫的，`["'](?:…|\\|)*?["']` 里的引号跨行匹配。实测立刻炸：
+ * `verify.yml` 的 shell 片段里有 `if [ "$A" = "0" ]; then`，`$A` 前面那个
+ * `"` 与下一行的 `"` 被配成一对，**跨行吞掉十几行**，中间新插的
+ * `continue-on-error: true` 一起消失 —— 判据看不见它，用例红在「本该红」。
+ *
+ * 所以：引号必须同行闭合，且键前面只能是行首、空白、`{`、`,`、`-`
+ * （YAML 里键就是出现在这几种位置）。这不是在补第 N 种写法，而是把
+ * 「一个键从这里开始」这条语法约束显式写出来。
+ */
+const YAML_KEY_ENTRY =
+  /(?<=^|[\s{,\-])(?<q>["'])(?<quoted>(?:\\.|(?!\k<q>)[^\\\n])*?)\k<q>[ \t]*:|(?<=^|[\s{,\-])(?<bare>[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*:/gu;
+
+/**
+ * 解码 YAML double-quoted 标量里的转义。
+ *
+ * 只实现「会产生不同键名」的那几种（`\uXXXX`、`\xXX`）与常见字符转义；
+ * 不认识的转义原样保留 —— 宁可解不出来也不猜。
+ *
+ * @param {string} raw 引号内的原文。
+ * @returns {string} 解码后的键名。
+ */
+function decodeYamlQuoted(raw) {
+  return raw.replace(/\\(?:u([0-9A-Fa-f]{4})|x([0-9A-Fa-f]{2})|([0nt"\\/]))/g, (whole, u, x, simple) => {
+    if (u !== undefined) return String.fromCharCode(parseInt(u, 16));
+    if (x !== undefined) return String.fromCharCode(parseInt(x, 16));
+    if (simple === 'n') return '\n';
+    if (simple === 't') return '\t';
+    return simple;
+  });
+}
+
+/**
+ * 扫出全篇所有键的出现处（键名已解码，值取冒号右边到行尾）。
+ *
+ * 值用「从 match 结束处往后取到行尾」算出来，而不是被正则一起吃掉 ——
+ * 否则 flow 映射里后续的键（`{a: 1, cancel-in-progress: true}`）会被第一个
+ * 匹配连值带键一起吞掉，判据就永远看不到它。
+ *
+ * @param {string} yml workflow 原文。
+ * @returns {{key: string, value: string}[]} 键与值。
+ */
+function yamlKeyEntries(yml) {
+  const bare = stripComments(yml);
+  const entries = [];
+  for (const match of bare.matchAll(YAML_KEY_ENTRY)) {
+    const key = match.groups.quoted !== undefined
+      ? decodeYamlQuoted(match.groups.quoted)
+      : match.groups.bare;
+    const tail = bare.slice(match.index + match[0].length);
+    entries.push({ key, value: tail.slice(0, tail.search(/\n|$/u)) });
+  }
+  return entries;
+}
+
+/**
  * 找出**所有**不合约定的 `continue-on-error` 出现处（空数组才是通过）。
  *
- * ## 为什么不再「先匹配行首键名，再校验整行」
- *
- * 那个写法被 CodeRabbit 连着指出两次缺口，因为 YAML 里这个键的位置不固定：
- * - `continue-on-error: true`（块映射，行首）
- * - `- continue-on-error: true`（行内列表项）
- * - `continue-on-error : true`（冒号前有空格）
- * - `- {name: build, run: exit 1, continue-on-error: true}`（flow-style 映射）
- * - `"continue-on-error": true`（引号键 —— YAML 解析成同一个键）
- *
- * 每补一种就等下次被绕过。改成**全篇扫键名、只看冒号右边的值**：键出现在
- * 哪一行、行内第几列、有没有加引号都不影响。这样「位置」与「引号」这两个
- * 维度一起消失 —— 剩下的只有键名拼写本身。
+ * 键的写法一律不管（见 `yamlKeyEntries`），只看冒号右边的值是否字面量 `false`。
  *
  * 残留的误判方向：`run:` 里如果出现字符串字面量 `continue-on-error: 某个值`，
  * 会被当成真的键而判红。偏向失败（要人来解释），与政策一致。
  *
  * @param {string} yml workflow 原文。
- * @returns {string[]} 违规片段的原文。
+ * @returns {string[]} 违规的「键: 值」原文。
  */
 function offendingContinueOnError(yml) {
-  const offenders = [];
-  /* `["']?…["']?` 容纳引号键；`[^\s,}#]*` 让值在空格、逗号（flow-style 分隔）、
-     `}`（flow-style 收尾）处停下。 */
-  for (const match of stripComments(yml).matchAll(/["']?continue-on-error["']?\s*:\s*([^\s,}#]*)/g)) {
-    if (!CONTINUE_ON_ERROR_VALUE_OK.test(match[1] ?? '')) offenders.push(match[0]);
-  }
-  return offenders;
+  return yamlKeyEntries(yml)
+    .filter((entry) => entry.key === 'continue-on-error')
+    /* 值先在首个空白/逗号/`}` 处截断（`trim` 后取第一个词，
+       否则冒号后的那个空格会被当成「值为空」）。 */
+    .map((entry) => ({ ...entry, value: (entry.value.trim().split(/[\s,}#]/u)[0] ?? '') }))
+    .filter((entry) => !CONTINUE_ON_ERROR_VALUE_OK.test(entry.value))
+    .map((entry) => `continue-on-error: ${entry.value}`);
 }
 
 /**
@@ -115,26 +176,18 @@ function offendingContinueOnError(yml) {
  * `&&` / `||` 组合不做语义推导：能自动判对的前提是有解析器，这里没有。
  */
 const CANCEL_ONLY_FOR_PR =
-  /^\$\{\{\s*github\.event_name\s*==\s*'pull_request'\s*\}\}\s*[,}]*$/;
+  /^\s*\$\{\{\s*github\.event_name\s*==\s*'pull_request'\s*\}\}\s*[,}]*$/;
 
 /**
- * 取出所有 `cancel-in-progress` 的**值**（不含键、位置与引号）。
- *
- * 与 `offendingContinueOnError` 同一个教训：键不能绑定「行首、无引号、块映射」。
- * 值的形态有两种，这里统一按「冒号右边到行尾」取再剥掉 flow-style 的收尾：
- * 块映射 `cancel-in-progress: ${{ … }}`、flow 映射 `{cancel-in-progress: ${{ … }}, …}`。
+ * 取出所有 `cancel-in-progress` 的**值**（不含键、位置、引号与转义）。
  *
  * @param {string} yml workflow 原文。
- * @returns {string[]} 各处的值（已去空白与 flow-style 收尾符）。
+ * @returns {string[]} 各处的值（仅去行尾空白）。
  */
 function cancelInProgressValues(yml) {
-  const values = [];
-  for (const match of stripComments(yml).matchAll(/["']?cancel-in-progress["']?\s*:\s*([^\n]*)/g)) {
-    /* 只去行尾空白：flow-style 的收尾 `}` / `,` 由允许值式自己容忍，
-       不能在这里剥 —— 剥了会把表达式自身的 `}}` 一起吃掉。 */
-    values.push((match[1] ?? '').trim());
-  }
-  return values;
+  return yamlKeyEntries(yml)
+    .filter((entry) => entry.key === 'cancel-in-progress')
+    .map((entry) => entry.value.trim());
 }
 
 
