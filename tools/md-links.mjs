@@ -72,7 +72,7 @@ const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
  *
  * 但**指向**归档笔记的链接必须继续检查 —— 那是活文档里的引用，断了要修。
  */
-function collectDocuments(root = PACKAGE_ROOT) {
+export function collectDocuments(root = PACKAGE_ROOT) {
   const files = [];
 
   /* 顶层文档。 */
@@ -172,6 +172,18 @@ export function verifyMarkdownLinks(options = {}) {
     const found = verifyOne(full, doc, errors, root);
     links += found;
   }
+
+  /* ★ 空集合不得当绿。
+     语料为空时上面那个循环一次都不进，`errors` 恒为空、退出码恒为 0 ——
+     而「一条链接都没检查过」与「链接全部可达」在退出码上完全一样。
+     这不是理论可能：`collectDocuments` 读的是磁盘目录树，只要
+     `.agents/notes/` 与 `docs/` 整体消失（误删、路径写法变更、
+     在错误的目录里跑），门禁就会安静地报告「通过」。
+     措辞与 `tools/doc-refs.mjs:364-365` 同族（那边判的是
+     「没有扫到任何 `docs/` 或 `.agents/notes/` 文档：空集合不得当绿」），
+     `tools/bilingual-links.mjs` 的注释也写了同一个道理：
+     「空集合上没有指错语言的链是恒真命题」。 */
+  if (documents.length === 0) errors.push('没有扫到任何 Markdown 文档：空集合不得当绿');
 
   return { checked: documents.length, links, errors };
 }

@@ -1,0 +1,75 @@
+# yaml-language-server: $schema=https://www.coderabbit.ai/integrations/schema.v2.json
+#
+# CodeRabbit 评审配置。
+#
+# ## 为什么要有这个文件
+#
+# 评审意见的语言决定它对中文维护者是否可读。本仓库的默认语言是中文
+# （AGENTS.md 硬约束 4：文档双语，中文为默认），所以评审也用中文。
+#
+# ## 为什么把 AGENTS.md 设为评审准则
+#
+# AGENTS.md 里有五条硬约束（零 `@deepseek-ai/*` 依赖、门禁以退出码为准、
+# 不得手改 vendored、文档双语、不得硬编码本机路径）。这些是**评审时最容易
+# 踩的坑**，而评审器默认看不到仓库约定。让它读 AGENTS.md，评审就会按
+# 本仓库自己的规矩提意见，而不是按通用风格提意见。
+#
+# ## 为什么 tools/ 单独给路径指令
+#
+# `tools/` 下每个文件都是一道门禁。门禁的判定逻辑有两个反直觉之处：
+#   - 判红是**正确行为**（门禁以退出码为准），不是 bug；
+#   - 空集合判失败是刻意设计，不是「健壮性不足」。
+# 不说清楚，评审很可能把这两处当成缺陷建议「修掉」。
+
+language: zh-CN
+
+reviews:
+  profile: chill
+  high_level_summary: true
+  changed_files_summary: true
+  path_instructions:
+    - path: "tools/**"
+      instructions: |
+        这个目录下的每个脚本都是一道**门禁**，请按下面的口径评审：
+
+        1. **判红是正确的，不是缺陷。** 门禁以子进程退出码为准；脚本缺失、
+           超时、非零一律算失败，不得降级为通过。看到「这里报错后没有
+           继续处理」通常是正确的失败关闭，不要建议改成静默跳过。
+        2. **空集合判失败是刻意设计。** 很多脚本在「没扫到任何文件」时
+           故意返回非零 —— 那是「没有可验对象」，不是「通过」。不要建议
+           把它改成「空则放行」。
+        3. **不许复制判定逻辑。** 判定逻辑的唯一真源在 `lib/notes.js` 或
+           对应的 `lib/*.js` 里；`tools/` 下只做 CLI 外壳。发现同一判据在
+           两处出现时，请指出重复而不是建议再抽一份。
+        4. **不许硬编码本机路径。** DSH 位置一律自动探测或读 `$DSH_DIST`；
+           探测不到要明确失败。
+        5. **不许手改 `skills/agent-notes/`。** 那是上游 vendored 副本，
+           由 `tools/sync-upstream.mjs` 管理，手改会被哈希门禁拦下。
+        6. 测试必须真跑子进程、真写文件，且只删自己创建的临时目录。
+    - path: "lib/**"
+      instructions: |
+        `lib/` 是插件对宿主的**公开实现**，只依赖 node 内建模块，不得引入
+        `@deepseek-ai/*` 或任何宿主类型包（宿主 API 一律按鸭子类型用，
+        缺失能力降级关闭）。
+
+        评审判据要特别看这几点：
+        1. **失败关闭**：脚本缺失、node 不可用、超时、Git 故障，一律算失败
+           并给出原因，不能静默降级成通过。
+        2. **没有第二份真相**：同一判据只许存在一处。
+        3. **注释要解释「为什么」，不是「是什么」**；写清实测来源与被否方案。
+    - path: ".agents/notes/**"
+      instructions: |
+        这些是**决策笔记**，是历史记录，不是待改代码。评审时：
+        1. 不要建议「修正」历史笔记里的事实 —— 除非是明确的笔误或损坏；
+        2. 关注结构完整性：是否有 `## Problem` / `## Decision`（现在时）/
+           `## Alternatives considered`（先写被否方案最强理由）/
+           `## Consequences`（收益与代价）/ `## Verification`；
+        3. 关注是否有指向既有笔记的相对链接或 `Independent:` 声明。
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "AGENTS.md"
+  web_search:
+    enabled: false

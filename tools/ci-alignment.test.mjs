@@ -344,6 +344,64 @@ test('ci-align: 未登记的 workflow 要报出来，但不判失败', () => {
   assert.match(result.out, /未登记/);
 });
 
+test('ci-align: 任何一步加 continue-on-error 必须变红（门禁不许被静默降级）', () => {
+  /* `continue-on-error: true` 是 CI 配置里最容易手滑加上的字段：加了它，
+     那一步失败只会在日志里留一行警告，**job 照样绿**。本仓库的 `ci:align`
+     原有 6 条安全属性都不看这个字段 —— 缺口扫描实测：给「文本完整性」步
+     加这一行，完整链 exit 0。 */
+  const mutated = REAL_WORKFLOW.replace(
+    /      - name: 文本完整性\n        run: npm run text:integrity/,
+    '      - name: 文本完整性\n        continue-on-error: true\n        run: npm run text:integrity'
+  );
+  assert.notEqual(mutated, REAL_WORKFLOW, '构造没生效');
+
+  const result = check({ ...BOTH, 'verify.yml': mutated });
+  assert.equal(result.code, 1, `加 continue-on-error 必须变红：\n${result.out}`);
+  assert.match(result.out, /no-continue-on-error/);
+  assert.match(result.out, /verify\.yml/);
+});
+
+test('ci-align: upstream-sync 里的 continue-on-error 同样必须变红', () => {
+  /* 那个 workflow 有 contents: write 且会 push main/tag —— 静默降级一道门禁
+     的代价比 verify.yml 更大，所以两个文件都要判。 */
+  const mutated = REAL_SYNC.replace(
+    '        run: |\n          npm run verify',
+    '        continue-on-error: true\n        run: |\n          npm run verify'
+  );
+  assert.notEqual(mutated, REAL_SYNC, '构造没生效');
+
+  const result = check({ ...BOTH, 'upstream-sync.yml': mutated });
+  assert.equal(result.code, 1, `加 continue-on-error 必须变红：\n${result.out}`);
+  assert.match(result.out, /no-continue-on-error/);
+  assert.match(result.out, /upstream-sync\.yml/);
+});
+
+test('ci-align: 注释里写 continue-on-error 不算（不算数的是被执行的字段）', () => {
+  /* 整行注释掉的字段不会被 YAML 执行，不能因为它存在就判红。
+     这条同时钉住判据读的是「会被执行的内容」而不是全文。 */
+  const mutated = REAL_WORKFLOW.replace(
+    '      - name: 文本完整性',
+    '      # continue-on-error: true\n      - name: 文本完整性'
+  );
+  assert.notEqual(mutated, REAL_WORKFLOW, '构造没生效');
+
+  const result = check({ ...BOTH, 'verify.yml': mutated });
+  assert.equal(result.code, 0, `注释里出现不该判红：\n${result.out}`);
+});
+
+test('ci-align: continue-on-error: false 是允许的（不降级）', () => {
+  /* 不能把判据写成「出现 continue-on-error 就红」—— 显式写 false 的人
+     表达的是「这道不许降级」，与本门禁的意图一致。 */
+  const mutated = REAL_WORKFLOW.replace(
+    /      - name: 文本完整性\n        run: npm run text:integrity/,
+    '      - name: 文本完整性\n        continue-on-error: false\n        run: npm run text:integrity'
+  );
+  assert.notEqual(mutated, REAL_WORKFLOW, '构造没生效');
+
+  const result = check({ ...BOTH, 'verify.yml': mutated });
+  assert.equal(result.code, 0, `continue-on-error: false 不该判红：\n${result.out}`);
+});
+
 test('ci-align: verifyAll 报出 unsafe 与 unknown，且真实仓库此刻为空', () => {
   const result = verifyAll();
   assert.deepEqual(result.missing, [], '真实仓库不得有缺失步骤');
@@ -353,4 +411,94 @@ test('ci-align: verifyAll 报出 unsafe 与 unknown，且真实仓库此刻为�
   const sync = result.workflows.find((w) => w.file === 'upstream-sync.yml');
   assert.ok(sync, 'upstream-sync.yml 必须出现在结果里');
   assert.equal(sync.mode, 'subset');
+});
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * 以下覆盖本轮新增的六条判据（上游 A 的 CI 安全属性）。
+ *
+ * 病根：`verify.yml` 会跑仓库里的脚本（npm test 会执行 tests/ 与 tools/），
+ * 而 `actions/checkout` 默认把 GITHUB_TOKEN 写进 `.git/config` ——
+ * 被测代码一旦执行 `git push`，那一次「测试」就变成一次 push。
+ * 上游 A 的 9 处 checkout 全部带 `persist-credentials: false`。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+test('ci-align: verify.yml 缺 concurrency 块必须变红', () => {
+  /* 同一个 PR 上新推的提交会让旧的那次验证白跑完，并给出一个过期的结论。 */
+  const mutated = REAL_WORKFLOW.replace(/^concurrency:\n[\s\S]*?^jobs:/m, 'jobs:');
+  assert.notEqual(mutated, REAL_WORKFLOW, '构造没生效');
+
+  const result = check({ ...BOTH, 'verify.yml': mutated });
+  assert.equal(result.code, 1, `缺 concurrency 必须变红：\\n${result.out}`);
+  assert.match(result.out, /has-concurrency/);
+  assert.match(result.out, /verify\.yml/);
+});
+
+test('ci-align: verify.yml 无条件 cancel-in-progress: true 必须变红', () => {
+  /* ★ 这是**刻意不照抄上游**的地方。上游 A 写的是无条件 true
+     （.github/workflows/ci.yml 的 concurrency 块）；我们收窄成按事件判断。
+     理由：我们 main 的绿色是 branch protection 强制的**发布凭据**，
+     一次 main 验证被下一次运行取消掉，就等于那次发布没有验证记录。 */
+  const mutated = REAL_WORKFLOW.replace(
+    /^(\s*)cancel-in-progress:.*$/m,
+    '$1cancel-in-progress: true'
+  );
+  assert.notEqual(mutated, REAL_WORKFLOW, '构造没生效');
+  assert.match(mutated, /^\s*cancel-in-progress: true$/m,
+    '变异必须落在真正的配置行上，而不是注释里');
+
+  const result = check({ ...BOTH, 'verify.yml': mutated });
+  assert.equal(result.code, 1, `无条件取消必须变红：\\n${result.out}`);
+  assert.match(result.out, /cancels-only-superseded-pr/);
+});
+
+test('ci-align: verify.yml 按 pull_request 收窄的取消写法必须通过', () => {
+  /* 不能把判据写成「不许有 cancel-in-progress」—— 那会逼人把整块删掉。
+     合法形态：只在 PR 上取消（同一个 PR 的旧提交验证作废是合理的）。 */
+  const result = check(BOTH);
+  assert.equal(result.code, 0, `按事件收窄必须通过：\\n${result.out}`);
+  assert.match(REAL_WORKFLOW, /cancel-in-progress:.*pull_request/,
+    '真实 workflow 应当按 pull_request 收窄');
+});
+
+test('ci-align: 任一 checkout 缺 persist-credentials: false 必须变红', () => {
+  /* verify.yml 里有**两处** checkout（verify job 与 upstream-drift job）。
+     判据必须逐处查 —— 只查文件里「有没有出现过」会漏掉「一处关一处没关」。 */
+  const mutated = REAL_WORKFLOW.replace(
+    '          persist-credentials: false',
+    '          # persist-credentials: false'
+  );
+  assert.notEqual(mutated, REAL_WORKFLOW, '构造没生效');
+
+  const result = check({ ...BOTH, 'verify.yml': mutated });
+  assert.equal(result.code, 1, `少一处就必须变红：\\n${result.out}`);
+  assert.match(result.out, /no-persisted-credentials/);
+});
+
+test('ci-align: upstream-sync 必须保留凭据（照抄上游的 false 会让发布失败）', () => {
+  /* 反向判据：发布 job 靠这份凭据 push main 与 push tag。
+     上游 A 的只读 workflow 用 persist-credentials: false，
+     照抄到发布 job 上会让发布静默失败 —— 这就是「照抄」要有的判据。 */
+  const mutated = REAL_SYNC.replace(
+    '          token: ${{ secrets.GITHUB_TOKEN }}',
+    '          token: ${{ secrets.GITHUB_TOKEN }}\n          persist-credentials: false'
+  );
+  assert.notEqual(mutated, REAL_SYNC, '构造没生效');
+
+  const result = check({ ...BOTH, 'upstream-sync.yml': mutated });
+  assert.equal(result.code, 1, `发布 job 关掉凭据必须变红：\\n${result.out}`);
+  assert.match(result.out, /keeps-credentials-for-push/);
+});
+
+test('ci-align: upstream-sync 的 cancel-in-progress 必须为 false', () => {
+  /* 那个 job 会 push main 与 push tag。中途取消会留下半推状态
+     （tag 推了 main 没推，或反过来）—— 发布状态是撕裂的。 */
+  const mutated = REAL_SYNC.replace(
+    '  cancel-in-progress: false',
+    '  cancel-in-progress: true'
+  );
+  assert.notEqual(mutated, REAL_SYNC, '构造没生效');
+
+  const result = check({ ...BOTH, 'upstream-sync.yml': mutated });
+  assert.equal(result.code, 1, `发布 job 可取消必须变红：\\n${result.out}`);
+  assert.match(result.out, /never-cancels-a-push/);
 });

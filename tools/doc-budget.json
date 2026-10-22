@@ -1,6 +1,7 @@
 {
   "budgets": {
     "AGENTS.md": 2100,
-    "README.md": 6000
+    "README.md": 6000,
+    "README.en.md": 6000
   }
 }

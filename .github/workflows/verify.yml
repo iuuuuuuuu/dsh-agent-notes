@@ -23,6 +23,22 @@ on:
 permissions:
   contents: read
 
+# 并发控制：同一个 PR 上新推的提交会让旧的那次验证作废。
+#
+# cancel-in-progress 只在 pull_request 事件上生效 —— main 上的推送
+# **不能**被取消：main 的验证是「这次发布到底过没过门禁」的唯一凭据，
+# 取消掉就等于发布没有验证记录（而 main 是 force-push 禁止、只能走 PR
+# 且必须 verify 绿的）。schedule 事件同理：一次定期核对被下一轮取消，
+# 那次核对就白跑了。
+#
+# 上游 A 的做法是 `cancel-in-progress: true` 无条件生效（.github/workflows/ci.yml
+# 的 concurrency 块）。我们收窄成按事件判断，因为我们的 main 与上游的
+# main 语义不同 —— 上游是 fork 式的合并流，我们这边 main 的绿色是
+# branch protection 强制的发布凭据。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   verify:
     runs-on: ubuntu-latest
@@ -32,6 +48,15 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # 不把 GITHUB_TOKEN 写进本地 git 配置：这个 job 只需要读代码，
+          # 而被测代码（npm test 会跑仓库里的脚本）若能拿到可写的凭据，
+          # 一次「测试」就可能变成一次 push。凭据留在 runner 自己的
+          # 环境里，不落进 .git/config。
+          #
+          # ⚠️ 只在**只读**的 workflow 里这么设。upstream-sync.yml 那个
+          # job 需要 push main 和 push tag，它必须保留凭据 —— 那里
+          # persist-credentials: false 会让发布静默失败。
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:
@@ -142,6 +167,19 @@ jobs:
       - name: 行内引用
         run: npm run doc:refs
 
+      # 门禁的语料不得被「悄悄收窄」：把 `md-links` 里的 `walk('docs')`
+      # 删掉，`docs/` 整个脱离扫描，而门禁照样绿。这道门禁按**仓库区域**
+      # 对账（语料必须仍覆盖顶层文档 / 笔记树 / docs/ / 源码目录…），
+      # 并对每道门禁记一个数量下限（下调必须写理由）。
+      - name: 语料下限
+        run: npm run corpus:floor
+
+      # `package.json` 的 `files` / `exports` 必须与运行时真正需要的东西
+      # 一致：把 `"skills"` 从 `files` 里删掉，装出来的插件**技能整个消失**，
+      # 而仓库里的测试全都只测仓库、照样全绿。
+      - name: 发布清单
+        run: npm run publish:layout
+
       - name: 双语文档结构
         run: npm run docs:bilingual
 
@@ -158,6 +196,25 @@ jobs:
 
       - name: 文本完整性
         run: npm run text:integrity
+
+      # 每个文本文件必须恰好以一个换行结尾。
+      #
+      # 缺结尾换行会让 diff 里出现 "\ No newline at end of file"，而那行挂在
+      # 最后一个改动行后面 —— 看 diff 的人会把「作者忘了换行」误读成「作者把
+      # 最后一行改了」。结尾多一个空行是纯噪音。
+      #
+      # ⚠️ 语料是 `git ls-files`（入库内容），不是工作区遍历：门禁不该对
+      # 「还没打算提交的草稿」发红。
+      - name: 结尾换行
+        run: npm run eol
+
+      # 每个 tools 脚本必须能被 Node 解析。
+      #
+      # 只做 `node --check`（解析），不执行模块、不判断脚本是否被引用。
+      # 未被引用的新脚本最容易带着语法错误绕过执行链 —— 它不会被任何
+      # `npm run xxx` 跑到，于是「跑一遍链子绿了」并不能证明它是对的。
+      - name: 工具脚本语法
+        run: npm run syntax:check
 
       - name: 发版记账
         run: npm run release:check
@@ -206,6 +263,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # 同上：只读 job，不落凭据。这个 job 会跑 npm run sync:latest，
+          # 它要联网读上游 —— 被测脚本拿到可写凭据就能改仓库。
+          persist-credentials: false
 
       - uses: actions/setup-node@v4
         with:

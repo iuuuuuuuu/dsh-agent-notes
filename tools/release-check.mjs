@@ -93,6 +93,34 @@ export function verifyRelease(options = {}) {
   const unreleased = sections.find((s) => s.version === 'Unreleased');
   const released = sections.filter((s) => s.version !== 'Unreleased');
 
+  /* 0. `package-lock.json` 的版本必须与 `package.json` 一致。
+     lock 文件在 `tools/notes-coverage.mjs` 的 `DEFAULT_EXEMPT_FILES` 里被豁免
+     「要不要配笔记」，但那**只**豁免笔记义务，没有任何门禁校验它的版本字段。
+     实测这个缺口**已经真实发生过**：仓库里 `package.json` 是 0.8.0、
+     `package-lock.json` 还停在 0.6.0，而 13 步门禁链全 0。
+     后果不是「数字不好看」：`npm ci` 会按 lock 里的版本装出产物，
+     而 `npm publish` 用的是 `package.json` 的版本 —— 两者不一致时，
+     装出来的包与发布的包版本号不同，且没有任何报错。 */
+  let lockVersion = null;
+  try {
+    const lock = JSON.parse(read('package-lock.json'));
+    lockVersion = typeof lock?.version === 'string' ? lock.version : null;
+    if (lockVersion === null) {
+      errors.push('package-lock.json 缺少顶层 version 字段 —— 它与 package.json 的版本必须一致');
+    } else if (lockVersion !== pkg.version) {
+      errors.push(
+        `package-lock.json 的版本是 ${lockVersion}，而 package.json 是 ${pkg.version} —— 两者必须一致。`
+        + '改版本号后忘了同步 lock 就会发生：npm ci 按 lock 装、npm publish 按 package.json 发，'
+        + '装出来的包与发布的包版本号不同。修复：npm install --package-lock-only。'
+      );
+    }
+  } catch (error) {
+    errors.push(
+      `package-lock.json 读取或解析失败：${error instanceof Error ? error.message : String(error)}`
+      + ' —— 它与 package.json 的版本必须一致，判不了就不能算通过。'
+    );
+  }
+
   /* 1. 当前版本必须有对应段。没有 = 用户看到的发布说明是空的。 */
   const hasCurrent = released.some((s) => s.version === pkg.version);
   if (!hasCurrent) {

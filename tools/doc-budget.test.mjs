@@ -52,6 +52,69 @@ function run(dir, args = []) {
   return { code: r.status ?? -1, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 }
 
+function makeBilingualRepo(budgets) {
+  const dir = makeRepo(budgets);
+  writeFileSync(join(dir, 'README.md'), '短文档', 'utf8');
+  writeFileSync(join(dir, 'README.en.md'), 'Short document', 'utf8');
+  return dir;
+}
+
+test('doc-budget: 双语对完整且预算相同通过', () => {
+  const dir = makeBilingualRepo({ 'README.md': 100, 'README.en.md': 100 });
+  try {
+    assert.equal(run(dir).code, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('doc-budget: 自动放宽后双语预算仍相同', () => {
+  const dir = makeBilingualRepo({ 'README.md': 3, 'README.en.md': 3 });
+  try {
+    writeFileSync(join(dir, 'README.en.md'), 'one two three four five six', 'utf8');
+    assert.equal(run(dir).code, 1);
+    assert.equal(run(dir, ['--update']).code, 0);
+    const { budgets } = JSON.parse(readFileSync(join(dir, 'tools', 'doc-budget.json'), 'utf8'));
+    assert.equal(budgets['README.md'], 6);
+    assert.equal(budgets['README.en.md'], 6);
+    assert.equal(run(dir).code, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('doc-budget: 双语对缺少英文预算必须红且不写清单', () => {
+  const dir = makeBilingualRepo({ 'README.md': 100 });
+  try {
+    const manifest = join(dir, 'tools', 'doc-budget.json');
+    const before = readFileSync(manifest);
+    for (const args of [[], ['--update']]) {
+      const result = run(dir, args);
+      assert.equal(result.code, 1, result.out);
+      assert.match(result.out, /双语文档预算缺少 README\.en\.md/);
+      assert.deepEqual(readFileSync(manifest), before);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('doc-budget: 双语预算值不同必须红且不写清单', () => {
+  const dir = makeBilingualRepo({ 'README.md': 100, 'README.en.md': 101 });
+  try {
+    const manifest = join(dir, 'tools', 'doc-budget.json');
+    const before = readFileSync(manifest);
+    for (const args of [[], ['--update']]) {
+      const result = run(dir, args);
+      assert.equal(result.code, 1, result.out);
+      assert.match(result.out, /预算值必须相同/);
+      assert.deepEqual(readFileSync(manifest), before);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('doc-budget: 空预算清单必须失败，包括 --update', () => {
   const dir = makeRepo({});
   try {

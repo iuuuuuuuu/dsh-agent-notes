@@ -115,3 +115,70 @@
   代价是要在三个地方维护同一件事。
 - **重访信号**：出现第四张白名单，或同一路径在三张表里都出现（那时合并的收益就具体了）。
 - 证据：[源码里引用的文档路径也要有门禁](../.agents/notes/implemented/process/2026-10-22-source-doc-refs-need-a-gate.md)。
+
+## 11. `.gitattributes` 的 `eol=lf` 没有任何断言
+
+`.gitattributes` 里写着 `* text=auto eol=lf`。这一行的存在意义是**vendored 内容按
+SHA-256 记账** —— 换行一旦被 Git 转成 CRLF，vendored 哈希就与上游清单对不上。
+但删掉 `eol=lf` 之后，`npm run check` **整链 exit 0**：没有门禁断言这个约定。
+
+- **为什么不修**：判据本身只有一行（首行必须含 `eol=lf`），成本几乎为零；
+  否掉的理由是**误报真实存在** —— Windows 上有人故意把本仓库切成
+  `eol=crlf` 是可能的本地配置（那样 vendored 哈希在本地必然对不上，
+  但那是个人配置问题，不该由门禁在别人的仓库里报红）。
+  换句话说：这条判据会把「个人配置」误判成「仓库被改坏」。
+  代价对比：不对称的 —— 少查一件东西不会有人来道谢，多判一次会有人来骂。
+- **重访信号**：真的发生过一次「换行导致 vendored 哈希对不上」而排查耗时很久
+  （那时值得让门禁提前一步报「是换行问题」）。
+- 证据：[vendored 完整性门禁不再信任自己](../.agents/notes/implemented/process/2026-10-21-vendored-integrity-gate-stops-trusting-itself.md)。
+
+## 12. 孤儿文件不可机械判定
+
+三类东西现在都没有门禁：根目录下没人 import 的 `.mjs`（如 `build.mjs` 本身）、
+`docs/` 下没人引用的文档、`lib/` 下没人 import 的新模块。实测三种都全链 exit 0。
+
+- **为什么不修**：「什么算孤儿」没有可机械判定的答案：根目录的 `build.mjs`
+  正是「没人 import 但必需」的；`lib/` 的模块里有靠**字符串路径动态加载**的
+  （`lib/skill.js`、`lib/notes.js` 都按路径拼），静态 import 图根本看不到它们。
+  硬判必然误报，而误报的门禁会被绕过 —— 那比不判更糟。
+  可行的替代形态是「只对**新增**文件提示」（像 `tools/fault-injection.mjs`
+  对未登记测试文件那样），但那是提醒不是门禁，且提醒的噪声比价值大。
+- **重访信号**：`lib/` 全部改成静态 import（那时 import 图就是完整依赖图，
+  孤儿判定立刻变可机械）—— 本仓库的模块加载形态目前不会变。
+- 证据：[门禁自证：声明表与磁盘双向对账](../.agents/notes/implemented/process/2026-10-21-fault-injection-list-must-reconcile-with-disk.md)。
+
+## 13. `engines` 与 `LICENSE` 正文都没有门禁
+
+`package.json` 的 `engines.node` 写成 `">=999"` 全链 exit 0；`LICENSE` 正文
+被整体替换成别的文本也全链 exit 0（门禁判的是 `package.json` 的 `license === "MIT"`
+字段，不是正文）。
+
+- **为什么不修**：这两条判据**能**机械写出来，但判的东西价值很低。
+  `engines` 是给 npm 装包时的**提示**，不是约束 —— 装出来的包在 Node 20 上
+  大概率也能跑；而本仓库真正的 Node 版本约束是「需要 `node --test` 的
+  `describe`/`it` 与 `mock` API」，那需要运行时探测而不是读字段。
+  `LICENSE` 正文同理：本仓库的 LICENSE 是 MIT 全文，**上游 A 的门禁也不判正文**
+  （上游 `verify-package-meta.ts` 只查 `license` 字段），判正文等于把法律文本
+  的每次微调都变成 CI 失败。
+- **重访信号**：真出现「在不支持的 Node 版本上装上去了而且坏了」，
+  那时该加的是**运行时能力探测**（装包时或启动时）而不是 `engines` 字段断言。
+- 证据：[发布清单与产物必须自洽](../.agents/notes/implemented/process/2026-10-22-publish-layout-files-and-exports-must-agree.md)。
+
+## 14. 门禁脚本自身的 `process.exit(1)` 改成 `0` 无人拦
+
+实测把 `tools/notices.mjs` 的 `process.exit(1)` 改成 `process.exit(0)` →
+**完整链 exit 0**。`tools/fault-injection.mjs` 覆盖的是「测试文件的故障注入
+有无登记」，它不覆盖「门禁脚本自己的退出码被改」。
+
+- **为什么不修**：要判这件事，得为**每道**门禁造一个「已知坏输入」并断言它
+  必然非零退出。这有两层问题：其一，输入构造本身可能误报 —— 某道门禁在某个
+  输入下**合法地**返回 0（例如「没有需要检查的东西」在空仓库里就该是 0），
+  断言会变成假红；其二，坏输入要**复刻**门禁的前置条件（很多门禁要求特定目录
+  结构、特定语料），复刻得越像真的，测试越像在测夹具而不是门禁。
+  最小形态（只对 `tools/notices.mjs` 一道做坏输入必红断言）可以做，但它证明的
+  范围极窄，容易给人「这一族已经防住了」的错觉 —— 而错觉比缺口本身更危险。
+  真正能防住这个族的形态是**在 CI 里统计每道门禁的执行次数**（跑过几次），
+  那是另一套基础设施。
+- **重访信号**：真发生一次「门禁的退出码被手滑改掉，且没人发现」——
+  那时优先做的不是逐道造坏输入，而是先把「门禁跑了几次」变成可观测的事实。
+- 证据：[门禁自证：声明表与磁盘双向对账](../.agents/notes/implemented/process/2026-10-21-fault-injection-list-must-reconcile-with-disk.md)。

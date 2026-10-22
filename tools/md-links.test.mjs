@@ -31,7 +31,7 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 
-import { verifyMarkdownLinks, verifyMarkdownLinksIn } from './md-links.mjs';
+import { verifyMarkdownLinks, verifyMarkdownLinksIn, collectDocuments } from './md-links.mjs';
 
 const ROOT = join(import.meta.dirname, '..');
 
@@ -388,5 +388,44 @@ test('md-links: 不扫描 vendored 的上游目录', () => {
       'vendored 目录里的断链不得被报告（本仓库无权修它）');
   } finally {
     rmSync(staging, { recursive: true, force: true });
+  }
+});
+
+test('md-links: 空语料必须判失败（空集合不得当绿）', () => {
+  /* 用**真实空目录**驱动真实 `collectDocuments`，不 mock 收集函数 ——
+     mock 掉收集函数就等于在验「我传给判据的东西」而不是「判据会不会响」。 */
+  const root = mkdtempSync(join(tmpdir(), 'an-mdl-empty-'));
+  try {
+    const documents = collectDocuments(root);
+    assert.deepEqual(documents, [], `前置条件：这里必须真的一个文档都扫不到，实际 ${documents.join(', ')}`);
+
+    const result = verifyMarkdownLinks({ root });
+    assert.equal(result.checked, 0, 'checked 必须是 0');
+    assert.equal(result.links, 0, 'links 必须是 0 —— 一条都没检查过');
+    assert.equal(result.errors.length, 1, `必须恰好一条错误，实际：${result.errors.join('; ')}`);
+    assert.match(result.errors[0], /没有扫到任何 Markdown 文档/, '必须说明语料为空');
+    assert.match(result.errors[0], /空集合不得当绿/, '必须点明这是空集合判据');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('md-links: 语料恢复后必须重新判绿（证明空集合判据不是恒红）', () => {
+  /* 正例必须与负例同一对调用，否则「永远红」也能让上一条通过。 */
+  const root = mkdtempSync(join(tmpdir(), 'an-mdl-refill-'));
+  try {
+    const empty = verifyMarkdownLinks({ root });
+    assert.match(empty.errors.join('\n'), /空集合不得当绿/);
+
+    mkdirSync(join(root, 'docs'), { recursive: true });
+    writeFileSync(join(root, 'README.md'), '# 顶层\n\n[自指](README.md)\n', 'utf8');
+    writeFileSync(join(root, 'docs', 'ok.md'), '# ok\n', 'utf8');
+
+    const filled = verifyMarkdownLinks({ root });
+    assert.equal(filled.checked, 2, `顶层 + docs/ 都得算进来，实际 ${filled.checked}`);
+    assert.deepEqual(filled.errors, [],
+      `有语料且链接全可达时必须通过，实际：${filled.errors.join('; ')}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });

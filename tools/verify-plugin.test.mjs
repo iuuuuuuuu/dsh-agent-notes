@@ -40,10 +40,14 @@ const NEEDED = [
   'cordis.patch.yml',
   'README.md',
   'README.en.md',
+  'CHANGELOG.md',
+  'LICENSE',
   'src',
   'lib',
   'skills',
   'tools/verify-plugin.mjs',
+  'tools/publish-layout.mjs',
+  'build.mjs',
   'tools/upstream-manifest.json',
   'upstream.json'
 ];
