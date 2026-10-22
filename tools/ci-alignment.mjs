@@ -62,7 +62,7 @@ const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const WORKFLOW_DIR = join(PACKAGE_ROOT, '.github', 'workflows');
 
 /**
- * `continue-on-error` 唯一允许的形态：**字面量 false**。
+ * `continue-on-error` 的**值**：唯一允许字面量 `false`。
  *
  * 这里刻意用「默认拒绝」而不是「列举所有 true 的写法」。第一版列举了
  * `true` / `True` / `"true"` / `${{ true }}`，CodeRabbit 接着就用
@@ -72,29 +72,35 @@ const WORKFLOW_DIR = join(PACKAGE_ROOT, '.github', 'workflows');
  *
  * 代价：将来真要写条件降级，得先改这条判据 —— 那正是要的摩擦。
  */
-const CONTINUE_ON_ERROR_ALLOWED = /^\s*(?:-\s+)?continue-on-error\s*:\s*['"]?false['"]?\s*(?:#.*)?$/im;
+const CONTINUE_ON_ERROR_VALUE_OK = /^(?:false|"false"|'false')$/;
 
 /**
- * 「这一行是不是 `continue-on-error` 这个键」的识别式。
+ * 找出**所有**不合约定的 `continue-on-error` 出现处（空数组才是通过）。
  *
- * 不能写成 `^\s*continue-on-error:` —— YAML 允许三种等价写法，它们都不匹配：
- * `- continue-on-error: true`（行内序列表项）、`continue-on-error : true`
- * （冒号前有空格）。识别式漏掉哪种，那种就整行不进违规列表 ⇒ 门禁假绿。
- * 这条被 CodeRabbit 在 PR #31 上指出来了，是同一个「只认一种写法」的老毛病。
- */
-const CONTINUE_ON_ERROR_KEY = /^\s*(?:-\s+)?continue-on-error\s*:/;
-
-/**
- * 找出所有不合约定的 `continue-on-error` 行（空数组才是通过）。
+ * ## 为什么不再「先匹配行首键名，再校验整行」
+ *
+ * 那个写法被 CodeRabbit 连着指出两次缺口，因为 YAML 里这个键的位置不固定：
+ * - `continue-on-error: true`（块映射，行首）
+ * - `- continue-on-error: true`（行内列表项）
+ * - `continue-on-error : true`（冒号前有空格）
+ * - `- {name: build, run: exit 1, continue-on-error: true}`（flow-style 映射）
+ *
+ * 每补一种就等下次被绕过。改成**全篇扫键名、只看冒号右边的值**：键出现在
+ * 哪一行、行内第几列都不影响。这样「位置」这一维度不再有漏法。
+ *
+ * 残留的误判方向：`run:` 里如果出现字符串字面量 `continue-on-error: 某个值`，
+ * 会被当成真的键而判红。偏向失败（要人来解释），与政策一致。
  *
  * @param {string} yml workflow 原文。
- * @returns {string[]} 违规行。
+ * @returns {string[]} 违规片段的原文。
  */
 function offendingContinueOnError(yml) {
-  return stripComments(yml)
-    .split('\n')
-    .filter((line) => CONTINUE_ON_ERROR_KEY.test(line))
-    .filter((line) => !CONTINUE_ON_ERROR_ALLOWED.test(line));
+  const offenders = [];
+  /* `[^\s,}#]*` 让值在空格、逗号（flow-style 分隔）、`}`（flow-style 收尾）处停下。 */
+  for (const match of stripComments(yml).matchAll(/continue-on-error\s*:\s*([^\s,}#]*)/g)) {
+    if (!CONTINUE_ON_ERROR_VALUE_OK.test(match[1] ?? '')) offenders.push(match[0]);
+  }
+  return offenders;
 }
 
 /**

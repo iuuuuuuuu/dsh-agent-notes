@@ -67,8 +67,14 @@ Status: implemented
 于是 `- continue-on-error: true`（行内序列表项）与 `continue-on-error : true`
 （冒号前空格）根本不进违规列表 —— 判据连看都没看到。这是 CodeRabbit 在 PR #31
 上的发现，也是同一类缺陷的第三次现形：**识别式与判据值都会「只认一种写法」**。
-现在识别式是 `CONTINUE_ON_ERROR_KEY = /^\s*(?:-\s+)?continue-on-error\s*:/`，
-允许值式同样接受 `- ` 前缀与冒号前空格。
+**再进一步（第四次）：位置这一维度也补不完。** 把识别式扩成接受 `- ` 前缀与冒号前空格后，
+CodeRabbit 又给出 flow-style 映射 `- {name: build, run: exit 1, continue-on-error: true}` ——
+键既不在行首也不在前面。结论：不是再补一种正则，而是**取消「位置」这个维度**：
+全篇扫 `continue-on-error\s*:\s*<值>`，只看冒号右边的值是不是字面量 `false`。
+键出现在哪一行、行内第几列都不影响判定。
+
+残留误差：`run:` 里若出现字符串字面量 `continue-on-error: 某个值`，会被当成真键而判红 ——
+偏向失败（要人来解释），与政策一致。
 
 ## Consequences
 
