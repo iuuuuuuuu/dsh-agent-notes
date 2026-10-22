@@ -124,7 +124,9 @@ export function coversFile(pattern, file) {
  */
 export function isPublished(files, file) {
   const f = normalizePattern(file);
-  if (ALWAYS_PUBLISHED.test(f.split('/').pop() ?? '')) return true;
+  /* npm 的「总是发布」只对**仓库根**的那几个文件名生效；
+     用 basename 判会让 `tools/LICENSE` 这种同名文件也被当成已发布。 */
+  if (!f.includes('/') && ALWAYS_PUBLISHED.test(f)) return true;
   return (files ?? []).some((pattern) => coversFile(pattern, f));
 }
 

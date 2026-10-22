@@ -12,6 +12,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  isVersion,
   buildVersionChangeHint,
   buildVersionLabel,
   compareCore,
@@ -112,4 +113,15 @@ test('标签落在标题行上，且正文顺序是「版本提示 → 项目副
   const plain = buildPolicyText(undefined, 'v0.9.0', undefined);
   assert.match(plain.split('\n')[0], /· v0\.9\.0$/);
   assert.equal(buildPolicyText(undefined, undefined, undefined).split('\n')[0], '# 决策笔记（Agent Notes）');
+});
+
+test('版本判据只有一处：state 落盘与提示生成共用 isVersion', () => {
+  /* CodeRabbit 在 PR #29 上指出 `lib/state.js` 另写了一份版本正则（Major）：
+     两处各写一份，就允许「状态记下的版本」与「提示认得的版本」各说各话 ——
+     状态里存了提示逻辑不认的形状，「上次 0.9.0、现在也是 0.9.0」永远判不出来。 */
+  assert.equal(isVersion('0.9.0'), true);
+  assert.equal(isVersion('0.9.0-rc.1'), true);
+  assert.equal(isVersion('0.9'), false);
+  assert.equal(isVersion('v0.9.0'), false);
+  assert.equal(isVersion(undefined), false);
 });

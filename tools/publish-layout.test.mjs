@@ -238,3 +238,14 @@ test('publish-layout: 单元判据 —— exports 的每个条件分支都要被
     '条件对象的每个分支都是一次可能的解析目标，少收一个就是放过一种坏装包'
   );
 });
+
+test('publish-layout: 「总是发布」的文件名只在仓库根成立', () => {
+  /* npm 的 always-include（README/LICENSE/package.json…）只对根目录那几个名字生效。
+     用 basename 判，会让 `tools/LICENSE` 这种同名文件也算「已发布」，
+     于是「files 漏了 tools/ 但运行时文件却在 tools/LICENSE」这种组合会假绿。 */
+  assert.equal(isPublished(['lib'], 'LICENSE'), true);
+  assert.equal(isPublished(['lib'], 'tools/LICENSE'), false);
+  /* 反例的另一半：`files` 真覆盖了某目录时，目录里的同名文件当然算已发布。 */
+  assert.equal(isPublished(['lib'], 'lib/LICENSE'), true);
+  assert.equal(isPublished(['lib'], 'docs/LICENSE'), false);
+});
