@@ -160,3 +160,42 @@ test('eol: checkTrailingNewline 的判据逐条明确', () => {
   assert.equal(checkTrailingNewline(Buffer.from('a\n\n', 'utf8')).ok, false);
   assert.equal(checkTrailingNewline(Buffer.alloc(0)).ok, true);
 });
+
+test('eol: git 取不到语料必须失败关闭（不许静默改用工作区遍历）', () => {
+  /* 失效形态（CodeRabbit 在 PR #30 上指出的正是这条，我最初只改了注释没改行为）：
+     原来的 catch 直接退到文件系统遍历 —— 在**真仓库**里 git 坏了、索引空了、
+     权限没了，门禁会换一份语料（工作区内容，含未跟踪文件）继续报「通过」。
+     那不是「降级」，是换了个问题去答。 */
+  const dir = mkdtempSync(join(tmpdir(), 'an-eol-nogit-'));
+  try {
+    writeFileSync(join(dir, 'bad.md'), '没有结尾换行', 'utf8');
+    /* 不加 allowNonGit：非 git 目录 ⇒ 必须报「取不到语料」，而不是报 bad.md。 */
+    const strict = verifyTrailingNewlines({ root: dir });
+    assert.equal(strict.checked, 0, '取不到语料时不许声称检查过文件');
+    assert.equal(strict.source, 'git-error');
+    assert.match(strict.errors.join('\n'), /取不到已跟踪文件列表/);
+    assert.doesNotMatch(strict.errors.join('\n'), /bad\.md/, '不许改用工作区遍历后报文件级结果');
+
+    /* 阳性对照：显式允许非 git（夹具场景）时，同一个目录确实会被扫到 ——
+       证明上面那条「没报 bad.md」不是因为判据整个没跑。 */
+    const loose = verifyTrailingNewlines({ root: dir, allowNonGit: true });
+    assert.equal(loose.source, 'fs');
+    assert.equal(loose.checked, 1);
+    assert.match(loose.errors.join('\n'), /bad\.md/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('eol: 空仓库（一个已跟踪文件都没有）必须红，不是「0 个文件通过」', () => {
+  const dir = gitSandbox({ 'keep.txt': 'x\n' });
+  try {
+    /* 把唯一文件从索引里删掉但留在磁盘上：git 在、索引空。 */
+    execFileSync('git', ['rm', '-q', '--cached', 'keep.txt'], { cwd: dir, windowsHide: true });
+    const result = verifyTrailingNewlines({ root: dir });
+    assert.equal(result.source, 'git-empty');
+    assert.match(result.errors.join('\n'), /空语料不得当绿/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
