@@ -808,6 +808,45 @@ test('board-route: revision 只比篇数会漏掉内容修改（回归）', () =
   assert.notEqual(revisionOf(base), revisionOf(relinked), 'outLinks 变了必须换指纹');
 });
 
+test('board-route: 指纹不许依赖字段清单（上游加一个字段就漏刷新）', () => {
+  /* 2026-10-18 那篇热更新笔记里写过一条已知上限：
+       「`revisionOf()` 依赖字段清单 —— 上游将来若给笔记加新字段（比如 `tags`），
+         本插件不改就察觉不到那个字段的变化。」
+     这条上限今天兑现：`buildInlineData` 已经在给每篇笔记带 `slug` 与 `rawBody`，
+     而字段清单里两个都没有 ⇒ 只改 slug/正文里不在清单中的部分时，页面不刷新，
+     且**没有任何报错**。清单式判据的失效方向是静默漏报，所以判据本身要改掉，
+     而不是再往清单里补一个字段（补了就等下一次上游再加）。 */
+  const base = [{
+    id: 'a', title: 't', status: 'implemented', date: '2026-01-01',
+    lifecycle: 'implemented', cls: 'process',
+    problem: 'p1', decision: 'd1', alternatives: 'a1', consequences: 'c1', outLinks: []
+  }];
+
+  // ① 现在真的存在、但当初清单里没有的字段：slug 与 rawBody
+  for (const field of ['slug', 'rawBody']) {
+    const withField = [{ ...base[0], [field]: 'x' }];
+    const changed = [{ ...base[0], [field]: 'y' }];
+    assert.notEqual(
+      revisionOf(withField), revisionOf(changed),
+      `${field} 变了必须换指纹 —— 它是会被页面/视图用到（或代表整篇正文）的字段`
+    );
+  }
+
+  // ② 将来才加的字段：不认识的名字也必须计入（判据不许是白名单）
+  const future1 = [{ ...base[0], tags: ['a'] }];
+  const future2 = [{ ...base[0], tags: ['b'] }];
+  assert.notEqual(
+    revisionOf(future1), revisionOf(future2),
+    '没见过的字段也必须计入指纹 —— 白名单式判据会在上游加字段时静默漏刷新'
+  );
+
+  // ③ 新增一个字段本身（值为空）也算变化：页面多渲染一个空位也是变化
+  assert.notEqual(
+    revisionOf(base), revisionOf([{ ...base[0], tags: [] }]),
+    '字段的出现/消失必须换指纹'
+  );
+});
+
 test('board-responsive: 热更新脚本必须轮询 /data，并调用上游 ingestDataset', () => {
   /* 三个关键点，任一遗漏都会让「改笔记后页面不更新」复现：
      ① 端点由当前路径推导（不能直接拼 'data'，实测会得到 /agent-notes/uidata 404）；

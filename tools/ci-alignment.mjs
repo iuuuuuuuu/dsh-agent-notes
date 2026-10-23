@@ -796,11 +796,111 @@ export function verifyAll() {
     extra: primary.extra,
     workflows,
     unsafe,
-    unknown
+    unknown,
+    readOnly: verifyReadOnlyChain()
   };
 }
 
 /* ── CLI ──────────────────────────────────────────────────────────────── */
+
+/**
+ * 去掉 JS 源码里的注释，只留可执行部分。
+ *
+ * 为什么需要：`verifyReadOnlyChain()` 要在工具源码里找「它真的解析了 `--check`」，
+ * 而**注释里提到某个参数不构成解析**。本函数自己的说明文字里就有
+ * `argv.includes('--check')` 这个例子，不剥注释的话判据会把自己的文档当证据。
+ *
+ * 这是粗粒度剥法（不区分字符串字面量里出现的 `//`），对本用途够用：
+ * 误剥只会让判据更保守（漏认一个只读模式），不会造成假绿。
+ *
+ * @param {string} source JS 源码。
+ * @returns {string} 去掉注释后的源码。
+ */
+function stripJsComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/^[ \t]*\/\/.*$/gm, '');
+}
+
+/**
+ * 检查链里的命令行**不许裸跑带只读模式的工具**。
+ *
+ * ## 这个缺口是怎么发现的
+ *
+ * 2026-10-23 我为了看「每个 CLI 裸跑会输出什么」，把 `tools/` 下 16 个工具逐个
+ * `node tools/x.mjs` 跑了一遍。结果其中两个**就地改了仓库**：
+ *
+ *   - `tools/bump-version.mjs` → `package.json` 的 `0.8.0` 变成 `0.8.1`；
+ *   - `tools/sync-upstream.mjs` → 重写 `upstream.json` 的 `syncedAt` 时间戳。
+ *
+ * 探针本身是我的操作失误（`git checkout --` 已还原）。但它暴露的真问题是：
+ * **`--check` 这种只读模式存在，但用不用它是靠人记得**。`package.json` 的 `check`
+ * 链里只要有人把 `node tools/notices.mjs --check` 写成 `node tools/notices.mjs`，
+ * 那道「检查」就会一边检查一边改仓库 —— 而它**仍然 exit 0**，CI 全绿。
+ *
+ * ## 判据
+ *
+ * 从 `check` / `check:full` 出发递归展开 `npm run` 引用，收集每条 `node tools/*.mjs`
+ * 命令行；若该工具的源码**声明了** `--check`（说明它有只读模式），命令行就必须带
+ * `--check`。工具没有 `--check` 时不判（它本来就只读，判了是噪音）。
+ *
+ * 不判「工具是否真的只读」—— 那需要跑它并比较整棵树，属于另一类判据
+ * （`tools/sync-upstream.test.mjs` 的零写入用例就是那种）；这里只判**用没用对模式**。
+ *
+ * @returns {{ commands: number, problems: { script: string, tool: string, why: string }[] }} 结果。
+ */
+export function verifyReadOnlyChain() {
+  const pkg = JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8'));
+  const scripts = pkg.scripts ?? {};
+  /** 从入口脚本开始递归展开，避免手写「当前 check 链有哪几步」。 */
+  const pending = ['check', 'check:full'];
+  const expanded = new Set();
+  const commands = [];
+
+  while (pending.length > 0) {
+    const name = pending.shift();
+    if (expanded.has(name)) continue;
+    expanded.add(name);
+    const body = scripts[name];
+    if (typeof body !== 'string') continue;
+    for (const m of body.matchAll(/npm run ([a-z][a-z0-9:_-]*)/g)) pending.push(m[1]);
+    for (const m of body.matchAll(/node\s+(tools\/[A-Za-z0-9._-]+\.mjs)([^&|;]*)/g)) {
+      commands.push({ script: name, tool: m[1], args: m[2] ?? '' });
+    }
+  }
+
+  const problems = [];
+  for (const { script, tool, args } of commands) {
+    const abs = join(PACKAGE_ROOT, tool);
+    /* 工具文件不存在时**跳过**，不判红。
+       理由：那种情况下 `npm run check` 自己就会因为「找不到模块」失败，
+       在这里再报一次是重复；而用例的沙箱只复制它关心的文件，
+       逐个复制 20 个工具会让每条用例都变慢，还会把噪音混进断言里。
+       代价（已在用例里接受）：沙箱里这条判据只对**被复制进来的**工具生效。 */
+    if (!existsSync(abs)) continue;
+    const source = stripJsComments(readFileSync(abs, 'utf8'));
+    /* 只认「真的解析了这个参数」的写法：`argv.includes('--check')` 或 `arg === '--check'`。
+       ⚠️ 两道保险，都是被自己的假红逼出来的：
+       1. 不能退到「源码里出现过 `--check` 这个字符串」—— 实测这样会把 `tools/eol.mjs`
+          （注释里在讲上游的 `git diff --cached --check`）、`tools/syntax-check.mjs`
+          （`execPath, ['--check', …]` 是**给 eslint 的**）全判成「有只读模式」，真仓库当场红三处。
+       2. 必须先把注释剥掉 —— 本函数的注释里就写着 `argv.includes('--check')` 这个例子，
+          不剥的话这条判据会把**自己**判成有只读模式（实测红在这里，很滑稽但确实是漏洞：
+          注释不是可执行证据）。 */
+    /* `(?<![!])` 是为了不把 `!== '--check'` / `!= '--check'` 当成「有只读模式」——
+       那种写法恰恰是**排除**这个参数。 */
+    if (!/\.(?:includes|indexOf)\(\s*['"`]--check['"`]|(?<![!])(?:===|==)\s*['"`]--check['"`]/.test(source)) continue;
+    if (/\s--check\b/.test(args)) continue;
+    problems.push({
+      script,
+      tool,
+      why: `${tool} 有 --check（只读）模式，但「${script}」里的命令行没带它 —— `
+        + '这个工具裸跑会写盘，等于检查期间改仓库，而它仍会 exit 0'
+    });
+  }
+
+  return { commands: commands.length, problems };
+}
 
 function main() {
   const result = verifyAll();
@@ -813,7 +913,8 @@ function main() {
      不该被逼着登记一堆它根本不需要跑的门禁。那会让人为了过门禁而乱填豁免，
      反而稀释这张表的可信度。
      ⚠️ 但也不能静默 —— 静默正是本门禁最初的病根。 */
-  const problems = result.missing.length + wfMissing.length + result.unsafe.length;
+  const problems = result.missing.length + wfMissing.length + result.unsafe.length
+    + result.readOnly.problems.length;
 
   if (problems === 0) {
     console.log(
@@ -824,6 +925,7 @@ function main() {
       console.log(`  ✔ ${w.file}：${w.missing.length === 0 ? '必需门禁齐全' : `${w.missing.length} 处缺失`}`);
     }
     if (result.unsafe.length === 0) console.log(`  ✔ ${SAFETY.length} 条 CI 安全属性均未被删改`);
+    console.log(`  ✔ check 链里 ${result.readOnly.commands} 条工具命令都用了只读模式（有 --check 的都带上了）`);
     if (result.unknown.length > 0) {
       console.log(`  ⚠ 未登记覆盖口径的 workflow：${result.unknown.join(', ')}（不判失败，但需人工确认）`);
     }
@@ -863,6 +965,19 @@ function main() {
     }
     console.error('');
     console.error('  这类删除不会被「本地 ⊆ CI」发现 —— 包含式判据看不见「把一步换成 true」。');
+  }
+
+  if (result.readOnly.problems.length > 0) {
+    console.error('');
+    console.error(`check 链里有 ${result.readOnly.problems.length} 处漏了只读模式`);
+    for (const { script, tool, why } of result.readOnly.problems) {
+      console.error(`  ✖ ${tool}（在脚本「${script}」里）`);
+      console.error(`      ${why}`);
+    }
+    console.error('');
+    console.error('  修：命令行补上 --check。');
+    console.error('      实测过的代价：裸跑 tools/bump-version.mjs 会把版本号 +1，');
+    console.error('      裸跑 tools/sync-upstream.mjs 会重写 upstream.json 的时间戳。');
   }
 
   if (result.unknown.length > 0) {

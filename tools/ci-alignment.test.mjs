@@ -747,3 +747,119 @@ test('ci-align: flow 映射里合法的 cancel-in-progress 不许被尾巴上的
   assert.equal(red.code, 1, `flow 映射里的反向值必须判红：\n${red.out}`);
   assert.match(red.out, /cancels-only-superseded-pr/);
 });
+
+/**
+ * 造一个只关心「检查链用没用只读模式」的沙箱。
+ *
+ * `check` 脚本被收窄成只剩被测的那一条，其它门禁的缺失就不会混进断言。
+ * `tools/notices.mjs` 从真仓复制进去 —— 它真的解析 `--check`（`argv.includes`），
+ * 正好是这条判据要认的形态；用它当样本，判据改坏时用例才会红。
+ *
+ * @param {{ command: string, extraTool?: { path: string, body: string } }} options 命令行与可选的自造工具。
+ * @returns {string} 沙箱根。
+ */
+function readOnlySandbox({ command, extraTool }) {
+  const dir = mkdtempSync(join(tmpdir(), 'an-align-ro-'));
+  mkdirSync(join(dir, '.github', 'workflows'), { recursive: true });
+  writeFileSync(join(dir, '.github', 'workflows', 'verify.yml'), REAL_WORKFLOW, 'utf8');
+  writeFileSync(join(dir, '.github', 'workflows', 'upstream-sync.yml'), REAL_SYNC, 'utf8');
+
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'));
+  pkg.scripts.check = 'npm run notices:check';
+  pkg.scripts['notices:check'] = command;
+  writeFileSync(join(dir, 'package.json'), `${JSON.stringify(pkg, null, 2)}\n`, 'utf8');
+
+  mkdirSync(join(dir, 'tools'), { recursive: true });
+  cpSync(join(ROOT, 'tools', 'ci-alignment.mjs'), join(dir, 'tools', 'ci-alignment.mjs'));
+  cpSync(join(ROOT, 'tools', 'notices.mjs'), join(dir, 'tools', 'notices.mjs'));
+  if (extraTool !== undefined) {
+    writeFileSync(join(dir, extraTool.path), extraTool.body, 'utf8');
+  }
+  return dir;
+}
+
+/**
+ * 在只读模式沙箱里跑一次。
+ *
+ * @param {{ command: string, extraTool?: { path: string, body: string } }} options 传给 `readOnlySandbox`。
+ * @returns {{ code: number, out: string }} 结果。
+ */
+function checkReadOnly(options) {
+  const dir = readOnlySandbox(options);
+  try {
+    const r = spawnSync(process.execPath, ['tools/ci-alignment.mjs'], {
+      cwd: dir, encoding: 'utf8', windowsHide: true
+    });
+    return { code: r.status ?? -1, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test('ci-align: 检查链里裸跑带 --check 的工具必须变红（实测会写盘）', () => {
+  /* 真实缺陷形态：2026-10-23 我裸跑 16 个工具做体检，
+     `tools/bump-version.mjs` 把版本号从 0.8.0 改成 0.8.1、
+     `tools/sync-upstream.mjs` 重写了 upstream.json 的时间戳。
+     换成 notices 就是「检查」顺手重写 THIRD_PARTY_NOTICES.md，而它照样 exit 0。 */
+  const red = checkReadOnly({ command: 'node tools/notices.mjs' });
+  assert.equal(red.code, 1, `裸跑必须判红：\n${red.out}`);
+  assert.match(red.out, /漏了只读模式/);
+  assert.match(red.out, /tools\/notices\.mjs/);
+
+  const pass = checkReadOnly({ command: 'node tools/notices.mjs --check' });
+  assert.equal(pass.code, 0, `带上 --check 必须通过：\n${pass.out}`);
+  assert.match(pass.out, /只读模式/);
+});
+
+test('ci-align: 注释里提到 --check 不算「有这个模式」（否则判据会把自己判红）', () => {
+  /* 实测踩过：第一版判据只找「源码里出现过 --check 这个字符串」，
+     于是 `tools/eol.mjs` 的注释（在讲上游 `git diff --cached --check`）、
+     `tools/syntax-check.mjs`（`['--check', file]` 是给 eslint 的）、
+     以及本判据自己的说明文字全部被当成「有只读模式」，真仓库当场红三处。
+     修法是剥注释 + 只认 `.includes(...)` / `=== ...` 这种**解析**形态。 */
+  const pass = checkReadOnly({
+    command: 'node tools/fake-tool.mjs',
+    extraTool: {
+      path: 'tools/fake-tool.mjs',
+      body: [
+        '// 用法里可以写 --check 来只读（这条是注释，不是解析）',
+        '/* 这里也只是说明：--check */',
+        "const argv = process.argv.slice(2);",
+        'void argv;'
+      ].join('\n')
+    }
+  });
+  assert.equal(pass.code, 0, `注释里的 --check 不构成只读模式：\n${pass.out}`);
+
+  /* 阳性对照：同一份源码里把解析补上，就必须判红 —— 证明上面那条绿不是「判据整个没跑」。 */
+  const red = checkReadOnly({
+    command: 'node tools/fake-tool.mjs',
+    extraTool: {
+      path: 'tools/fake-tool.mjs',
+      body: [
+        '// 用法里可以写 --check 来只读',
+        "const argv = process.argv.slice(2);",
+        "if (argv.includes('--check')) { /* 只读 */ }"
+      ].join('\n')
+    }
+  });
+  assert.equal(red.code, 1, `真的解析了 --check 就必须判红：\n${red.out}`);
+  assert.match(red.out, /fake-tool\.mjs/);
+});
+
+test('ci-align: `!== \'--check\'` 是排除这个参数，不算「有只读模式」', () => {
+  /* 收紧方向：`argv.filter((a) => a !== '--check')` 恰恰说明这个工具**不支持**只读模式，
+     把它认成「有只读模式」会给裸跑的命令行判红 —— 那是假红。 */
+  const pass = checkReadOnly({
+    command: 'node tools/filter-tool.mjs',
+    extraTool: {
+      path: 'tools/filter-tool.mjs',
+      body: [
+        'const argv = process.argv.slice(2);',
+        "const live = argv.filter((a) => a !== '--check');",
+        'void live;'
+      ].join('\n')
+    }
+  });
+  assert.equal(pass.code, 0, `排除写法不许被判成只读模式：\n${pass.out}`);
+});

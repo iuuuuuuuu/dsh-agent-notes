@@ -135,6 +135,10 @@ export const GATES = [
   {
     gate: 'eol',
     label: '结尾换行',
+    /* 语料直接来自 `listTrackedFiles()`：只有「这个目录不是 git 仓库」才退回
+       文件系统遍历（夹具），其余失败都返回空列表 —— 本条判据会把它算成
+       「不接受任何东西可验」，正是要的失败关闭。（早先这里传过一个
+       `allowNonGit` 开关，等于把「要不要失败关闭」交给调用方，已删。） */
     collect: (root) => listTrackedFiles(root).files,
     /* 结尾换行判的是**入库内容**，所以语料是全部 tracked 文件 ——
        含 `.githooks/`、`.gitignore`、`LICENSE` 这些无扩展名文本。 */

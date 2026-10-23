@@ -21,7 +21,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -110,7 +110,11 @@ test('sync-upstream: withWrites 透出返回值、异常照常冒泡，且退出
      「开着时能写」，闸门恒关也能全绿 —— 那是另一种假绿。 */
   const root = tempRoot(t);
   withWrites('写两份记录', () => writeManifest({ files: { 'x.md': 'sha256:00' } }, 'refs/heads/written', root));
-  assert.equal(existsSync(join(root, 'tools', 'upstream-manifest.json')), true, '窗口内必须落盘');
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(root, 'tools', 'upstream-manifest.json'), 'utf8')),
+    { files: { 'x.md': 'sha256:00' } },
+    '窗口内必须写入实际清单内容，预置文件存在不代表写入成功'
+  );
   assert.equal(
     JSON.parse(readFileSync(join(root, 'upstream.json'), 'utf8')).ref,
     'refs/heads/written',
@@ -137,7 +141,11 @@ test('sync-upstream: 嵌套 withWrites 结束后外层仍保有写入许可（�
     'refs/heads/outer',
     '外层窗口内的写入必须落地 —— 内层退出不许关掉外层的许可'
   );
-  assert.equal(existsSync(join(root, 'tools', 'upstream-manifest.json')), true, '外层写入必须落盘');
+  assert.deepEqual(
+    JSON.parse(readFileSync(join(root, 'tools', 'upstream-manifest.json'), 'utf8')),
+    { files: { outer: 'sha256:02' } },
+    '外层必须覆盖内层清单内容，预置文件存在不代表写入成功'
+  );
   /* 全部退出后仍然关着：可重入不等于常开。 */
   assert.throws(
     () => writeManifest({ files: {} }, 'refs/heads/after', root),

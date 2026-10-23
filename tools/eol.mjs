@@ -111,13 +111,26 @@ export function checkTrailingNewline(buffer) {
  * 用 `git ls-files` 而不是遍历文件系统：门禁要判的是**入库内容**的形态，
  * 而不是工作区里一切东西的形态 —— 未跟踪的草稿不该让门禁发红。
  *
- * Git 不可用时（本仓库只在 git 仓库里跑，但测试夹具可能不是）退回文件系统
- * 遍历：这时扫到的是工作区内容，判据仍成立，只是不再区分「已跟踪」。
+ * 只有「这里不是 git 仓库」这一条明确信号才退回文件系统遍历（夹具需要）；
+ * 索引为空、索引损坏、权限不足等一律返回 `git-empty` / `git-error` 由调用方判红 ——
+ * 没有开关可以关掉这个失败关闭。
  *
  * @param {string} root 仓库根。
- * @returns {{ files: string[], source: 'git'|'fs' }} 文件列表与来源。
+ * @returns {{ files: string[], source: 'git'|'fs'|'git-empty'|'git-error', gitError?: string }}
+ *   文件列表与来源。`fs` 只在该目录不是 git 仓库时出现（夹具）；
+ *   `git-empty` / `git-error` 表示取不到语料，须判红。
  */
 export function listTrackedFiles(root) {
+  /* 只有一条**明确**的信号允许退回文件系统遍历：git 说「这里不是 git 仓库」。
+     那是可判定的、稳定的、夹具才有的状态（临时目录本来就没有 .git）。
+     其余任何失败（索引损坏、权限、git 半死、超时）一律 `git-error` 让调用方判红。
+     口径改过两次，记在这里免得再改回去：
+     ① 最初 catch 里无条件退到文件系统遍历，理由是「夹具可能不是仓库」——
+        那个理由只对夹具成立，对真仓库是假绿：git 坏了门禁就换一份语料（工作区内容，
+        含未跟踪文件）继续报「通过」。
+     ② 中间版本加了个 `allowNonGit` 开关兜住夹具，但开关是**调用方传的**：
+        哪天有人为了「让它过」在真门禁上加了这一行，失败关闭就又没了。
+        于是改成按 git 的报错判定 —— 没有任何开关可以关掉失败关闭。 */
   try {
     const out = execFileSync('git', ['ls-files', '-z'], {
       cwd: root,
@@ -126,13 +139,19 @@ export function listTrackedFiles(root) {
       maxBuffer: 64 * 1024 * 1024,
       /* 吞掉 git 自己的报错：不是仓库时它会往 stderr 写「fatal: not a git
          repository」，而那道输出在门禁结果之外 —— 会被读成「出了什么
-         意外」。这里已经用 catch 退回文件系统遍历，stderr 不该外泄。 */
+         意外」。错误信息由返回值带走，由调用方决定是判红还是允许。 */
       stdio: ['ignore', 'pipe', 'pipe']
     });
     const files = out.split('\0').filter((name) => name !== '');
     if (files.length > 0) return { files: files.map((f) => f.split('\\').join('/')), source: 'git' };
-  } catch {
-    /* 没有 git 或不是仓库：退回文件系统遍历。 */
+    /* 索引为空：真仓库里这是异常（git ls-files 一条都没有），不许当「0 个文件通过」。 */
+    return { files: [], source: 'git-empty' };
+  } catch (error) {
+    const detail = `${error?.stderr ?? ''}${error?.message ?? ''}`.trim();
+    if (!/not a git repository/i.test(detail)) {
+      return { files: [], source: 'git-error', gitError: detail === '' ? '未知错误' : detail };
+    }
+    /* 落到下面：不是 git 仓库 ⇒ 用文件系统遍历（夹具/导出目录）。 */
   }
 
   const files = [];
@@ -167,9 +186,28 @@ export function isExempt(rel) {
  */
 export function verifyTrailingNewlines(options = {}) {
   const root = options.root ?? PACKAGE_ROOT;
-  const { files, source } = listTrackedFiles(root);
+  const { files, source, gitError } = listTrackedFiles(root);
   const errors = [];
   let checked = 0;
+
+  /* 取不到语料就是失败关闭，不许拿「扫到了 0 个文件」冒充通过。 */
+  if (source === 'git-error') {
+    return {
+      checked: 0,
+      source,
+      errors: [
+        `取不到已跟踪文件列表（git ls-files 失败）：${gitError ?? '未知错误'} —— `
+        + '拒绝改用工作区遍历，因为那会换掉语料并让这道门禁看起来仍然通过'
+      ]
+    };
+  }
+  if (source === 'git-empty') {
+    return {
+      checked: 0,
+      source,
+      errors: ['仓库里一个已跟踪文件都没有（git ls-files 为空）—— 空语料不得当绿']
+    };
+  }
 
   for (const rel of files) {
     if (isExempt(rel)) continue;

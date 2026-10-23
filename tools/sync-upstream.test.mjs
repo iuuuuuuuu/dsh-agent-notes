@@ -6,7 +6,8 @@
  * 另外验证 --check 零写入、上传清单可解析。
  */
 import { strict as assert } from 'node:assert';
-import { existsSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
@@ -32,6 +33,65 @@ function runSync(args) {
     timeout: 120_000
   });
   return { code: result.status ?? -1, out: `${result.stdout ?? ''}${result.stderr ?? ''}` };
+}
+
+/** 快照时跳过的目录：`.git` 与依赖目录不是仓库内容，`.probe` 是探针自己的地盘。 */
+const SNAPSHOT_SKIP = new Set(['.git', 'node_modules', '.probe']);
+
+/**
+ * 给整棵仓库做内容快照：相对路径 → 大小/mtime/内容摘要。
+ *
+ * ## 为什么不只盯着 manifest
+ *
+ * `--check` 的契约是**零写入**，但原来只有一句
+ * `assert.equal(after, before)` 盯着 `tools/upstream-manifest.json` 一个文件。
+ * 也就是说：`--check` 顺手写 vendored 技能、写 `upstream.json`、写临时状态文件，
+ * 原来的用例**全都看不见** —— 而这条契约正是我在决策笔记里自己写下「没有机制化
+ * 的验证，现有测试抓不到」的那一条。抓不到的原因不是没有断言，是**断言的范围太窄**。
+ *
+ * 摘要把 mtime 也算进去：写入相同字节仍然是写入（`--check` 不该碰盘）。
+ * 只跳过三个目录，其余**全量**进快照，不做后缀过滤 —— 收窄语料是假绿的常见来源。
+ *
+ * @param {string} root 仓库根。
+ * @returns {Record<string, string>} 相对路径（正斜杠）→ `size:mtimeMs:sha1`。
+ */
+function snapshotTree(root) {
+  /** @type {Record<string, string>} */
+  const files = {};
+  const walk = (dir) => {
+    for (const entry of readdirSync(join(root, dir), { withFileTypes: true })) {
+      const rel = dir === '' ? entry.name : `${dir}/${entry.name}`;
+      if (entry.isDirectory()) {
+        if (!SNAPSHOT_SKIP.has(entry.name)) walk(rel);
+        continue;
+      }
+      const abs = join(root, rel);
+      const stat = statSync(abs);
+      const digest = createHash('sha1').update(readFileSync(abs)).digest('hex');
+      files[rel] = `${stat.size}:${Math.round(stat.mtimeMs)}:${digest}`;
+    }
+  };
+  walk('');
+  return files;
+}
+
+/**
+ * 比较两份快照，返回人类可读的差异行（新增/消失/内容或 mtime 变化）。
+ *
+ * @param {Record<string, string>} before 前。
+ * @param {Record<string, string>} after 后。
+ * @returns {string[]} 差异行；空数组表示一致。
+ */
+function diffSnapshots(before, after) {
+  const lines = [];
+  for (const path of Object.keys(after)) {
+    if (!(path in before)) lines.push(`新增 ${path}`);
+    else if (before[path] !== after[path]) lines.push(`变化 ${path}（${before[path]} → ${after[path]}）`);
+  }
+  for (const path of Object.keys(before)) {
+    if (!(path in after)) lines.push(`消失 ${path}`);
+  }
+  return lines;
 }
 
 /**
@@ -117,19 +177,32 @@ test('同步清单确实存在且覆盖全部上游文件', { timeout: 180_000 }
 
 test('枚举失败必须报错，不得伪装成「无需合并」', { timeout: 120_000 }, () => {
   // 用一个不存在的 ref，任何清单请求都会失败；工具必须非零退出并说明原因。
+  // 失败原因有两种**都合法**：HTTP 4xx（ref/契约问题，exit 1）与网络不可达
+  // （环境问题，exit 2）。断言同时接受两种，只拒绝「把失败说成没问题」——
+  // 原来只匹配 /失败|找不到目录|枚举/，断网时这条会红而工具行为是对的（假红）。
+  // 断网那次是实测踩到的：把 HTTPS_PROXY 指向死端口即可复现。
   const { code, out } = runSync(['--check', '--ref', 'refs-does-not-exist-zzz']);
-  assert.notEqual(code, 0, '清单拉取失败时必须以非零退出');
-  assert.match(out, /失败|找不到目录|枚举/, `必须给出可读原因，实际:\n${out}`);
-  assert.doesNotMatch(out, /无需合并/, '失败时绝不能报告「无需合并」');
+  assert.ok(code === 1 || code === 2, `失败时必须按约定退 1 或 2，实际 ${code}`);
+  /* 只认两种**具体原因句**，不认「失败」这种宽词：把枚举失败改成静默返回空之后，
+     工具会换一句「上游 …assets 为空」的失败信息（exit 1、也带 ref），宽词照样匹配 ——
+     实测过，宽词版本对这个变异 5/5 全绿，等于没测。 */
+  assert.match(out, /清单拉取失败|无法校验上游/, `必须报出失败的具体原因，实际:\n${out}`);
+  assert.match(out, /refs-does-not-exist-zzz/, `失败原因要能定位到那次请求，实际:\n${out}`);
+  assert.doesNotMatch(out, /无需合并|已是最新|一致，无漂移/, '失败时绝不能报告「无需合并」');
 });
 
-test('--check 不写任何文件', { timeout: 180_000 }, () => {
+test('--check 不写任何文件（全树快照，不只盯 manifest）', { timeout: 180_000 }, () => {
   const manifest = join(PACKAGE_ROOT, 'tools', 'upstream-manifest.json');
-  const before = existsSync(manifest) ? readFileSync(manifest, 'utf8') : undefined;
+  const beforeManifest = existsSync(manifest) ? readFileSync(manifest, 'utf8') : undefined;
+  const before = snapshotTree(PACKAGE_ROOT);
   const { code, out } = runSync(['--check']);
-  const after = existsSync(manifest) ? readFileSync(manifest, 'utf8') : undefined;
+  const after = snapshotTree(PACKAGE_ROOT);
+  const afterManifest = existsSync(manifest) ? readFileSync(manifest, 'utf8') : undefined;
+
   assertCheckPassed(code, out, '--check 不得改动 manifest');
-  assert.equal(after, before, '--check 不得改动 manifest');
+  assert.equal(afterManifest, beforeManifest, '--check 不得改动 manifest');
+  const changed = diffSnapshots(before, after);
+  assert.deepEqual(changed, [], `--check 是只读检查，盘上不许有任何变化，实际：\n${changed.join('\n')}`);
 });
 
 test('上游清单与元数据可解析且记录了 ref', () => {

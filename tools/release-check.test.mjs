@@ -131,6 +131,20 @@ test('release: package-lock.json 的版本必须与 package.json 一致', () => 
     `版本一致时不得报 lock 错，实际：${inSync.errors.join('; ')}`);
 });
 
+test('release: lock 没有顶层 version 字段时必须报错（缺失不等于恰好不相等）', () => {
+  /* 这条判据长期没有用例：变异普查把「缺少顶层 version 字段」那句 `errors.push`
+     换成 `void 0` 之后，整个用例文件仍然全绿 —— 也就是说那条分支此前是纯装饰。
+     为什么不能只靠「版本不相等」那条判据兜住：`lock.version === undefined`
+     与 `pkg.version` 比较当然也不相等，但报出来的话术是「版本是 undefined」，
+     而用户真正的问题是「这个 lock 文件根本不是 npm 写的 2/3 版格式」，
+     修法不同（重新生成 lock，而不是改一个数字）。 */
+  const missing = withEdits({ pkg: pkgWith('0.8.0'), lock: { lockfileVersion: 3 } });
+  assert.ok(
+    missing.errors.some((e) => /package-lock\.json/.test(e) && /缺少顶层 version 字段/.test(e)),
+    `缺 version 字段必须明确指出是缺字段，实际：${missing.errors.join('; ')}`
+  );
+});
+
 test('release: package-lock.json 读不出来时必须报错而不是放过', () => {
   /* 判不了就不能算通过 —— 门禁的通用纪律：脚本缺失、超时算失败。 */
   const result = verifyRelease({

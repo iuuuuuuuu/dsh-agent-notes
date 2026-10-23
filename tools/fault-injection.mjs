@@ -15,6 +15,34 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
+
+/* 递归收测试文件时跳过的目录：不入库的、或不属于本插件内容的。
+   `skills` 是上游 vendored 副本（有自己的哈希门禁，手改会被拦），
+   它的测试不该进本仓的登记账。 */
+const TEST_SCAN_SKIP = new Set(['node_modules', '.git', '.probe', 'dist', 'build', 'coverage', 'skills']);
+
+/**
+ * 从仓库根递归找出所有 `*.test.mjs`（仓库相对路径、正斜杠）。
+ *
+ * @param {string} root 仓库根。
+ * @returns {string[]} 排序后的仓库相对路径。
+ */
+function listTestFiles(root) {
+  const found = [];
+  const walk = (rel) => {
+    const dir = rel === '' ? root : join(root, rel);
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (TEST_SCAN_SKIP.has(entry.name)) continue;
+        walk(rel === '' ? entry.name : `${rel}/${entry.name}`);
+      } else if (entry.name.endsWith('.test.mjs')) {
+        found.push(rel === '' ? entry.name : `${rel}/${entry.name}`);
+      }
+    }
+  };
+  walk('');
+  return found.sort();
+}
 const SCRIPTS = join(PACKAGE_ROOT, 'skills', 'agent-notes', 'scripts');
 const NODE = process.execPath;
 
@@ -64,6 +92,7 @@ const FAULT_SUITES = [
   ['看板数据聚合', 'board.test.mjs'],
   ['看板窄屏抽屉与归档卡补丁', 'board-responsive.test.mjs'],
   ['看板补丁源码语法体检（不 import 模块）', 'board-response-source.test.mjs'],
+  ['看板补丁的选择器对齐', 'board-selector-alignment.test.mjs'],
   ['看板正文的表格渲染补丁', 'board-markdown.test.mjs'],
   ['浏览器可执行文件探测', 'find-browser.test.mjs'],
   ['真 Cordis 上下文集成', 'integration.test.mjs'],
@@ -423,13 +452,23 @@ try {
      本仓库真实发生过一次 —— 新增 `archive-baseline.test.mjs` 与
      `non-node-project.test.mjs` 后忘了登记，总门禁照样全绿。
      正向检查（登记→文件存在）对「文件存在但没登记」完全无感，
-     所以这里按磁盘对账：多出来的测试文件必须显式登记，否则红。 */
-  const declared = new Set(FAULT_SUITES.map(([, file]) => file));
-  const onDisk = readdirSync(join(PACKAGE_ROOT, 'tools')).filter((name) => name.endsWith('.test.mjs'));
-  const undeclared = onDisk.filter((name) => !declared.has(name)).sort();
+     所以这里按磁盘对账：多出来的测试文件必须显式登记，否则红。
+
+     对账范围**不再写死 `tools/`**：早先只 `readdirSync('tools')`，于是
+     「把测试放到 `lib/` 或 `test/`」就等于绕开整本账 —— 那道门禁照样报
+     「磁盘上 N 个测试文件全部登记，无遗漏」，而真正漏的那个根本没进视野。
+     现在从仓库根递归收 `*.test.mjs`，只跳过不入库或不属于本插件的目录
+     （`node_modules` / `.git` / `.probe` / 构建产物 / vendored `skills/`）。
+     声明表里可以写 `tools/x.test.mjs` 这样的仓库相对路径；只写文件名时
+     按 `tools/` 解析（历史条目都是这种形态，不必批量改）。 */
+  const declared = new Set(
+    FAULT_SUITES.map(([, file]) => (file.includes('/') ? file : `tools/${file}`))
+  );
+  const onDisk = listTestFiles(PACKAGE_ROOT);
+  const undeclared = onDisk.filter((rel) => !declared.has(rel)).sort();
   if (undeclared.length > 0) {
-    for (const name of undeclared) {
-      console.error(`  ✖ tools/${name} 没在上面登记 —— 它的故障注入不会有人知道，请加一行标签`);
+    for (const rel of undeclared) {
+      console.error(`  ✖ ${rel} 没在上面登记 —— 它的故障注入不会有人知道，请加一行标签`);
       failures += 1;
     }
   } else {

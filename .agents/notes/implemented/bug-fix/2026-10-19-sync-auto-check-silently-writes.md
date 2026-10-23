@@ -113,6 +113,7 @@ const next = { ...previous, ...managed };
 
 - **让 `--auto` 与 `--check` 互斥（同时传就报错）** — 语义上更干脆，用户必须选一个。否掉是因为它把一个「静默做错事」的问题换成了「显式报错」，而后者会打断 `sync:check` 这类自动化调用（脚本里常顺带带几个参数）。保守优先级（`--check` 赢）不需要调用方改任何东西。
 - **把 `--check` 的「零写入」做成硬断言（发现任何写盘就抛错）** — 更彻底，能挡住未来新加的写入路径。当年判「**这是个好主意，但本篇不做** —— 它要包一层文件系统代理，改动面比修 bug 大得多」，于是只记在重访信号里。**2026-10-23 已兑现**，且没用文件系统代理：改成「写盘闸门默认关闭 + `withWrites()` 窄窗口」，三处写盘各包一行、`writeManifest()` 第一行自查，见 [`./2026-10-23-sync-check-zero-write-needs-an-interlock.md`](./2026-10-23-sync-check-zero-write-needs-an-interlock.md)。
+- **用 CLI 全树快照观察额外写入**：不引入文件系统代理，直接比较执行前后的相对路径、大小、mtime 和 sha1。2026-10-23 已落地，与上述生产写盘闸门互补：闸门限制受管写入，快照检查实际文件变化；两者均不等同于拦截全部文件系统操作，快照排除项与观察时段的边界见下文。
 - **把 `upstream.json` 拆成两个文件（机器写的 + 人写的）** — 从结构上消除「谁该写谁」的问题。否掉是因为这个文件只有 6 个字段，拆分带来的「多一个文件要对齐」比「合并时保留字段」更麻烦。而 `{...previous, ...managed}` 已经足够。
 - **不导出 `parseArgs`，改成让测试用子进程跑 CLI** — 不用改被测代码。否掉是因为那样测不了「缺值」「未知参数」这类**抛错路径**（子进程只能看退出码与 stderr，看不到内部状态），而且每条用例都要起一个 Node 进程，慢一个量级。
 
@@ -124,6 +125,7 @@ const next = { ...previous, ...managed };
 - **代价与已知上限**：本篇的 `--check` 优先级只覆盖 `--auto` 这一条路径。若将来新增别的隐含 `--yes` 的开关，仍需重复这个判断。这是「分散的优先级规则」的固有代价 —— 记在重访信号里。
 - ~~**代价与已知上限**：`--check` 的「零写入」目前靠**分支顺序**与**新加的条件判断**共同保证~~ —— **2026-10-23 已补机制**：写盘闸门默认关闭，三处写盘各包 `withWrites()` 窄窗口，`writeManifest()` 第一行自查；`tools/sync-write-interlock.test.mjs` 三条用例 + 两次真变异。见 [`./2026-10-23-sync-check-zero-write-needs-an-interlock.md`](./2026-10-23-sync-check-zero-write-needs-an-interlock.md)。
 - ~~**代价与已知上限**：给脚本加「仅直接执行」守卫引入了新的风险面 —— 若守卫判定写错，脚本会**什么都不做并静默退出 0**~~ —— **2026-10-23 已补进 `npm test`**：`tools/sync-write-interlock.test.mjs` 里两条子进程用例真跑 CLI —— `--help` 必须 exit 0 且 stdout 含「用法:」与「--check」（守卫判定写错就什么都不打印、静默 exit 0，这条会红）；`--branch` 缺值必须 exit 1 且 stderr 含「--branch 需要一个值」（证明主流程真的被执行到，而不是守卫把一切吞掉）。
+- **代价与已知上限**：`--check` 的「零写入」原来靠**分支顺序**与**条件判断**保证，没有机制化验证；**2026-10-23 起有判据了**：`tools/sync-upstream.test.mjs` 的「--check 不写任何文件（全树快照，不只盯 manifest）」对整棵仓库做快照比对。**当时为什么非补不可**：原来只有一句 `assert.equal(after, before)` 盯着 `tools/upstream-manifest.json` 一个文件，`--check` 顺手写 vendored 技能、写 `upstream.json`、写临时状态文件，那个用例**全都看不见** —— 抓不到的原因不是没有断言，是断言的范围太窄。**现在剩下的上限**：快照跳过 `.git`、`node_modules`、`.probe` 三处（前两处不是仓库内容，第三处是探针自己的地盘），写进这三处的写入仍看不见；mtime 参与比较，所以「写入相同字节」也会被抓到，但**写盘发生在快照结束之后**（例如退出钩子）抓不到。
 - **重访信号**：若开始用别的工具写 `upstream.json`（例如某个 catalog 生成器），要重新确认字段归属 —— `{...previous, ...managed}` 只保证「sync-upstream 不抹掉别人的」，不保证「别人不抹掉 sync-upstream 的」。另一个信号：若 `--auto` 新增别的隐含写入开关，需要把优先级判断收敛成一处。
 
 ## Verification
@@ -140,6 +142,11 @@ B=$(sha256sum upstream.json)
 node tools/sync-upstream.mjs --auto --check; echo $?     # 期望：零写入、exit 0
 [ "$B" = "$(sha256sum upstream.json)" ] && echo 零写入
 ```
+
+零写入的全树判据（2026-10-23 补）已实测会红：把 `--check` 路径改成顺手写一个
+`.probe-mutant-write.txt`，用例 `--check 不写任何文件（全树快照，不只盯 manifest）`
+报 `新增 .probe-mutant-write.txt`（4 pass / 1 fail），还原后 5/5 绿。**同一个变异对
+只盯 manifest 的旧断言是全绿的** —— 这就是「断言范围太窄」的实测形态。
 
 故障注入（已实测，9/9 全部符合预期）：`--branch` / `--ref` 缺值时静默用默认值、
 未知参数被忽略、`--branch` 吃掉下一个开关当值、`--check` 隐含 `--yes`、

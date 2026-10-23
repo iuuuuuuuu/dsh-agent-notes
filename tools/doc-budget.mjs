@@ -117,8 +117,41 @@ for (const [file, limit] of Object.entries(budgets)) {
     rows.push({ file, actual: undefined, limit, status: 'missing' });
     continue;
   }
-  const actual = billableUnits(readFileSync(full, 'utf8'));
+  /* 目录不算文档。原先这里直接 `readFileSync(full)`，于是清单里写进一个目录名
+     （例如 `"tools": 100000`）会抛未捕获的 `EISDIR`：退出码 1、栈打到屏幕上、
+     没有任何一句「你要改什么」。那既不是通过也不是判红 —— 本仓库另一篇笔记
+     `2026-10-21-crash-is-not-a-red-gate.md` 记的正是这个形态：崩溃与「正常判红」
+     退出码相同，没人会去查。
+     判据改成显式读目录就红，消息说清「预算只能登记文件」。 */
+  let text;
+  try {
+    text = readFileSync(full, 'utf8');
+  } catch (error) {
+    const code = error?.code;
+    const reason = code === 'EISDIR'
+      ? '它是目录，预算只能登记文件（要么删掉这条，要么改成具体文件名）'
+      : `读不出来：${error instanceof Error ? error.message : String(error)}`;
+    rows.push({ file, actual: undefined, limit, status: 'unreadable', reason });
+    continue;
+  }
+  const actual = billableUnits(text);
   rows.push({ file, actual, limit, status: actual > limit ? 'over' : 'ok' });
+}
+
+/* 读不出来的条目**先判死**，放在 `--update` 与打印之前。
+   两处理由都是实测出来的：
+   ① `--update` 会跳过 `actual === undefined` 的行，于是目录键在 `--update` 下
+      静默 exit 0 —— 「不报错」和「修好了」外观一致，是最坏的一种绿。
+   ② 计数 `over` 是 `status !== 'ok'`，读失败若混进去会报成「N 个文件超出预算」，
+      而它的修法是改清单、不是删内容。
+   所以这里单独出口，消息说清改什么。 */
+const unreadable = rows.filter((row) => row.status === 'unreadable');
+if (unreadable.length > 0) {
+  for (const row of unreadable) console.error(`  ✖ ${row.file} — ${row.reason}`);
+  console.error('');
+  console.error(`✖ ${unreadable.length} 条预算登记无法当作文件读取，本次检查无效（--update 也不会跳过它）。`);
+  console.error('预算清单只能登记**文件**；登记目录、或指向读不了的东西，都判失败而不是跳过。');
+  process.exit(1);
 }
 
 /* 单一真源：`over` 只从 rows 的 status 派生。
