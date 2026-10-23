@@ -64,6 +64,7 @@ const FAULT_SUITES = [
   ['看板数据聚合', 'board.test.mjs'],
   ['看板窄屏抽屉与归档卡补丁', 'board-responsive.test.mjs'],
   ['看板补丁源码语法体检（不 import 模块）', 'board-response-source.test.mjs'],
+  ['看板补丁的选择器对齐', 'board-selector-alignment.test.mjs'],
   ['看板正文的表格渲染补丁', 'board-markdown.test.mjs'],
   ['浏览器可执行文件探测', 'find-browser.test.mjs'],
   ['真 Cordis 上下文集成', 'integration.test.mjs'],
