@@ -205,3 +205,21 @@ test('corpus: CLI 在语料被收窄时非零退出（真跑子进程）', () =>
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('corpus: 语料为空必须红（空集合不得当绿）', () => {
+  /* 判别力缺口：这条守卫原来**没有任何用例**。把 `errors.push('语料为空')` 那行
+     换成 `void 0` 之后，`continue` 仍然跳过区域对账与数量下限，于是整份
+     `errors` 为空、门禁照样绿 —— 一轮变异普查里它是唯一存活的那个。 */
+  const dir = sandbox({});
+  try {
+    const result = checkCorpusFloor({ root: dir, manifest: LOOSE });
+    assert.equal(result.checked, GATES.length);
+    assert.equal(
+      result.errors.filter((e) => e.includes('语料为空')).length,
+      GATES.length,
+      `每道门禁都要报「语料为空」：\n${result.errors.join('\n')}`
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
