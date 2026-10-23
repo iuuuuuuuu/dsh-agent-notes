@@ -619,9 +619,15 @@ if (invokedDirectly) {
       console.error(`无法校验上游: ${message}`);
       console.error('这是**环境问题**（网络不可用或被限流），不是「上游有差异」。');
       console.error('退出码 2 = 无法进行（本次没有完成校验）；上游真有差异时退出码是 1。');
-      process.exit(2);
+      process.exitCode = 2;
+      return;
     }
     console.error(`合并失败: ${message}`);
-    process.exit(1);
+    /* 这里**不能用 process.exit()**：线上实测过（Node 22.19 + Windows 11），
+       在「HTTP 4xx，响应体还没读」之后立刻 process.exit 会撞 libuv 断言
+       `!(handle->flags & UV_HANDLE_CLOSING)`（async.c:76），退出码变成 127。
+       127 既不是「检查失败」也不是「无法进行」，还会把调用方吓成「工具崩了」。
+       设 exitCode 让事件循环自然收干，退出码就是约定的 1。 */
+    process.exitCode = 1;
   });
 }
