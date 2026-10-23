@@ -111,24 +111,26 @@ export function checkTrailingNewline(buffer) {
  * 用 `git ls-files` 而不是遍历文件系统：门禁要判的是**入库内容**的形态，
  * 而不是工作区里一切东西的形态 —— 未跟踪的草稿不该让门禁发红。
  *
- * Git 不可用或索引为空时**不自动降级**：带 `allowNonGit` 才退回文件系统遍历
- * （只给测试夹具用），否则返回 `git-empty` / `git-error` 让调用方判红。
+ * 只有「这里不是 git 仓库」这一条明确信号才退回文件系统遍历（夹具需要）；
+ * 索引为空、索引损坏、权限不足等一律返回 `git-empty` / `git-error` 由调用方判红 ——
+ * 没有开关可以关掉这个失败关闭。
  *
  * @param {string} root 仓库根。
- * @param {{ allowNonGit?: boolean }} [options] 仅测试夹具传 `allowNonGit: true`。
  * @returns {{ files: string[], source: 'git'|'fs'|'git-empty'|'git-error', gitError?: string }}
- *   文件列表与来源；`git-empty` / `git-error` 表示取不到语料，须判红。
+ *   文件列表与来源。`fs` 只在该目录不是 git 仓库时出现（夹具）；
+ *   `git-empty` / `git-error` 表示取不到语料，须判红。
  */
-export function listTrackedFiles(root, options = {}) {
-  /* `allowNonGit` 只给测试夹具用：临时目录不是 git 仓库，没有已跟踪文件的概念。
-     真实门禁（CLI、以及 corpus-floor 在真仓库上跑）**不带**这个开关，
-     于是 git 出错/索引为空时返回 `source: 'git-error' | 'git-empty'`，
-     由调用方判红 —— 不许静默改成扫工作区。
-     ⚠️ 这条口径改过一次：原先是 catch 里直接退到文件系统遍历，理由是「夹具可能不是仓库」。
-     但那个理由只对夹具成立，对真实仓库是**假绿**：git 坏了、索引空了、权限没了，
-     门禁会换一份语料继续报「通过」，而它扫的是工作区（含未跟踪文件），
-     既不是入库内容，也没人知道语料换了。 */
-  const allowNonGit = options.allowNonGit === true;
+export function listTrackedFiles(root) {
+  /* 只有一条**明确**的信号允许退回文件系统遍历：git 说「这里不是 git 仓库」。
+     那是可判定的、稳定的、夹具才有的状态（临时目录本来就没有 .git）。
+     其余任何失败（索引损坏、权限、git 半死、超时）一律 `git-error` 让调用方判红。
+     口径改过两次，记在这里免得再改回去：
+     ① 最初 catch 里无条件退到文件系统遍历，理由是「夹具可能不是仓库」——
+        那个理由只对夹具成立，对真仓库是假绿：git 坏了门禁就换一份语料（工作区内容，
+        含未跟踪文件）继续报「通过」。
+     ② 中间版本加了个 `allowNonGit` 开关兜住夹具，但开关是**调用方传的**：
+        哪天有人为了「让它过」在真门禁上加了这一行，失败关闭就又没了。
+        于是改成按 git 的报错判定 —— 没有任何开关可以关掉失败关闭。 */
   try {
     const out = execFileSync('git', ['ls-files', '-z'], {
       cwd: root,
@@ -142,12 +144,14 @@ export function listTrackedFiles(root, options = {}) {
     });
     const files = out.split('\0').filter((name) => name !== '');
     if (files.length > 0) return { files: files.map((f) => f.split('\\').join('/')), source: 'git' };
-    /* 索引为空：真仓库里这是异常（git ls-files 一条都没有），夹具里可能正常。 */
-    if (!allowNonGit) return { files: [], source: 'git-empty' };
+    /* 索引为空：真仓库里这是异常（git ls-files 一条都没有），不许当「0 个文件通过」。 */
+    return { files: [], source: 'git-empty' };
   } catch (error) {
-    if (!allowNonGit) {
-      return { files: [], source: 'git-error', gitError: `${error?.message ?? error}`.trim() };
+    const detail = `${error?.stderr ?? ''}${error?.message ?? ''}`.trim();
+    if (!/not a git repository/i.test(detail)) {
+      return { files: [], source: 'git-error', gitError: detail === '' ? '未知错误' : detail };
     }
+    /* 落到下面：不是 git 仓库 ⇒ 用文件系统遍历（夹具/导出目录）。 */
   }
 
   const files = [];
@@ -182,7 +186,7 @@ export function isExempt(rel) {
  */
 export function verifyTrailingNewlines(options = {}) {
   const root = options.root ?? PACKAGE_ROOT;
-  const { files, source, gitError } = listTrackedFiles(root, { allowNonGit: options.allowNonGit === true });
+  const { files, source, gitError } = listTrackedFiles(root);
   const errors = [];
   let checked = 0;
 

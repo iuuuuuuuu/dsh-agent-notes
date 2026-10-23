@@ -53,6 +53,18 @@ function gitSandbox(files) {
   return dir;
 }
 
+/**
+ * 把临时仓库的索引文件写坏，制造「`.git` 在但 git 命令报错」的真故障。
+ *
+ * 用它而不是「删掉 `.git`」：删掉 `.git` 会变成「不是 git 仓库」——
+ * 那正是可以合法退回文件系统遍历的情况，测不到失败关闭。
+ *
+ * @param {string} dir 临时仓库根。
+ */
+function corruptIndex(dir) {
+  writeFileSync(join(dir, '.git', 'index'), 'DIRC\x00\x00\x00\x00 这不是真的索引', 'utf8');
+}
+
 test('eol: 当前仓库所有文本文件都以恰好一个换行结尾', () => {
   const result = verifyTrailingNewlines({ root: ROOT });
   assert.deepEqual(result.errors, [], `不得有结尾形态问题：\n${result.errors.join('\n')}`);
@@ -161,27 +173,38 @@ test('eol: checkTrailingNewline 的判据逐条明确', () => {
   assert.equal(checkTrailingNewline(Buffer.alloc(0)).ok, true);
 });
 
-test('eol: git 取不到语料必须失败关闭（不许静默改用工作区遍历）', () => {
-  /* 失效形态（CodeRabbit 在 PR #30 上指出的正是这条，我最初只改了注释没改行为）：
-     原来的 catch 直接退到文件系统遍历 —— 在**真仓库**里 git 坏了、索引空了、
-     权限没了，门禁会换一份语料（工作区内容，含未跟踪文件）继续报「通过」。
-     那不是「降级」，是换了个问题去答。 */
+test('eol: 目录不是 git 仓库时退回文件系统遍历（夹具可用，不算失败）', () => {
+  /* 唯一的降级口子：git 明确说「这里不是 git 仓库」。临时目录本来就没有 .git，
+     要是这条不成立，所有夹具都得先 `git init` —— 那是让测试迁就实现。
+     （早先这里靠调用方传 `allowNonGit: true` 开关，等于把「要不要失败关闭」
+     交给调用方；现在按 git 的报错判定，开关已删。） */
   const dir = mkdtempSync(join(tmpdir(), 'an-eol-nogit-'));
   try {
     writeFileSync(join(dir, 'bad.md'), '没有结尾换行', 'utf8');
-    /* 不加 allowNonGit：非 git 目录 ⇒ 必须报「取不到语料」，而不是报 bad.md。 */
-    const strict = verifyTrailingNewlines({ root: dir });
-    assert.equal(strict.checked, 0, '取不到语料时不许声称检查过文件');
-    assert.equal(strict.source, 'git-error');
-    assert.match(strict.errors.join('\n'), /取不到已跟踪文件列表/);
-    assert.doesNotMatch(strict.errors.join('\n'), /bad\.md/, '不许改用工作区遍历后报文件级结果');
+    const result = verifyTrailingNewlines({ root: dir });
+    assert.equal(result.source, 'fs');
+    assert.equal(result.checked, 1);
+    assert.match(result.errors.join('\n'), /bad\.md/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
-    /* 阳性对照：显式允许非 git（夹具场景）时，同一个目录确实会被扫到 ——
-       证明上面那条「没报 bad.md」不是因为判据整个没跑。 */
-    const loose = verifyTrailingNewlines({ root: dir, allowNonGit: true });
-    assert.equal(loose.source, 'fs');
-    assert.equal(loose.checked, 1);
-    assert.match(loose.errors.join('\n'), /bad\.md/);
+test('eol: 真仓库里 git 坏了必须失败关闭（不许静默改用工作区遍历）', () => {
+  /* 失效形态（CodeRabbit 在 PR #30 上指出的正是这条，我最初只改了注释没改行为）：
+     原来的 catch 直接退到文件系统遍历 —— 在**真仓库**里 git 坏了、索引坏了、
+     权限没了，门禁会换一份语料（工作区内容，含未跟踪文件）继续报「通过」。
+     那不是「降级」，是换了个问题去答。
+     这里用「索引文件被写坏」制造真故障：`.git` 在（所以不是「不是仓库」那种可放行
+     的情况），但 `git ls-files` 会报错 —— 正是要区分开的两种状态。 */
+  const dir = gitSandbox({ 'bad.md': '没有结尾换行' });
+  try {
+    corruptIndex(dir);
+    const result = verifyTrailingNewlines({ root: dir });
+    assert.equal(result.checked, 0, '取不到语料时不许声称检查过文件');
+    assert.equal(result.source, 'git-error');
+    assert.match(result.errors.join('\n'), /取不到已跟踪文件列表/);
+    assert.doesNotMatch(result.errors.join('\n'), /bad\.md/, '不许改用工作区遍历后报文件级结果');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
