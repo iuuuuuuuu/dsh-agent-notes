@@ -75,6 +75,7 @@ const FAULT_SUITES = [
   ['开关投影与裸调用', 'projection.test.mjs'],
   ['技能自更新', 'self-update.test.mjs'],
   ['sync-upstream 退出码与清单', 'sync-upstream.test.mjs'],
+  ['同步脚本的写盘闸门与 CLI 入口', 'sync-write-interlock.test.mjs'],
   ['作用域 cwd 解析', 'target.test.mjs'],
   ['语义化版本递增', 'version.test.mjs']
 ];

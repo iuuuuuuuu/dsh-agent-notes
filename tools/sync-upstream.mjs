@@ -28,6 +28,55 @@ import { fileURLToPath } from 'node:url';
 
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
 
+/* ── 写盘闸门（默认关闭）─────────────────────────────────────────────────
+   2026-10-19 那篇同步笔记里留过一条**我自己写下的**上限：
+
+     「`--check` 的「零写入」目前靠**分支顺序**与**新加的条件判断**共同保证，
+      没有机制化的验证。若将来有人在 `--check` 路径里插入写盘，现有测试抓不到。」
+
+   这是真的：`--check` 的早退分支在上面、写盘在下面，两者的一致性靠人的注意力
+   维持。而它失效的症状最坏 ——「检查模式悄悄改了文件」，不报错、退出码还可能
+   是 0；上游副本被改掉之后，下一次 `verify-plugin` 的哈希比对才会莫名变红。
+
+   所以补一道**默认关闭**的闸门：写盘函数自己查闸门，只有被 `withWrites()`
+   包住时才允许落盘。任何在零写入路径上新插入的写盘会**抛错**，而不是静默写完
+   再说。这道属性在 `npm test` 里可验（见 tools/sync-write-interlock.test.mjs）。
+   ──────────────────────────────────────────────────────────────────────── */
+let writesAllowed = false;
+
+/**
+ * 断言当前处于允许写盘的窗口内。
+ *
+ * @param {string} what 正要做的事，用于报错定位。
+ * @returns {void}
+ */
+function assertWritesAllowed(what) {
+  if (writesAllowed) return;
+  throw new Error(
+    `✖ ${what}：当前处于零写入模式，却走到了写盘 —— 写盘必须发生在 withWrites() 打开的窗口内。`
+  );
+}
+
+/**
+ * 在「允许写盘」的窄窗口内执行一次副作用。
+ *
+ * 窗口只在 `fn` 执行期间打开，`finally` 里立刻关回去，所以「忘了关」这种
+ * 状态不存在；而任何**不在**窗口内的写盘都会被 `assertWritesAllowed` 拦下。
+ *
+ * @template T
+ * @param {string} what 这次写盘的用途（例如「记录同步 ref」）。
+ * @param {() => T} fn 真正写盘的动作。
+ * @returns {T} `fn` 的返回值。
+ */
+export function withWrites(what, fn) {
+  writesAllowed = true;
+  try {
+    return fn();
+  } finally {
+    writesAllowed = false;
+  }
+}
+
 /**
  * 用 `git ls-remote` 查上游分支的真实 HEAD。
  *
@@ -476,7 +525,8 @@ async function main() {
 
   if (changed.length === 0 && added.length === 0) {
     console.log('\n内置副本与上游一致，无需合并。');
-    if (!args.check) writeManifest(manifest, ref);
+    /* 闸门必须在**明确不是 --check** 时才打开：这一行就是「零写入」的唯一开关。 */
+    if (!args.check) withWrites('记录同步 ref', () => writeManifest(manifest, ref));
     return;
   }
 
@@ -494,11 +544,13 @@ async function main() {
   for (const entry of [...changed, ...added]) {
     const remote = await fetchUpstream(ref, entry.rel);
     const local = targetPath(entry.rel);
-    mkdirSync(dirname(local), { recursive: true });
-    writeFileSync(local, remote, 'utf8');
+    withWrites(`写入上游副本 ${entry.rel}`, () => {
+      mkdirSync(dirname(local), { recursive: true });
+      writeFileSync(local, remote, 'utf8');
+    });
     console.log(`  ✔ 已更新 ${entry.rel}`);
   }
-  writeManifest(manifest, ref);
+  withWrites('记录同步 ref', () => writeManifest(manifest, ref));
   console.log('\n合并完成。请重跑测试与故障注入确认门禁仍可信。');
 }
 
@@ -530,7 +582,10 @@ function readManifest() {
  * @param {any} manifest 逐文件摘要。
  * @param {string} ref 已同步的分支或 commit。
  */
-function writeManifest(manifest, ref) {
+export function writeManifest(manifest, ref) {
+  /* 闸门放在**第一行**：本函数一进来就写盘，任何调用方忘了包 withWrites()
+     都会在这里抛错，而不是先写坏 manifest 再说。 */
+  assertWritesAllowed('写 tools/upstream-manifest.json 与 upstream.json');
   const manifestFile = join(PACKAGE_ROOT, 'tools', 'upstream-manifest.json');
   mkdirSync(dirname(manifestFile), { recursive: true });
   writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
