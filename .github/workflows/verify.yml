@@ -180,6 +180,12 @@ jobs:
       - name: 发布清单
         run: npm run publish:layout
 
+      # 看板补丁的 CSS 选择器依赖上游 HTML 的类名。上游改一个类名，样式就
+      # **静默失效**：不报错、不让任何用例变红，只是窄屏布局悄悄退回竖排。
+      # 判据是「我们的选择器类名必须在 vendored 页面里真的存在」。
+      - name: 看板选择器对齐
+        run: npm run board:selectors
+
       - name: 双语文档结构
         run: npm run docs:bilingual
 
