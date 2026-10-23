@@ -124,6 +124,45 @@ test('只根层散落一个 .md：零篇笔记，不许当通过', async () => {
   }
 });
 
+for (const guide of ['AGENTS.md', 'CLAUDE.md']) {
+  test(`生命周期根层只有 ${guide}：说明文件不算笔记，零篇必须判红`, async () => {
+    const dir = bareRepo();
+    try {
+      const root = join(dir, '.agents', 'notes', 'implemented');
+      mkdirSync(root, { recursive: true });
+      writeFileSync(join(root, guide), '# 目录说明\n', 'utf8');
+      const result = await createNotesService({}, undefined).runAll({ cwd: dir });
+      assert.equal(result.passed, false, '说明文件不得绕过零篇检查');
+      assert.equal(result.noteCount, 0, '说明文件不得计入笔记数');
+      assert.equal(result.strayCount, 1, '未参与笔记校验的说明文件应单独计数');
+      for (const entry of result.results) {
+        assert.match(entry.reason, /NO_NOTES_YET/, `${entry.gate} 应说明是零篇`);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test(`合规笔记加生命周期根层 ${guide}：只计一篇且保留布局检查`, async () => {
+    const dir = goodRepo();
+    try {
+      writeFileSync(join(dir, '.agents', 'notes', 'implemented', guide), '# 目录说明\n', 'utf8');
+      const result = await createNotesService({}, undefined).runAll({ cwd: dir });
+      assert.equal(result.passed, false, '计数修复不得顺带放宽现有布局规则');
+      assert.equal(result.noteCount, 1, '说明文件不得虚增笔记数');
+      assert.equal(result.strayCount, 1);
+      for (const entry of result.results) {
+        assert.equal(entry.passed, false, `${entry.gate} 应保留布局检查`);
+        assert.equal(entry.exitCode, 1);
+        assert.match(entry.reason, /NOTES_LAYOUT/);
+        assert.ok(entry.stderr.includes(`implemented/${guide}`), '应指出具体的错层说明文件');
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
 test('正常通路：有合规笔记时仍然通过（别把正常场景一起杀掉）', async () => {
   const dir = goodRepo();
   try {
