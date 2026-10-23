@@ -341,7 +341,13 @@ test('notes-layout: 根层 *.md 被刻意放行（说明区，不是笔记区）
   }
 });
 
-test('notes-layout: 根层散落的 .md 在三道门禁下都不可见（残留缺口，如实钉住）', async () => {
+test('notes-layout: 根层散落的 .md 不算笔记，零篇不许当通过（契约已收紧）', async () => {
+  /* 这条原先钉的是「散落件在三道门禁下都不可见，门禁照样绿」—— 也就是说
+     它把「零篇冒充通过」当契约钉住了。2026-10-23 复查发现那正是假绿：
+     只放一个根层 `.md`，三道门禁全 `ok: 0 note(s)` 且 exit 0，`runAll` 报
+     `passed: true` —— 门禁**什么都没验**却说自己通过了。
+     现在契约是：散落件仍然看不见（vendored 只按 `{lifecycle}/{class}/` 枚举，
+     这仍是已记录的取舍），但它**不再算作笔记**，所以「零篇」判据拦得住它。 */
   const cwd = mkdtempSync(join(tmpdir(), 'notes-layout-stray-'));
   const root = join(cwd, '.agents', 'notes');
   mkdirSync(root, { recursive: true });
@@ -351,13 +357,10 @@ test('notes-layout: 根层散落的 .md 在三道门禁下都不可见（残留�
       const result = await runGate(gate, {
         cwd, notesRoot: root, env: { AGENT_NOTE_ROOT: root }
       });
-      assert.equal(result.passed, true, `${gate}：${JSON.stringify(result)}`);
+      assert.equal(result.passed, false, `${gate} 只有散落件时不许通过：${JSON.stringify(result)}`);
+      assert.match(result.reason ?? '', /NO_NOTES_YET/, `${gate} 应说明是零篇`);
+      assert.match(result.reason ?? '', /散落/, `${gate} 应点出散落件`);
     }
-    /* 门禁报告的笔记数是 0 —— 这篇 .md 完全没进语料。 */
-    const tree = await runGate('tree', {
-      cwd, notesRoot: root, env: { AGENT_NOTE_ROOT: root }
-    });
-    assert.match(tree.stdout ?? '', /ok: 0 note\(s\)/, JSON.stringify(tree));
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
