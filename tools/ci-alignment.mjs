@@ -62,21 +62,228 @@ const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const WORKFLOW_DIR = join(PACKAGE_ROOT, '.github', 'workflows');
 
 /**
+ * `continue-on-error` 的**值**：唯一允许字面量 `false`。
+ *
+ * 这里刻意用「默认拒绝」而不是「列举所有 true 的写法」。第一版列举了
+ * `true` / `True` / `"true"` / `${{ true }}`，CodeRabbit 接着就用
+ * `${{ true || false }}` 绕过去了 —— 表达式是图灵完整的，列举永远补不完；
+ * 而 `${{ matrix.experimental }}` 这类写法本质就是「有时把门禁降级」，
+ * 本仓库的政策是门禁不许被降级，任何非 `false` 的值都该让人来解释。
+ *
+ * 代价：将来真要写条件降级，得先改这条判据 —— 那正是要的摩擦。
+ */
+const CONTINUE_ON_ERROR_VALUE_OK = /^(?:false|"false"|'false')$/;
+
+/**
+ * 候选键：可以带引号，也可以是裸标识符，后面跟冒号。
+ *
+ * ## 为什么不再用「键名 + 冒号」的正则
+ *
+ * 那个写法被 CodeRabbit 连着指出五次缺口，每次都是同一个毛病的另一面：
+ * 它把「键在源码里长什么样」当成了证据，而 YAML 允许同一个键有很多长相 ——
+ * 位置（行首 / 列表项 / flow 映射）、引号（无 / `"…"` / `'…'`）、
+ * 以及**双引号里的转义**（`"continue\u002don-error"` 解码后就是同一个键）。
+ *
+ * 所以这里改成：先把候选键**解码**成真实键名，再与判据要的键名比字符串。
+ * 位置、引号、转义这三个维度因此一起消失。
+ *
+ * 只解码 double-quoted 的转义（YAML 规范里单引号只有 `''` 一种转义，
+ * 其余一律字面量）—— 这是有边界的，不是「再来一种正则」。
+ *
+ * ## 为什么逐行扫、而且要求前面是「键可以出现的位置」
+ *
+ * 第一版是全文扫的，`["'](?:…|\\|)*?["']` 里的引号跨行匹配。实测立刻炸：
+ * `verify.yml` 的 shell 片段里有 `if [ "$A" = "0" ]; then`，`$A` 前面那个
+ * `"` 与下一行的 `"` 被配成一对，**跨行吞掉十几行**，中间新插的
+ * `continue-on-error: true` 一起消失 —— 判据看不见它，用例红在「本该红」。
+ *
+ * 所以：引号必须同行闭合，且键前面只能是行首、空白、`{`、`,`、`-`
+ * （YAML 里键就是出现在这几种位置）。这不是在补第 N 种写法，而是把
+ * 「一个键从这里开始」这条语法约束显式写出来。
+ */
+const YAML_KEY_ENTRY =
+  /(?<=^|[\s{,\-])(?<q>["'])(?<quoted>(?:\\.|(?!\k<q>)[^\\\n])*?)\k<q>[ \t]*:|(?<=^|[\s{,\-])(?<bare>[A-Za-z_][A-Za-z0-9_.-]*)[ \t]*:/gu;
+
+/**
+ * 解码 YAML double-quoted 标量里的转义。
+ *
+ * 只实现「会产生不同键名」的那几种（`\uXXXX`、`\UXXXXXXXX`、`\xXX`）与常见字符转义。
+ *
+ * `\U`（8 位十六进制）必须一起处理：CodeRabbit 在 PR #31 上指出
+ * `"continue\U0000002don-error": true` 会被 YAML 解码成同一个键，而漏掉 `\U`
+ * 的结果是**放行** —— 与本门禁「默认拒绝」的方向相反，不能按「解不出来就原样保留」处理。
+ *
+ * 非法码点（代理区 / 超出 U+10FFFF）会让 `String.fromCodePoint` 抛 `RangeError`，
+ * 所以先判范围，超界的那个转义**原样保留**（键名对不上就是不放行，方向一致）。
+ *
+ * @param {string} raw 引号内的原文。
+ * @returns {string} 解码后的键名。
+ */
+function decodeYamlQuoted(raw) {
+  return raw.replace(
+    /\\(?:u([0-9A-Fa-f]{4})|U([0-9A-Fa-f]{8})|x([0-9A-Fa-f]{2})|([0nt"\\/]))/g,
+    (whole, u, bigU, x, simple) => {
+      if (u !== undefined) return String.fromCharCode(parseInt(u, 16));
+      if (bigU !== undefined) {
+        const codePoint = parseInt(bigU, 16);
+        if (codePoint > 0x10ffff || (codePoint >= 0xd800 && codePoint <= 0xdfff)) return whole;
+        return String.fromCodePoint(codePoint);
+      }
+      if (x !== undefined) return String.fromCharCode(parseInt(x, 16));
+      if (simple === 'n') return '\n';
+      if (simple === 't') return '\t';
+      return simple;
+    }
+  );
+}
+
+/**
+ * 切掉 YAML 的行尾注释（`#` 前面必须有空白，否则是值的一部分）。
+ *
+ * 不切会把合法写法判红：`cancel-in-progress: ${{ … == 'pull_request' }} # 仅取消 PR`
+ * 的取消条件没变，但值里带上注释就过不了允许值式（CodeRabbit 在 PR #31 上指出）。
+ *
+ * @param {string} value 冒号右边到行尾的原文。
+ * @returns {string} 去掉行尾注释后的值。
+ */
+function stripInlineComment(value) {
+  const at = value.search(/(?:^|[ \t])#/u);
+  if (at === -1) return value;
+  return value.slice(0, at);
+}
+
+/**
+ * 键前面那一行的前缀里，引号是不是还没闭合（= 这个「键」其实在字符串里）。
+ *
+ * 这是本文预测过的假红方向里最实的一个：`- run: echo "continue-on-error: x"`
+ * 里那个「键」在 shell 字符串里，压根不是 YAML 键，判红会让人被迫改写命令。
+ *
+ * 判据刻意做得浅：只数**本行**前缀里未转义的双引号与单引号，奇数就算在字符串里。
+ * 不追求正确解析 YAML（那是 Alternative ② 的路，零依赖约束下不做），只要能把
+ * 「明显的字符串内命中」排除掉；拿不准时仍然判红（方向不变）。
+ *
+ * @param {string} text 去掉整行注释后的全文。
+ * @param {number} index 匹配起点。
+ * @returns {boolean} 是否落在未闭合的引号里。
+ */
+function insideQuotedScalar(text, index) {
+  const lineStart = text.lastIndexOf('\n', index - 1) + 1;
+  const prefix = text.slice(lineStart, index);
+  const countUnescaped = (ch) => {
+    let count = 0;
+    for (let i = 0; i < prefix.length; i += 1) {
+      if (prefix[i] === '\\') { i += 1; continue; }
+      if (prefix[i] === ch) count += 1;
+    }
+    return count;
+  };
+  return countUnescaped('"') % 2 === 1 || countUnescaped("'") % 2 === 1;
+}
+
+/**
+ * 一个键的值里，**第一个完整的标量**。
+ *
+ * 两个来源：
+ * - 有 `${{ … }}` 时取到与之配对的 `}}`（表达式内部可以含空格与逗号，
+ *   `${{ github.event_name == 'pull_request' }}` 直接按空白切会切成三段）。
+ * - 否则取到第一个空白 / `,` / `}` 为止（flow 映射里后面的键从 `,` 起）。
+ *
+ * 为什么需要它：`cancel-in-progress` 的值原先只 `trim()`，于是 flow 映射里
+ * 合法写法 `{cancel-in-progress: ${{ … }}, group: x}` 因为尾巴带 `, group: x`
+ * 被判红 —— 也是本文预测过的假红方向。
+ *
+ * @param {string} raw 冒号右边到行尾（已剥行尾注释）。
+ * @returns {string} 第一个标量的原文。
+ */
+function firstScalarValue(raw) {
+  const value = raw.trim();
+  const open = value.indexOf('${{');
+  if (open !== -1) {
+    const close = value.indexOf('}}', open + 3);
+    if (close !== -1) return value.slice(open, close + 2);
+  }
+  return (value.split(/[\s,}#]/u)[0] ?? '');
+}
+
+/**
+ * 扫出全篇所有键的出现处（键名已解码，值取冒号右边到行尾）。
+ *
+ * 值用「从 match 结束处往后取到行尾」算出来，而不是被正则一起吃掉 ——
+ * 否则 flow 映射里后续的键（`{a: 1, cancel-in-progress: true}`）会被第一个
+ * 匹配连值带键一起吞掉，判据就永远看不到它。
+ *
+ * 落在字符串里的命中直接丢掉（见 `insideQuotedScalar`）。
+ *
+ * @param {string} yml workflow 原文。
+ * @returns {{key: string, value: string}[]} 键与值。
+ */
+function yamlKeyEntries(yml) {
+  const bare = stripComments(yml);
+  const entries = [];
+  for (const match of bare.matchAll(YAML_KEY_ENTRY)) {
+    if (insideQuotedScalar(bare, match.index)) continue;
+    const key = match.groups.quoted !== undefined
+      ? decodeYamlQuoted(match.groups.quoted)
+      : match.groups.bare;
+    const tail = bare.slice(match.index + match[0].length);
+    entries.push({ key, value: stripInlineComment(tail.slice(0, tail.search(/\n|$/u))) });
+  }
+  return entries;
+}
+
+/**
+ * 找出**所有**不合约定的 `continue-on-error` 出现处（空数组才是通过）。
+ *
+ * 键的写法一律不管（见 `yamlKeyEntries`），只看冒号右边的值是否字面量 `false`。
+ *
+ * 残留的误判方向：`run:` 里如果出现字符串字面量 `continue-on-error: 某个值`，
+ * 会被当成真的键而判红。偏向失败（要人来解释），与政策一致。
+ *
+ * @param {string} yml workflow 原文。
+ * @returns {string[]} 违规的「键: 值」原文。
+ */
+function offendingContinueOnError(yml) {
+  return yamlKeyEntries(yml)
+    .filter((entry) => entry.key === 'continue-on-error')
+    /* 值取第一个完整标量（`false,` / `${{ … }}` 都能正确截断）。 */
+    .map((entry) => ({ ...entry, value: firstScalarValue(entry.value) }))
+    .filter((entry) => !CONTINUE_ON_ERROR_VALUE_OK.test(entry.value))
+    .map((entry) => `continue-on-error: ${entry.value}`);
+}
+
+/**
+ * `cancel-in-progress` 唯一允许的**值**：等于比较收窄到 `pull_request`。
+ *
+ * 同样默认拒绝。只要求「这一行里出现 `github.event_name` 与 `pull_request`」
+ * 会放过语义相反的 `${{ github.event_name != 'pull_request' }}` —— 它在 push 上
+ * 才取消，正好取消掉要保住的那些运行；CodeRabbit 在 PR #30 上指出的就是这个。
+ * `&&` / `||` 组合不做语义推导：能自动判对的前提是有解析器，这里没有。
+ */
+const CANCEL_ONLY_FOR_PR =
+  /^\s*\$\{\{\s*github\.event_name\s*==\s*'pull_request'\s*\}\}\s*[,}]*$/;
+
+/**
+ * 取出所有 `cancel-in-progress` 的**值**（不含键、位置、引号与转义）。
+ *
+ * 用 `firstScalarValue` 而不是 `trim()`：flow 映射里合法写法后面还跟着别的键
+ * （`{cancel-in-progress: ${{ … }}, group: x}`），整行取值会因为尾巴带
+ * `, group: x` 被判红 —— 本文预测过的假红方向之一。
+ *
+ * @param {string} yml workflow 原文。
+ * @returns {string[]} 各处的第一个标量值。
+ */
+function cancelInProgressValues(yml) {
+  return yamlKeyEntries(yml)
+    .filter((entry) => entry.key === 'cancel-in-progress')
+    .map((entry) => firstScalarValue(entry.value));
+}
+
+
+/**
  * 豁免：这些步骤在 CI 里有**独立**的实现（判据不同），不算缺失。
  *
  * 键是本地链里的步骤名，值说明 CI 用什么替代。
  */
-/**
- * `continue-on-error: true` 的**任何**等价写法。
- *
- * 只认「裸小写 true 且行尾干净」会被三种常见写法绕过，而它们都会把一道门禁
- * 静默降级成警告：`True`、`"true"`、`true # 临时放行`（行尾注释）。
- * 这三种写法 CodeRabbit 在 PR #29 上真的指出来了 —— 白名单式「只匹配一种形态」
- * 在规则文件里天生会漏。
- */
-const CONTINUE_ON_ERROR_TRUE =
-  /^\s*continue-on-error:\s*['"]?(?:true|\$\{\{\s*true\s*\}\})['"]?\s*(?:#.*)?$/im;
-
 const CI_ALTERNATIVES = {
   'notes:coverage:last': 'CI 用 `--range "$github.event.before..HEAD"`（覆盖整个 push 的所有提交，更准）',
   'notes:supersession:last': '同上，用 event.before 范围',
@@ -202,14 +409,14 @@ const SAFETY = [
     key: 'no-continue-on-error',
     desc: '任何一步都不得带 continue-on-error: true（那等于把门禁静默降级成警告，'
       + 'CI 照样绿 —— 门禁存在但没人执行等于没有）',
-    test: (yml) => !CONTINUE_ON_ERROR_TRUE.test(stripComments(yml))
+    test: (yml) => offendingContinueOnError(yml).length === 0
   },
   {
     file: 'upstream-sync.yml',
     key: 'no-continue-on-error',
     desc: '任何一步都不得带 continue-on-error: true（同上；这个 workflow 有 '
       + 'contents: write 且会 push main/tag，静默降级一道门禁的代价更大）',
-    test: (yml) => !CONTINUE_ON_ERROR_TRUE.test(stripComments(yml))
+    test: (yml) => offendingContinueOnError(yml).length === 0
   },
   {
     file: 'verify.yml',
@@ -225,17 +432,12 @@ const SAFETY = [
       + '过没过门禁」的唯一凭据（branch protection 强制要求），被下一次运行'
       + '取消掉就等于发布没有验证记录。只能按事件收窄到 pull_request。',
     test: (yml) => {
-      const block = concurrencyBlock(yml);
-      if (block === null) return false;
-      /* 先去掉注释：注释里出现 `pull_request` 不该被当成「按事件判断」的证据。 */
-      const bare = stripComments(block);
-      /* 无条件 true（含 `True` / `"true"` / 行尾注释）明确禁止。 */
-      if (/cancel-in-progress:\s*['"]?true['"]?\s*(?:#.*)?$/im.test(bare)) return false;
-      /* 只接受「按 github.event_name 收窄到 pull_request」的写法 ——
-         光要求这一行里出现 `pull_request` 太松：一行写成
-         `${{ github.ref != 'refs/heads/main' }}  # 见 pull_request 说明`
-         也能过，而它在 main 上照样会取消正在跑的发布验证。 */
-      return /cancel-in-progress:[^\n]*github\.event_name[^\n]*pull_request/.test(bare);
+      if (concurrencyBlock(yml) === null) return false;
+      /* 键的位置与引号一律不管（同 `offendingContinueOnError` 的教训），只看值。 */
+      const values = cancelInProgressValues(yml);
+      if (values.length === 0) return false;
+      /* 只接受**等于**比较那一种值；`!=`、`&&`、`||`、裸 true 全部拒绝。 */
+      return values.every((value) => CANCEL_ONLY_FOR_PR.test(value));
     }
   },
   {
@@ -282,19 +484,26 @@ const SAFETY = [
 /**
  * 抽出一个 workflow 里的 `concurrency:` 块。
  *
- * 块标量与普通键值两种写法都要认：
+ * 两种写法都要认：
  *
  * ```yaml
  * concurrency:
  *   group: x
  *   cancel-in-progress: true
+ * concurrency: {group: x, cancel-in-progress: true}   # flow 映射，一行写完
  * ```
  *
+ * 只认块写法会把合法的 flow 映射判成「没有 concurrency 块」——
+ * 那是本文预测过的假红方向之一，实测确实红（`has-concurrency` + `cancels-only-superseded-pr`）。
+ *
  * @param {string} yml 原文。函数内部自己去掉整行注释。
- * @returns {string|null} 块内容；没有该块时返回 null。
+ * @returns {string|null} 块内容（flow 写法时是花括号里的原文）；没有该块时返回 null。
  */
 function concurrencyBlock(yml) {
   const lines = stripComments(yml).split('\n');
+  /* flow 映射：`concurrency: {…}`，同一行收尾。 */
+  const flow = lines.find((line) => /^\s*concurrency:\s*\{.*\}\s*$/.test(line));
+  if (flow !== undefined) return flow.replace(/^\s*concurrency:\s*/u, '').trim();
   const index = lines.findIndex((line) => /^\s*concurrency:\s*$/.test(line));
   if (index === -1) return null;
 

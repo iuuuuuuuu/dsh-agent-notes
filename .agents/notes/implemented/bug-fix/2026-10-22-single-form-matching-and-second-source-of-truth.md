@@ -43,6 +43,12 @@ CodeRabbit 在 PR #29 上提了 11 条意见，其中四条指向同一类缺陷
 
 每条都配了一条**断言「绕过写法必须判红」**的回归，而不是只测正确写法。
 
+> **更正（同日）**：本文「把等价形态列全」这一半当天就被证伪 —— 列举补不完
+> （`${{ true || false }}` 是下一个绕过）。`continue-on-error` 与 `cancel-in-progress`
+> 两条判据已改为**默认拒绝**，见
+> [`./2026-10-22-gate-judgments-must-default-deny.md`](./2026-10-22-gate-judgments-must-default-deny.md)。
+> 「判据只许一处」那半边仍然成立，未改。
+
 ## Alternatives considered
 
 **① 只把正则改成大小写不敏感（`/i`）。**

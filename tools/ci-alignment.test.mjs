@@ -538,3 +538,212 @@ test('ci-align: cancel-in-progress 只要不是按 event_name 收窄就必须红
   assert.equal(result.code, 1, `宽松写法必须被拦：\n${result.out}`);
   assert.match(result.out, /cancels-only-superseded-pr/);
 });
+
+test('ci-align: 表达式的 continue-on-error 也拦（列举法补不完，默认拒绝）', () => {
+  /* 第二版判据列举了 true/True/"true"/${{ true }}；CodeRabbit 在 PR #30 上
+     立刻用 `${{ true || false }}` 绕过 —— 它求值为 true，而正则不认识。
+     结论：这类判据必须默认拒绝，只放行字面量 false。 */
+  const forms = ['${{ true || false }}', '${{ matrix.experimental }}', 'true && true'];
+
+  for (const form of forms) {
+    const mutated = REAL_WORKFLOW.replace(
+      '      - name: 包自检',
+      `      - name: 包自检
+        continue-on-error: ${form}`
+    );
+    assert.notEqual(mutated, REAL_WORKFLOW, '构造没生效');
+    const result = check({ ...BOTH, 'verify.yml': mutated });
+    assert.equal(result.code, 1, `${form} 必须被发现：${result.out}`);
+    assert.match(result.out, /no-continue-on-error/);
+  }
+});
+
+test('ci-align: 语义相反的 cancel-in-progress 表达式必须红（只认 == 收窄）', () => {
+  /* CodeRabbit 在 PR #30 上的第二条：`${{ github.event_name != 'pull_request' }}`
+     里两个标识符按顺序出现，旧判据就放过了 —— 而它在 push 上才取消，
+     正好取消掉要保住的发布验证。 */
+  const inverted = REAL_WORKFLOW.replace(
+    / {2}cancel-in-progress:[^\n]*/,
+    "  cancel-in-progress: ${{ github.event_name != 'pull_request' }}"
+  );
+  assert.notEqual(inverted, REAL_WORKFLOW, '构造没生效');
+  const result = check({ ...BOTH, 'verify.yml': inverted });
+  assert.equal(result.code, 1, `反向表达式必须被拦：${result.out}`);
+  assert.match(result.out, /cancels-only-superseded-pr/);
+});
+
+test('ci-align: continue-on-error 的位置写法都要被识别（列表项/冒号前空格/flow-style 映射）', () => {
+  /* CodeRabbit 在 PR #31 上指出：识别式写成 `^\s*continue-on-error:` 时，
+     `- continue-on-error: true`（行内序列表项）与 `continue-on-error : true`
+     （冒号前空格）都不会进违规列表 ⇒ 门禁假绿。 */
+  const forms = [
+    '        - continue-on-error: true',
+    '        continue-on-error : true',
+    /* flow-style 映射：键不在行首，位置这一维度上的漏法（CodeRabbit PR #31）。 */
+    '        - {name: 包自检副本, run: exit 1, continue-on-error: true}',
+    /* 引号键：YAML 解析成同一个键，但键名外面多了一层引号（CodeRabbit PR #31）。 */
+    '        "continue-on-error": true'
+  ];
+  for (const form of forms) {
+    const mutated = REAL_WORKFLOW.replace('      - name: 包自检', `      - name: 包自检\n${form}`);
+    assert.notEqual(mutated, REAL_WORKFLOW, '构造没生效');
+    const result = check({ ...BOTH, 'verify.yml': mutated });
+    assert.equal(result.code, 1, `${form} 必须被发现：${result.out}`);
+    assert.match(result.out, /no-continue-on-error/);
+  }
+});
+
+test('ci-align: cancel-in-progress 的引号键与 flow 映射也要被认（键的写法不是证据）', () => {
+  /* 与 continue-on-error 同一个教训：判据不能要求键在行首、无引号。
+     这里用「引号键 + 语义相反的值」一次性证明两件事都成立。 */
+  const quoted = REAL_WORKFLOW.replace(
+    / {2}cancel-in-progress:[^\n]*/,
+    '  "cancel-in-progress": ${{ github.event_name != \'pull_request\' }}'
+  );
+  assert.notEqual(quoted, REAL_WORKFLOW, '构造没生效');
+  const r1 = check({ ...BOTH, 'verify.yml': quoted });
+  assert.equal(r1.code, 1, `引号键里的反向值必须被拦：\n${r1.out}`);
+  assert.match(r1.out, /cancels-only-superseded-pr/);
+
+  /* 引号键 + 合法值：键的写法不该让它变红。 */
+  const ok = REAL_WORKFLOW.replace(
+    / {2}cancel-in-progress:[^\n]*/,
+    '  "cancel-in-progress": ${{ github.event_name == \'pull_request\' }}'
+  );
+  const r2 = check({ ...BOTH, 'verify.yml': ok });
+  assert.equal(r2.code, 0, `引号键 + 合法值必须通过：\n${r2.out}`);
+});
+
+test('ci-align: YAML 转义键（\\u002d 解码成连字符）与裸键是同一个键', () => {
+  /* CodeRabbit 在 PR #31 上指出的第五种写法：双引号里的 `\u002d` 解码后就是
+     `-`，GitHub Actions 把它当成同一个键。列举写法补不完，所以判据改成
+     「先把键名解码，再比字符串」。 */
+  const escaped = REAL_WORKFLOW.replace(
+    '      - name: 包自检',
+    '      - name: 包自检\n        "continue\\u002don-error": true'
+  );
+  assert.notEqual(escaped, REAL_WORKFLOW, '构造没生效');
+  const r1 = check({ ...BOTH, 'verify.yml': escaped });
+  assert.equal(r1.code, 1, `转义键必须被解码成同一个键并判红：\n${r1.out}`);
+  assert.match(r1.out, /no-continue-on-error/);
+
+  /* 同一个解码规则也要覆盖 cancel-in-progress：`\u002din\u002d` 全是连字符。 */
+  const cancelEscaped = REAL_WORKFLOW.replace(
+    / {2}cancel-in-progress:[^\n]*/,
+    '  "cancel\\u002din\\u002dprogress": ${{ github.event_name != \'pull_request\' }}'
+  );
+  assert.notEqual(cancelEscaped, REAL_WORKFLOW, '构造没生效');
+  const r2 = check({ ...BOTH, 'verify.yml': cancelEscaped });
+  assert.equal(r2.code, 1, `转义的 cancel-in-progress 反向值必须判红：\n${r2.out}`);
+  assert.match(r2.out, /cancels-only-superseded-pr/);
+});
+
+test('ci-align: \\U（8 位）转义键同样必须被判据看见（漏解等于放行）', () => {
+  /* CodeRabbit 在 PR #31 上补的：YAML 双引号标量还支持 `\UXXXXXXXX`。
+     `\U0000002d` 就是 `-`。少解这一种，结果是**放行** —— 与本门禁
+     「默认拒绝」的方向相反，所以不能按「解不出来就原样保留」处理。 */
+  const bigU = REAL_WORKFLOW.replace(
+    '      - name: 包自检',
+    '      - name: 包自检\n        "continue\\U0000002don-error": true'
+  );
+  assert.notEqual(bigU, REAL_WORKFLOW, '构造没生效');
+  const r1 = check({ ...BOTH, 'verify.yml': bigU });
+  assert.equal(r1.code, 1, `\\U 转义键必须判红：\n${r1.out}`);
+  assert.match(r1.out, /no-continue-on-error/);
+
+  /* 非法码点不是同一个键（真解析器也会拒这份 workflow），所以它不该被当成
+     `continue-on-error` 判红 —— 但**绝不允许抛 RangeError 把门禁打成崩溃**：
+     崩了既不是通过也不是判红，调用方拿不到结论。 */
+  const bad = REAL_WORKFLOW.replace(
+    '      - name: 包自检',
+    '      - name: 包自检\n        "continue\\U00110000on-error": true'
+  );
+  assert.notEqual(bad, REAL_WORKFLOW, '构造没生效');
+  const r2 = check({ ...BOTH, 'verify.yml': bad });
+  assert.ok(r2.code === 0 || r2.code === 1, `必须是正常判定，实际退出码 ${r2.code}：\n${r2.out}`);
+  assert.doesNotMatch(`${r2.out}${r2.err ?? ''}`, /RangeError|Invalid code point/i);
+});
+
+test('ci-align: 合法取消表达式后面的行尾注释不算改条件', () => {
+  /* 注释不是配置：`cancel-in-progress: ${{ … == 'pull_request' }} # 仅取消 PR`
+     的取消条件一个字都没变，判红就是误报（CodeRabbit 在 PR #31 上指出）。 */
+  const commented = REAL_WORKFLOW.replace(
+    / {2}cancel-in-progress:[^\n]*/,
+    '  cancel-in-progress: ${{ github.event_name == \'pull_request\' }} # 仅取消 PR'
+  );
+  assert.notEqual(commented, REAL_WORKFLOW, '构造没生效');
+  const pass = check({ ...BOTH, 'verify.yml': commented });
+  assert.equal(pass.code, 0, `带行尾注释的合法条件必须通过：\n${pass.out}`);
+
+  /* 剥注释不能顺手放过真内容：注释前面还有别的表达式片段时仍必须红。 */
+  const sneaky = REAL_WORKFLOW.replace(
+    / {2}cancel-in-progress:[^\n]*/,
+    '  cancel-in-progress: ${{ github.event_name == \'pull_request\' || true }} # 看似合法'
+  );
+  assert.notEqual(sneaky, REAL_WORKFLOW, '构造没生效');
+  const red = check({ ...BOTH, 'verify.yml': sneaky });
+  assert.equal(red.code, 1, `剥注释不得放过额外表达式：\n${red.out}`);
+  assert.match(red.out, /cancels-only-superseded-pr/);
+});
+
+test('ci-align: 未闭合的引号不许把后面的键吞掉（shell 片段里的引号不是 YAML 键引号）', () => {
+  /* 实测过的真事故：改成「全文扫带引号的键」后，`verify.yml` 里
+     `if [ "$NOTES_SUPERSESSION_BASE" = "000…" ]; then` 的引号与后面某一行的
+     引号被配成一对，**跨行吞掉十几行**，中间新插的 continue-on-error 一起消失
+     —— 判据看不见它，用例红在「本该红」。
+     所以引号必须同行闭合，且键只能起于行首、空白、`{`、`,`、`-`。 */
+  const mutated = REAL_WORKFLOW.replace(
+    '      - name: 包自检',
+    /* 一对一：前面一个**没闭合**的引号，后面几行再来一个引号。
+       允许引号跨行配对的实现会从第一个引号一路配到后面的引号，
+       把中间的键整段吞掉 —— 这正是改造时的真事故。 */
+    '      - name: 包自检\n        run: echo "开头\n        continue-on-error: true\n        run: echo 结尾"'
+  );
+  assert.notEqual(mutated, REAL_WORKFLOW, '构造没生效');
+  const result = check({ ...BOTH, 'verify.yml': mutated });
+  assert.equal(result.code, 1, `跨行引号之间的键仍然必须被发现：\n${result.out}`);
+  assert.match(result.out, /no-continue-on-error/);
+});
+
+test('ci-align: 字符串里的「键」不算键（run 里的 shell 命令不许被误判红）', () => {
+  /* 笔记里预测过的假红方向：shell 命令里打印的 `continue-on-error: x` 不是 YAML 键，
+     判红会逼人改写命令才发得出去。
+     构造有讲究：键前面必须**先是空白**再是引号（`"log continue-on-error: …`）——
+     写成 `"continue-on-error: …` 时键紧贴引号，`YAML_KEY_ENTRY` 的键起边界
+     根本不匹配它，用例就变成了永恒绿（实测踩过：变异掉豁免它照样过）。 */
+  const inString = REAL_WORKFLOW.replace(
+    '      - name: 包自检',
+    '      - name: 包自检\n        run: echo "log continue-on-error: 只是日志文本"'
+  );
+  assert.notEqual(inString, REAL_WORKFLOW, '构造没生效');
+  const pass = check({ ...BOTH, 'verify.yml': inString });
+  assert.equal(pass.code, 0, `字符串里的键不许判红：\n${pass.out}`);
+
+  /* 但真键不能因为这条豁免一起被放过：同一行先有闭合引号的真键仍要红。 */
+  const realKey = REAL_WORKFLOW.replace(
+    '      - name: 包自检',
+    '      - name: 包自检\n        run: echo "日志"\n        continue-on-error: true'
+  );
+  assert.notEqual(realKey, REAL_WORKFLOW, '构造没生效');
+  const red = check({ ...BOTH, 'verify.yml': realKey });
+  assert.equal(red.code, 1, `闭合引号之后的真键仍必须红：\n${red.out}`);
+  assert.match(red.out, /no-continue-on-error/);
+});
+
+test('ci-align: flow 映射里合法的 cancel-in-progress 不许被尾巴上的别的键带红', () => {
+  /* 笔记里预测过的第二个假红方向：整行取值时 `, group: x` 跟着一起进比较式。 */
+  const flow = REAL_WORKFLOW.replace(
+    /concurrency:\n {2}group:[^\n]*\n {2}cancel-in-progress:[^\n]*/,
+    'concurrency: {group: ${{ github.workflow }}, cancel-in-progress: ${{ github.event_name == \'pull_request\' }}}'
+  );
+  assert.notEqual(flow, REAL_WORKFLOW, '构造没生效');
+  const pass = check({ ...BOTH, 'verify.yml': flow });
+  assert.equal(pass.code, 0, `flow 映射里的合法值必须通过：\n${pass.out}`);
+
+  /* 同一个 flow 映射里换成反向值，仍必须红。 */
+  const flowRed = flow.replace("github.event_name == 'pull_request'", "github.event_name != 'pull_request'");
+  assert.notEqual(flowRed, flow, '构造没生效');
+  const red = check({ ...BOTH, 'verify.yml': flowRed });
+  assert.equal(red.code, 1, `flow 映射里的反向值必须判红：\n${red.out}`);
+  assert.match(red.out, /cancels-only-superseded-pr/);
+});
