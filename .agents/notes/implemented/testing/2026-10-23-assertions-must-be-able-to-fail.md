@@ -95,6 +95,13 @@ Status: implemented
   | `lib/notes.js` | `explainMaskedCommentSections` 直接返回空串 | fail=2 |
 
   七次全部 `还原=ok`（SHA-256 与变异前一致），随后 `git status --short` 为空。
+- 扩大到十八处判据后（2026-10-23 另三轮一次性探针，已删），**十七红一存活**：
+  存活的是 `tools/release-check.mjs` 里「`package-lock.json` 缺少顶层 `version` 字段」这条，
+  把它换成 `void 0` 后 `tools/release-check.test.mjs` 仍 12/12 全绿 —— 那条分支此前是
+  纯装饰，用例只覆盖了「版本不相等」与「读不出来」，没覆盖「字段缺失」。
+  补上用例（断言话术必须是「缺少顶层 version 字段」而不是「版本是 undefined」，因为两者
+  的修法不同：前者要重新生成 lock）之后，同一变异 `fail=1`。
+  这一条是本节的实践例证：**普查的价值就在存活的那一个**，红的那十七个只是背景。
 - 反向例子（惰性变异）留档：`errors.push(…)` → `void 0; errors.push(…)` 使
   `tools/notes-layout.test.mjs` 得 `fail=0`。它不是「用例没判别力」，是变异没生效 ——
   换成把 `if (!NOTE_ROOT_LIFECYCLES.includes(name))` 短路后立刻 `fail=5`。
