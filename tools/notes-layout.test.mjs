@@ -413,3 +413,116 @@ test('notes-layout: 根层符号链接必须报出来（否则它在门禁视野
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+/* ── 2026-10-23：再往下一层 + .gitkeep + 垃圾文件专门提示 ─────────────── */
+
+test('notes-layout: 未知分类目录必须失败（implemented/odd/）', () => {
+  /* 原来只查笔记根这一层，`implemented/odd/` 下的笔记既不被枚举、
+     也不计入笔记数 —— 与根层那条缺口同一族。 */
+  const { cwd, root } = makeTree();
+  try {
+    mkdirSync(join(root, 'implemented', 'odd'), { recursive: true });
+    writeFileSync(join(root, 'implemented', 'odd', '2026-10-23-x.md'), goodNote());
+    const { errors } = checkNotesLayout({ notesRoot: root });
+    assert.ok(
+      errors.some((line) => /未知分类目录 implemented\/odd\//.test(line)),
+      `未知分类目录必须被判出来：${JSON.stringify(errors)}`
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('notes-layout: lifecycle 目录里散落的笔记必须失败', () => {
+  const { cwd, root } = makeTree();
+  try {
+    writeFileSync(join(root, 'implemented', '2026-10-23-loose.md'), goodNote());
+    const { errors } = checkNotesLayout({ notesRoot: root });
+    assert.ok(
+      errors.some((line) => /散落文件 implemented\/2026-10-23-loose\.md/.test(line)),
+      `lifecycle 层散落的笔记必须被判出来：${JSON.stringify(errors)}`
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('notes-layout: class 目录里的非笔记文件必须失败', () => {
+  const { cwd, root } = makeTree();
+  try {
+    writeFileSync(join(root, 'implemented', 'testing', 'scratch.txt'), '临时\n');
+    const { errors } = checkNotesLayout({ notesRoot: root });
+    assert.ok(
+      errors.some((line) => /非笔记文件 implemented\/testing\/scratch\.txt/.test(line)),
+      `class 目录里的非笔记文件必须被判出来：${JSON.stringify(errors)}`
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('notes-layout: class 目录下再套目录必须失败', () => {
+  const { cwd, root } = makeTree();
+  try {
+    mkdirSync(join(root, 'implemented', 'testing', 'nested'), { recursive: true });
+    writeFileSync(join(root, 'implemented', 'testing', 'nested', '2026-10-23-x.md'), goodNote());
+    const { errors } = checkNotesLayout({ notesRoot: root });
+    assert.ok(
+      errors.some((line) => /多余的目录 implemented\/testing\/nested\//.test(line)),
+      `class 目录下再套目录必须被判出来：${JSON.stringify(errors)}`
+    );
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test('notes-layout: .gitkeep 在各层都放行（空目录要能进 git）', () => {
+  /* 放行不是宽松：`.gitkeep` 不带内容，也不进笔记计数。
+     不放行的话，一个还没写笔记的 `proposed/feature/` 在 clone 后就不存在了。 */
+  const { cwd, root } = makeTree();
+  try {
+    mkdirSync(join(root, 'proposed', 'feature'), { recursive: true });
+    writeFileSync(join(root, '.gitkeep'), '');
+    writeFileSync(join(root, 'proposed', '.gitkeep'), '');
+    writeFileSync(join(root, 'proposed', 'feature', '.gitkeep'), '');
+    const { errors } = checkNotesLayout({ notesRoot: root });
+    assert.deepEqual(errors, [], `.gitkeep 不该被判红：${JSON.stringify(errors)}`);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+for (const [label, name, place] of [
+  ['笔记根', '.DS_Store', ''],
+  ['lifecycle 目录', '.DS_Store', 'implemented'],
+  ['class 目录', 'Thumbs.db', 'implemented/testing'],
+  ['AppleDouble 伴生文件', '._2026-10-22-a.md', 'implemented/testing']
+]) {
+  test(`notes-layout: 系统垃圾文件给专门提示而不是「未知文件」（${label}）`, () => {
+    const { cwd, root } = makeTree();
+    try {
+      writeFileSync(join(root, place, name), 'junk');
+      const { errors } = checkNotesLayout({ notesRoot: root });
+      const line = errors.find((item) => item.includes('系统垃圾文件'));
+      assert.ok(line, `必须给专门提示：${JSON.stringify(errors)}`);
+      assert.match(line, /\.gitignore/, '提示里要说出该怎么办');
+      assert.doesNotMatch(line, /未知文件|散落文件|非笔记文件/, '不能退回通用提示');
+    } finally {
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+}
+
+test('notes-layout: archived/ 内部不由本模块重复判（分工：archive-layout 管）', () => {
+  /* 两个模块判同一件事会产出两个真相：这里判红、archive-layout 放行（或反过来）
+     时没人知道该信谁。所以本模块明确跳过 archived/ 内部。 */
+  const { cwd, root } = makeTree();
+  try {
+    mkdirSync(join(root, 'archived', 'odd'), { recursive: true });
+    writeFileSync(join(root, 'archived', 'whatever.txt'), 'x');
+    const { errors } = checkNotesLayout({ notesRoot: root });
+    assert.deepEqual(errors, [], `archived/ 内部不归本模块判：${JSON.stringify(errors)}`);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
