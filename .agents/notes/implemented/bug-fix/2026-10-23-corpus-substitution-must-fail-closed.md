@@ -28,14 +28,15 @@ Independent: 本篇只改 `listTrackedFiles` 的失败口径与补一条空语�
 
 ## Decision
 
-1. `listTrackedFiles(root, { allowNonGit })`：git 失败时
-   - **不带** `allowNonGit` → 返回 `{ files: [], source: 'git-error', gitError }`；
-   - 带 `allowNonGit` → 才允许退回文件系统遍历（`source: 'fs'`）。
-2. `git ls-files` 返回空列表时不再静默遍历：不带 `allowNonGit` 返回 `source: 'git-empty'`。
+1. `listTrackedFiles(root)`：**按 git 的报错判定**，不设开关 ——
+   - stderr/message 里有 `not a git repository` → 退回文件系统遍历（`source: 'fs'`），
+     这是唯一允许降级的状态，因为它是可判定的、稳定的、只有夹具才有的；
+   - 其余任何失败（索引损坏、权限、git 半死）→ `{ files: [], source: 'git-error', gitError }`。
+2. `git ls-files` 返回空列表 → `source: 'git-empty'`，不再静默遍历。
 3. `verifyTrailingNewlines()` 把 `git-error` / `git-empty` 直接转成错误：
    前者说「拒绝改用工作区遍历，因为那会换掉语料」，后者说「空语料不得当绿」。
-4. `tools/corpus-floor.mjs` 里 eol 那道语料的收集器显式传 `{ allowNonGit: true }`：
-   它在测试夹具上必须还能工作；在真仓库上 git 正常，口径不变。
+4. 「失败关闭」没有任何开关可以关掉 —— 早先一版用调用方传的 `allowNonGit: true`
+   兜夹具，等于把「要不要失败关闭」交给调用方，已删。
 
 ## Alternatives considered
 
@@ -63,15 +64,16 @@ Independent: 本篇只改 `listTrackedFiles` 的失败口径与补一条空语�
 收益：
 
 - 「取不到语料」有了明确出口：报错、`checked: 0`、不谎称检查过文件；
-- 夹具需求通过**显式开关**表达，而不是靠 `catch` 兜底，读代码能看出谁要这份宽容；
+- 夹具需求靠**可判定的信号**（`not a git repository`）满足，不是靠开关、也不是靠 `catch` 兜底；
 - 空索引（真仓库里一条 tracked 文件都没有）从「静默遍历」变成「空语料不得当绿」。
 
 代价（真实存在）：
 
-- `allowNonGit: true` 是个**可以被真门禁误用**的开关：将来若有人在 CLI 路径上也传它，
-  这道门禁就退回旧行为。目前只有 corpus-floor 的夹具收集器传它，用例也没锁死这一点；
-- 用例只用「非 git 临时目录」验证 `git-error` 分支，没有模拟「git 装了但在真仓库里报错」
-  （如索引损坏）—— 两者走的是同一条 `catch`，但严格说后者没有被实测覆盖；
+- 判据依赖 git 的**报错文本**（`not a git repository`）。这不是契约，只是事实：
+  git 换语种或改文案时，这条匹配会失效 —— 失效方向是「本来该放行的夹具被判红」，
+  不是假绿，可接受；但它是唯一一处靠字符串匹配 git 输出的地方；
+- 权限类故障（git 能跑但读不了自己的对象库）走的是 `git-error`，用例没覆盖到
+  —— 覆盖的是索引损坏那条同类路径；
 - 新增两条用例都读 `source` 字段，字段改名会让它们一起失效（缺省值缺失时
   `assert.equal` 会红，属于能失败的一侧，可接受）。
 
@@ -79,14 +81,17 @@ Independent: 本篇只改 `listTrackedFiles` 的失败口径与补一条空语�
 
 - `node tools/eol.mjs` → exit 0，`结尾换行通过：232 个文本文件都以恰好一个换行结尾（语料来源：git ls-files）`。
 - `node tools/corpus-floor.mjs` → exit 0，`5 道门禁的语料都仍覆盖各自应有的区域`。
-- `node --test tools/eol.test.mjs` → **12 tests / 12 pass**（原 10 条）；
+- `node --test tools/eol.test.mjs` → **13 tests / 13 pass**（原 10 条）；
   `node --test tools/corpus-floor.test.mjs` → **11 tests / 11 pass**（原 10 条）。
-- 新增 `eol: git 取不到语料必须失败关闭`：非 git 目录 → `source: 'git-error'`、
-  `checked: 0`、报错含「取不到已跟踪文件列表」，且**不报** `bad.md` 的文件级结果；
-  阳性对照（同一个目录 + `allowNonGit: true`）确实报出 `bad.md`，证明前一条绿不是判据没跑。
+- 新增 `eol: 真仓库里 git 坏了必须失败关闭`：`git init` 后把 `.git/index` 写成垃圾
+  （`.git` 还在 ⇒ 不是「不是仓库」那种可放行情况）→ `source: 'git-error'`、`checked: 0`、
+  报错含「取不到已跟踪文件列表」，且**不报** `bad.md` 的文件级结果。
+- 新增 `eol: 目录不是 git 仓库时退回文件系统遍历`：同一份 `bad.md` 在非 git 目录里
+  确实被扫到（`source: 'fs'`、`checked: 1`）—— 证明上一条的「不报 bad.md」不是判据整个没跑。
 - 新增 `eol: 空仓库必须红`：`git rm --cached` 后 `source: 'git-empty'`、报错含「空语料不得当绿」。
 - 新增 `corpus: 语料为空必须红`：空夹具 → 5 道门禁各报一条「语料为空」。
 - 真变异 1：`errors.push('语料为空…')` → `void 0` ⇒ 只有新用例红（10 pass / 1 fail），
   还原后 11/11。这条变异此前是**存活**的（一轮八变异普查里唯一没被抓住的那个）。
-- 真变异 2：`catch` 里退回静默遍历 ⇒ 只有 `eol: git 取不到语料必须失败关闭` 红
-  （11 pass / 1 fail），还原后 12/12，`grep -rn MUTANT tools lib` 无残留。
+- 真变异 2：把 `if (!/not a git repository/i.test(detail))` 改成 `if (false)`
+  （等于恢复「无条件退回遍历」）⇒ 只有 `eol: 真仓库里 git 坏了必须失败关闭` 红
+  （12 pass / 1 fail），还原后 13/13，`grep -c MUTANT tools/eol.mjs` 为 0。
