@@ -186,6 +186,45 @@ test('doc-budget: 清单里的文件不存在 → 红', () => {
   }
 });
 
+test('doc-budget: 清单里登记的是目录 → 判红，不许抛 EISDIR 崩掉', () => {
+  /* 这条形态此前**没有用例**，而它真实可触发：清单里写 `"tools": 100000`
+     （目录名而不是文件名）时，旧实现直接 `readFileSync(dir)` 抛未捕获的 `EISDIR`，
+     Node 打一整段栈后 exit 1 —— 与「正常判红」退出码完全相同，谁都看不出区别。
+     本仓库另一篇笔记（`2026-10-21-crash-is-not-a-red-gate.md`）记的就是这个形态：
+     崩溃既不是通过也不是判红，因为没人会去查一句栈。
+     现在要求：exit 1、输出里点出这一项是目录、**且不带栈**。 */
+  const dir = makeRepo({ 'AGENTS.md': 100, tools: 100000 });
+  try {
+    writeFileSync(join(dir, 'AGENTS.md'), '短', 'utf8');
+    const { code, out } = run(dir);
+    assert.equal(code, 1, '登记目录必须判红');
+    assert.match(out, /它是目录/, '必须说清「这是目录，不是文件」');
+    assert.match(out, /无法当作文件读取/, '必须给出总结句，而不是只列一行');
+    assert.doesNotMatch(out, /\n\s+at /, '不许把栈打到屏幕上 —— 崩溃不是判红');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('doc-budget: 目录键在 --update 下也必须判红（不许被静默跳过）', () => {
+  /* 自审时发现的第二个洞：`--update` 会 `if (row.actual === undefined) continue`，
+     于是目录键在 `--update` 下什么都不做、`raised` 为空、**exit 0**。
+     「没报错」与「已经修好」外观一致，是最坏的一种绿。
+     这里要求 `--update` 也红，且**不写清单**（清单此时是坏的，不该被当成结果保存）。 */
+  const dir = makeRepo({ 'AGENTS.md': 100, tools: 100000 });
+  try {
+    writeFileSync(join(dir, 'AGENTS.md'), '短', 'utf8');
+    const before = readFileSync(join(dir, 'tools', 'doc-budget.json'), 'utf8');
+    const { code, out } = run(dir, ['--update']);
+    assert.equal(code, 1, `--update 遇到目录键必须红，实际 ${code}`);
+    assert.match(out, /它是目录/);
+    assert.equal(readFileSync(join(dir, 'tools', 'doc-budget.json'), 'utf8'), before,
+      '--update 不许把坏清单当成结果写回去');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('doc-budget: 清单损坏 → 退出码 2', () => {
   const dir = makeRepo({ 'AGENTS.md': 100 });
   try {
