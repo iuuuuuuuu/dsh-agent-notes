@@ -115,9 +115,31 @@ export function withWrites(what, fn) {           // 窄窗口
   已从 HEAD 还原并逐字核对（见 Verification）。这是**违反自己定的规则**：
   变异只许在临时副本上做。
 
+### 2026-10-23 评审后补的两处（PR #33 CodeRabbit）
+
+1. **窗口不可重入（真缺陷）**。`withWrites` 的 `finally` 原先无条件
+   `writesAllowed = false`：外层窗口里再开一个内层窗口，内层退出就把外层的
+   许可也关掉了，外层剩下的 `writeManifest()` 会抛「当前处于零写入模式」。
+   现在保存进入前的状态、`finally` 里恢复它 —— 只有最外层退出才真正关回去。
+   回归：`嵌套 withWrites 结束后外层仍保有写入许可`；把 `finally` 改回
+   `writesAllowed = false` ⇒ **5 pass / 1 fail**（红的正是这一条）。
+2. **测试会写坏仓库文件（真缺陷，与上面那次事故同源）**。测试原先直接对
+   `writeManifest()` 的默认输出根调用，也就是对着仓库里的两份数据文件做断言：
+   闸门一旦被改坏（**正是这些用例要抓的故障**），测试本身就会把它们覆盖成
+   `{"files":{}}` / `refs/heads/main`。现在 `writeManifest(manifest, ref,
+   packageRoot = PACKAGE_ROOT)` 的输出根可注入，测试一律用自己的临时目录
+   （`mkdtempSync` + `t.after` 清理）。
+   实测变异（删掉 `assertWritesAllowed` 那一行）⇒ **2 pass / 4 fail**，
+   同时 `md5sum` 显示两个仓库文件**逐字未变**（变异前后哈希相同）——
+   「测试发红」与「仓库文件没被动过」这次同时成立，上一次同一变异是把真文件写坏。
+   另外补了一条正向对照：窗口里必须**真的**能落盘并写出正确的 `ref`，
+   否则「闸门恒关」也能让「关着时抛错」那几条全绿。
+
+
 ## Verification
 
 - `node --test tools/sync-write-interlock.test.mjs` ⇒ `5 pass / 0 fail`（3 条闸门 + 2 条 CLI 入口）。
+  （2026-10-23 评审后补到 6 条：多了嵌套窗口那条，复跑 6 pass / 0 fail。）
 - **真故障注入 ①**（去掉 `withWrites` 的 `finally`，改成 `return fn()`）⇒
   `2 pass / 1 fail`，红的正是「退出后闸门立刻关回」；按字节还原后全绿。
 - **真故障注入 ③**（把「仅直接执行」的 `invokedDirectly` 改成恒 `false`）⇒

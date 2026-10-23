@@ -23,7 +23,7 @@
 import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -69,11 +69,18 @@ function assertWritesAllowed(what) {
  * @returns {T} `fn` 的返回值。
  */
 export function withWrites(what, fn) {
+  /* 保存并恢复**进入窗口前**的状态，而不是无条件写成 false。
+     嵌套调用时（外层窗口里再开一个内层窗口），内层的 finally 若把闸门
+     直接置 false，外层剩下的代码就再也写不了盘 —— 实测过：
+     `withWrites('a', () => { withWrites('b', () => {}); writeManifest(...) })`
+     会抛「当前处于零写入模式」，而调用方明明还在自己的写盘窗口里。
+     窗口是**可重入**的：只有最外层退出时才真正关回去。 */
+  const previous = writesAllowed;
   writesAllowed = true;
   try {
     return fn();
   } finally {
-    writesAllowed = false;
+    writesAllowed = previous;
   }
 }
 
@@ -581,16 +588,19 @@ function readManifest() {
  *
  * @param {any} manifest 逐文件摘要。
  * @param {string} ref 已同步的分支或 commit。
+ * @param {string} [packageRoot] 输出根目录，默认本包根目录。
+ *   **测试必须传临时目录**：默认值落在仓库里，一旦闸门自身被改坏，
+ *   测试就会把真实的两份数据文件写坏（本轮变异时真的发生过）。
  */
-export function writeManifest(manifest, ref) {
+export function writeManifest(manifest, ref, packageRoot = PACKAGE_ROOT) {
   /* 闸门放在**第一行**：本函数一进来就写盘，任何调用方忘了包 withWrites()
      都会在这里抛错，而不是先写坏 manifest 再说。 */
   assertWritesAllowed('写 tools/upstream-manifest.json 与 upstream.json');
-  const manifestFile = join(PACKAGE_ROOT, 'tools', 'upstream-manifest.json');
+  const manifestFile = join(packageRoot, 'tools', 'upstream-manifest.json');
   mkdirSync(dirname(manifestFile), { recursive: true });
   writeFileSync(manifestFile, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
 
-  const upstreamFile = join(PACKAGE_ROOT, 'upstream.json');
+  const upstreamFile = join(packageRoot, 'upstream.json');
   const previous = existsSync(upstreamFile) ? JSON.parse(readFileSync(upstreamFile, 'utf8')) : {};
 
   /* **保留本函数不负责的字段。**
@@ -614,7 +624,6 @@ export function writeManifest(manifest, ref) {
 
   writeFileSync(upstreamFile, `${JSON.stringify(next, null, 2)}\n`, 'utf8');
   console.log(`  已记录 tools/upstream-manifest.json 与 upstream.json`);
-  void relative;
 }
 
 /**
