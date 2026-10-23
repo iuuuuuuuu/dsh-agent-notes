@@ -106,12 +106,12 @@ Status: implemented
 
 ## Verification
 
-`node --test tools/board-selector-alignment.test.mjs` → **15 tests / 15 pass / 0 fail**。
+`node --test tools/board-selector-alignment.test.mjs` → **20 tests / 20 pass / 0 fail**。
 `node tools/board-selector-alignment.mjs` → `看板选择器对齐通过：2 个补丁模块、22 个
 选择器类名都在 vendored 页面里存在。` exit 0。
 `node tools/ci-alignment.mjs` → `本地 check 链的 17 道内容型门禁都在 verify.yml 里`。
 
-真故障注入五次（每次 `cp` 备份 → 变异 → 只跑本文件 → 还原 → `cmp` 确认逐字节相同）：
+真故障注入八次（每次 `cp` 备份 → 变异 → 只跑本文件 → 还原 → `cmp` 确认逐字节相同）：
 
 | 变异 | 结果 |
 |---|---|
@@ -120,6 +120,9 @@ Status: implemented
 | 空集合一律放行（无视 `noCssReason`） | 14 pass / **1 fail** |
 | `MIN_SELECTORS` 改成 `0` | 15 pass / **1 fail** |
 | 去掉注入片段里 `class="…"` 的自建识别 | 14 pass / **1 fail** |
+| 不剥 HTML 注释（`stripHtmlComments` 变恒等） | 18 pass / **2 fail** |
+| `querySelector` 退回只认单引号 | 17 pass / **3 fail** |
+| `class` 属性只看双引号 | 19 pass / **1 fail** |
 
 其中**两次一开始没被抓住**，这是这段工作里最该记下来的部分（同一类教训的完整版在
 [2026-10-23-assertions-must-be-able-to-fail.md](./2026-10-23-assertions-must-be-able-to-fail.md)）：
@@ -135,3 +138,22 @@ Status: implemented
 
 这两处都是「用例看起来在验，其实验的是自己」，是在故障注入里暴露出来的，
 不是靠读代码看出来的。
+
+### 评审又抓出三处（都已修，各带一条真输入用例）
+
+这份改动过了一次 CodeRabbit 评审，三条发现全部成立，没有一条是风格意见：
+
+1. **HTML 注释里的类名被算作「存在」**（`lib/board-selector-audit.js`）。上游若把
+   `<nav class="deck-tabs">` 整段注释掉再换结构，注释里的旧标记仍满足判据 —— 改名可以
+   靠注释蒙过去。修法：`stripHtmlComments()` 先剥注释；**未闭合的注释按浏览器语义吞到
+   文末**（判据看到的必须与浏览器看到的一致）。用例把真实元素改名、同时把旧标记留在
+   注释里，断言仍红。
+2. **判据散在 CLI 外壳里**（`tools/board-selector-alignment.mjs`）。`extractCss`、
+   「零选择器」与 `MIN_SELECTORS` 的判断原本在 `tools/` 下 —— 与本仓库「判定逻辑的
+   唯一真源在 `lib/`，`tools/` 只做外壳」的分工冲突。修法：`judgeBoardSelectors()`
+   与 `BOARD_PATCH_MODULES` / `MIN_SELECTORS` / `extractCss()` 全部搬进 `lib/`，
+   `tools/` 只剩读盘、打印、退出码。
+3. **只认单引号的 `querySelector` 实参**。补丁里新写 `querySelector(".x")` 会整条漏掉，
+   而总数下限照样满足 —— 又一次静默放行。修法：单引号/双引号/反引号三种都认，
+   且**首尾引号必须一致**（`querySelector('.x")` 这种半截字符串不算选择器）。顺带把
+   `class` 属性也放宽到单引号（原来只看 `class="…"`）。

@@ -13,8 +13,8 @@ import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { checkSelectorAlignment } from '../lib/board-selector-audit.js';
-import { verifyBoardSelectors, extractCss, PATCH_MODULES, MIN_SELECTORS } from './board-selector-alignment.mjs';
+import { checkSelectorAlignment, extractCss, BOARD_PATCH_MODULES, MIN_SELECTORS } from '../lib/board-selector-audit.js';
+import { verifyBoardSelectors } from './board-selector-alignment.mjs';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const HTML_REL = 'skills/agent-notes/assets/agent-notes-board.html';
@@ -25,7 +25,7 @@ const HTML_REL = 'skills/agent-notes/assets/agent-notes-board.html';
  */
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'board-selector-'));
-  for (const rel of [HTML_REL, ...PATCH_MODULES.map((item) => item.path)]) {
+  for (const rel of [HTML_REL, ...BOARD_PATCH_MODULES.map((item) => item.path)]) {
     mkdirSync(dirname(join(root, rel)), { recursive: true });
     copyFileSync(join(ROOT, rel), join(root, rel));
   }
@@ -167,10 +167,10 @@ test('board-selector: 只对账到极少数类名时必须红（下限不是摆�
 });
 
 test('board-selector: 补丁模块清单里的文件必须真实存在（防止清单漂移）', () => {
-  for (const entry of PATCH_MODULES) {
+  for (const entry of BOARD_PATCH_MODULES) {
     assert.doesNotThrow(() => readFileSync(join(ROOT, entry.path), 'utf8'), `清单里的 ${entry.path} 不存在`);
   }
-  assert.ok(PATCH_MODULES.some((item) => item.path === 'lib/board-responsive.js'));
+  assert.ok(BOARD_PATCH_MODULES.some((item) => item.path === 'lib/board-responsive.js'));
 });
 
 test('board-selector: 自己创建的类名不算缺失（kpi-row-5 来自本仓库的 className 追加）', () => {
@@ -210,4 +210,59 @@ test('board-selector: CLI 在真实仓库上退出码为 0', () => {
 test('board-selector: extractCss 只认名字里带 CSS 的模板字面量', () => {
   const js = 'const A_CSS = `.x { color: red; }`;\nconst OTHER = `.y { color: red; }`;\n';
   assert.deepEqual(extractCss(js), ['.x { color: red; }']);
+});
+
+test('board-selector: 注释里的旧标记不算存在（改名后把 old 标记留在注释里仍须红）', () => {
+  const root = fixture();
+  try {
+    const file = join(root, HTML_REL);
+    const html = readFileSync(file, 'utf8');
+    /* 真实元素改名，同时把旧标记留在注释里：文本上「还在」，元素已经没了。 */
+    const renamed = html.replaceAll('deck-tabs', 'deck-tabbar')
+      + '\n<!-- <nav class="deck-tabs"> 改名前的老结构，留作对照 -->\n';
+    writeFileSync(file, renamed, 'utf8');
+    const result = verifyBoardSelectors(root);
+    assert.equal(result.ok, false, '注释里的旧标记被当成「元素还在」—— 改名可以靠注释蒙过去');
+    assert.ok(result.problems.some((line) => line.includes('.deck-tabs')), result.problems.join('\n'));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('board-selector: 未闭合的注释按浏览器语义吞到文末（后面的标记也不算存在）', () => {
+  const result = checkSelectorAlignment({
+    css: '.deck-tabs { color: red; }',
+    js: '',
+    html: '<nav class="deck-tabbar"></nav>\n<!-- 注释忘了收尾\n<nav class="deck-tabs"></nav>'
+  });
+  assert.deepEqual(result.missing.map((item) => item.cls), ['deck-tabs']);
+});
+
+test('board-selector: 双引号与反引号的 querySelector 同样被看见', () => {
+  for (const quote of ['"', '`']) {
+    const result = checkSelectorAlignment({
+      css: '.card { color: red; }',
+      js: `el.querySelector(${quote}.ghost-cell${quote});`,
+      html: '<div class="card"></div>'
+    });
+    assert.deepEqual(result.missing.map((item) => item.cls), ['ghost-cell'], `引号 ${quote} 没被识别`);
+  }
+});
+
+test('board-selector: 首尾引号不一致的调用不算（避免把半截字符串当选择器）', () => {
+  const result = checkSelectorAlignment({
+    css: '.card { color: red; }',
+    js: "el.querySelector('.ghost-cell\");",
+    html: '<div class="card"></div>'
+  });
+  assert.deepEqual(result.missing, []);
+});
+
+test('board-selector: 单引号的 class 属性也算存在（不许只看双引号）', () => {
+  const result = checkSelectorAlignment({
+    css: '.deck-tabs { color: red; }',
+    js: '',
+    html: "<nav class='deck-tabs'></nav>"
+  });
+  assert.deepEqual(result.missing, []);
 });
