@@ -186,16 +186,23 @@ for (const entry of result.results) {
   }
 }
 
+/* 散落在生命周期目录之外的 `.md` 不计入笔记数，也不被任何一道门禁校验。
+   这里必须**说出来**，否则「磁盘上 120 个 .md」与「共 114 篇笔记」的差额
+   永远没人解释（本仓库历史上正是这么漏掉的）。 */
+const strayLine = result.strayCount > 0
+  ? `\n另有 ${result.strayCount} 个 .md 散落在生命周期目录之外：它们不计入笔记数，也不会被校验。`
+  : '';
+
 if (!result.passed) {
   const failed = result.results.filter((entry) => !entry.passed).length;
   console.error(
     `\n笔记门禁未通过：${failed}/${result.results.length} 条失败`
-    + `（共 ${result.noteCount} 篇笔记，${result.notesRoot}）。`
+    + `（共 ${result.noteCount} 篇笔记，${result.notesRoot}）。${strayLine}`
   );
   process.exit(1);
 }
 
 console.log(
   `笔记门禁通过：${result.results.length} 条全部 exit=0，`
-  + `共 ${result.noteCount} 篇笔记（${result.notesRoot}）。`
+  + `共 ${result.noteCount} 篇笔记（${result.notesRoot}）。${strayLine}`
 );

@@ -31,8 +31,9 @@ Status: implemented
   「门禁报告的笔记数」对不上，而**没有任何门禁会指出这一点**。
 
 换句话说：一份笔记可以完全绕开这套方法的管理 —— 既不会被归档，也不会被判
-违规，团队也不会知道它存在。`runAllGates` 的 `noteCount`（`lib/notes.js:838`
-的 `inspectTree`）把它算进文件数，于是连汇总层的数字都对不上门禁的输出。
+违规，团队也不会知道它存在。`runAllGates` 的 `noteCount`（`inspectTree`，
+当时在 `lib/notes.js:838`，现为 `:924`）把它算进文件数，于是连汇总层的数字
+都对不上门禁的输出。（2026-10-23 已改：只数生命周期目录里的，见 Consequences 第 2 条。）
 
 同时，形状校验缺失还让「未知目录」这一类完全无人管：vendored 的
 `agent-note-tree.ts:48-50` 只在「树里已经有笔记」时才会走到那段枚举，
@@ -42,7 +43,7 @@ Status: implemented
 
 插件新增自有模块 `lib/notes-layout.js`，判据落在 `lib/notes.js` 的
 `runGate` 里 —— 位置在「没有可验对象不算通过」那一整套之后
-（`lib/notes.js:573` 的 `NO_NOTES_YET` 之后，`lib/notes.js:587` 调用
+（`lib/notes.js:627` 的 `NO_NOTES_YET` 之后，`lib/notes.js:646` 调用
 `checkNotesLayout`），命中即返回 `reason: NOTES_LAYOUT: 笔记根不合规（N 项）`、
 `exitCode: 1`，诊断走 stderr 且每行带 `notes: ` 前缀。
 
@@ -127,14 +128,29 @@ vendored 的 `agent-note-tree.ts:44-47` 只对 `INDEX.md` 判红，其余根层
 
 1. **根层 `.md` 仍然不可见**（本篇开头那张表的第一行）。这是有意的取舍，
    但它意味着「散落一篇笔记到笔记根」这个动作**依然不会被拦下** ——
-   只有「散落到根层且不是 `.md`」与「散落成目录」会被拦。回归里用一条
-   专门的用例把这个残留钉住（`notes-layout: 根层散落的 .md 在三道门禁下
-   都不可见（残留缺口，如实钉住）`），将来若决定收紧，这条用例必须
-   连带改写。
-2. **根层 `.md` 与门禁的笔记数对不上，且没人指出来**。`inspectTree`
-   （`lib/notes.js:838`）把它算进 `runAllGates` 的 `noteCount`，vendored
-   的 `ok: N note(s)` 不算它。两处数字不一致这件事本身仍是缺口。
-3. **`NO_NOTES_YET` 在形状校验之前**（`lib/notes.js:573` vs `:587`）。
+   只有「散落到根层且不是 `.md`」与「散落成目录」会被拦。回归用例
+   `notes-layout: 根层散落的 .md 不算笔记，零篇不许当通过（契约已收紧）`
+   钉的是**收紧后的边界**：散落件仍不被 vendored 枚举，但它不算笔记，
+   所以「整棵树只有它」会被零篇判据拦下。**别把它读成「散落件被拦住了」**：
+   实测「1 篇合规笔记 + 1 篇根层散落 `.md`」仍然 `passed: true`、
+   `ok: 1 note(s)`，多出来的那篇继续完全隐形。
+2. **根层 `.md` 与门禁的笔记数对不上 —— 已在 2026-10-23 修掉**。原先
+   `inspectTree` 把它算进 `runAllGates` 的 `noteCount`，vendored 的
+   `ok: N note(s)` 不算它，两处数字各说各话；更糟的是「零篇」判据用的是
+   `files.length`（含散落件），实测**只放一个根层 `.md`**，三道门禁全部
+   `ok: 0 note(s)` 且 exit 0、`runAll` 报 `passed: true` —— 零篇被冒充成通过。
+   现在 `inspectTree` 分出 `noteFiles`（生命周期目录里的）与 `strayFiles`；
+   零篇判据改用 `noteFiles`；`runAllGates` 多返回 `strayCount`，
+   `tools/verify-notes.mjs` 有散落件时明确打一行「另有 N 个 .md …不会校验」。
+   回归 `no-fake-green: 只根层散落一个 .md：零篇笔记，不许当通过`；
+   变异（判据换回 `files.length` / 分类判据恒真）各自 5 pass / 1 fail。
+   同一口径也落到工具层：`lib/tools.js` 的 `agent_notes_gate` 原先把
+   `inspect().files.length` 当 `noteCount`，散落件会让它报「1 篇」而
+   `passed: false`，两个信号自相矛盾；现在只数 `noteFiles`，另返回
+   `strayCount`。回归 `plugin-tools: 只有根层散落 .md 时 noteCount 报 0…`
+   （变异 `noteFiles → files` 后该文件 7 pass / 1 fail）。
+   仍然没做的是：**散落件本身不会被拦下**（第 1 条那条取舍没变）。
+3. **`NO_NOTES_YET` 在形状校验之前**（`lib/notes.js:627` vs `:646`）。
    所以一棵**只有**未知目录、零篇生命周期笔记的树报的是「有树零篇」，
    不是「目录不对」。这不是 bug，是上面那条取舍的副作用：零篇先报零篇。
 4. **符号链接等既非目录又非文件的路径项被静默跳过**
@@ -152,7 +168,8 @@ vendored 的 `agent-note-tree.ts:44-47` 只对 `INDEX.md` 判红，其余根层
 ## Verification
 
 `node --test tools/notes-layout.test.mjs` → **19 tests / 19 pass / 0 fail**，
-退出码 0（duration 2496.9ms）。
+退出码 0（duration 2496.9ms）。（2026-10-23 修零篇判据时该文件已长到
+30 tests / 30 pass；下面列的是最初那批 19 条的构成。）
 
 回归覆盖 19 条情形：8 条负例（未知目录、未知目录再套一层、`.txt`、
 `.json`、`.yml` 四类文件、以及「错误信息要点明散落/不会被看见」「多个违规
@@ -162,7 +179,8 @@ vendored 的 `agent-note-tree.ts:44-47` 只对 `INDEX.md` 判红，其余根层
 合规树端到端真绿）+ 3 条端到端（`runGate('tree')` 在未知目录上红且
 `reason` 以 `NOTES_LAYOUT` 开头、在根层 `.txt` 上同上、笔记根不存在时
 `reason` 必须是 `NO_NOTES_TREE` 而不是 `NOTES_LAYOUT`）+ 2 条「有意
-不覆盖」的如实钉住（根层 `*.md` 被放行、散落的 `.md` 在三道门禁下都不可见）
+不覆盖」的如实钉住（根层 `*.md` 被放行；散落的 `.md` 不算笔记 ——
+2026-10-23 由「三道门禁下都不可见」收紧为「整棵树只有它时判红」）
 + 1 条 `INDEX.md` 两道机制并存。
 
 **故障注入（三次，每次还原后复跑全绿；全部在 `.probe/probe-gaps/gc-sandbox/`

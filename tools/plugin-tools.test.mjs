@@ -176,6 +176,28 @@ test('tools: gate 在空笔记树时 passed:false，且 noteCount 如实为 0', 
   }
 });
 
+test('tools: 只有根层散落 .md 时 noteCount 报 0，散落件单独报', async () => {
+  /* 实测踩过的假绿在工具层的**第二处同款**：`noteCount` 原先取
+     `inspect().files.length`（含根层散落件），于是「只放一个散落 .md」
+     的树会返回 `passed:false` 但 `noteCount:1` —— 两个信号相互矛盾，
+     模型读成「有笔记、只是门禁没过」，实际是「一篇笔记都没有」。
+     现在与门禁同口径：笔记只数生命周期目录里的，散落件记 `strayCount`。 */
+  let box;
+  box = mount({ sessionCwd: () => box.dir });
+  try {
+    seedRepo(box.dir, false);
+    const root = join(box.dir, '.agents', 'notes');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, '2026-01-01-looks-like-a-note.md'), '# 散落\n', 'utf8');
+    const result = await box.tools.agent_notes_gate.execute({}, exec());
+    assert.equal(result.passed, false, '零篇笔记不许报通过');
+    assert.equal(result.noteCount, 0, '散落件不算笔记，noteCount 必须是 0');
+    assert.equal(result.strayCount, 1, '散落件必须单独报出来');
+  } finally {
+    box.cleanup();
+  }
+});
+
 test('tools: gate 在合规笔记树上 passed:true，且报出笔记数', async () => {
   let box;
   box = mount({ sessionCwd: () => box.dir });

@@ -98,6 +98,32 @@ test('空树：init 建出目录但零篇笔记，同样不算通过', async () 
   }
 });
 
+test('只根层散落一个 .md：零篇笔记，不许当通过', async () => {
+  /* 实测过的假绿：笔记根下只放一个 `2026-01-01-looks-like-a-note.md`
+     （不在任何生命周期目录里），三道门禁全都 `ok: 0 note(s)` 且 exit 0，
+     `runAll` 报 `passed: true` —— 零篇被冒充成通过。
+     根因是「有没有笔记」的判据用了 `files.length`（含散落件），
+     而 vendored 门禁只按 `{lifecycle}/{class}/` 枚举。
+     现在判据改用 `noteFiles`（只数生命周期目录里的），并单独报 `strayCount`。 */
+  const dir = bareRepo();
+  try {
+    const root = join(dir, '.agents', 'notes');
+    mkdirSync(root, { recursive: true });
+    writeFileSync(join(root, '2026-01-01-looks-like-a-note.md'), '# 随便\n', 'utf8');
+    const notes = createNotesService({}, undefined);
+    const result = await notes.runAll({ cwd: dir });
+    assert.equal(result.passed, false, '只有散落 .md 时绝不能报通过');
+    assert.equal(result.noteCount, 0, '散落件不算笔记');
+    assert.equal(result.strayCount, 1, '必须单独报出散落件数量');
+    for (const entry of result.results) {
+      assert.match(entry.reason, /NO_NOTES_YET/, `${entry.gate} 应说明是零篇`);
+      assert.match(entry.reason, /另有 1 个 \.md 散落/, `${entry.gate} 应点出散落件`);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('正常通路：有合规笔记时仍然通过（别把正常场景一起杀掉）', async () => {
   const dir = goodRepo();
   try {

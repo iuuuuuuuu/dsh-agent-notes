@@ -367,10 +367,26 @@ test('笔记树探测：计数与路径', () => {
     assert.equal(info.counts.implemented, 1);
     assert.equal(info.counts.proposed, 1);
     assert.equal(info.files.length, 2);
+    /* `files` 是磁盘上所有 `.md`；`noteFiles` 只留门禁真会枚举的那些。
+       两者在这份夹具里相等，所以下面必须再造一个散落件才有判别力。 */
+    assert.equal(info.noteFiles.length, 2);
+    assert.equal(info.strayFiles.length, 0);
+
+    writeFileSync(join(root, '2026-01-03-stray.md'), '# 散落\n', 'utf8');
+    const withStray = inspectTree(root);
+    assert.equal(withStray.files.length, 3, '磁盘上一共三个 .md');
+    assert.equal(withStray.noteFiles.length, 2, '笔记仍然只有两篇');
+    assert.equal(withStray.strayFiles.length, 1, '第三个是散落件');
+    assert.equal(withStray.counts.implemented, 1, '散落件不许污染生命周期计数');
+    assert.equal(withStray.counts['2026-01-03-stray.md'], undefined,
+      '散落件不许被当成一个生命周期目录');
 
     const missing = inspectTree(join(dir, 'nope'));
     assert.equal(missing.exists, false);
     assert.equal(missing.files.length, 0);
+    /* 树不存在时字段也要齐全：少一个就会在空树上抛 TypeError，那是崩溃不是判红。 */
+    assert.equal(missing.noteFiles.length, 0);
+    assert.equal(missing.strayFiles.length, 0);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
