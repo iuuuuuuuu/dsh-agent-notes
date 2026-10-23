@@ -80,8 +80,12 @@ const crux = (n.rawBody || '').split('\n')[2]?.replace(/Status:\s*rejected\s*[�
 `problem` 兜底（那会静默改变显示内容）。
 
 `must`：四小节（problem / decision / alternatives / consequences）**不受影响** ——
-它们是从全文提取的独立字段，本来就完整。`revisionOf` 也基于这些字段，
-所以指纹判断不受瘦身影响。
+它们是从全文提取的独立字段，本来就完整。
+
+（`revisionOf` 自 2026-10-23 起按**字段名全量**计入、不再维护字段清单，所以它现在也
+含这两个字段；瘦身本身是**确定性**的变换——同一份笔记每次得到的瘦身结果相同，
+因此「同一份内容 ⇒ 同一指纹」不受影响。见
+[`../bug-fix/2026-10-23-fingerprint-must-not-keep-a-field-list.md`](../bug-fix/2026-10-23-fingerprint-must-not-keep-a-field-list.md)。）
 
 实测效果（8 篇笔记）：
 
