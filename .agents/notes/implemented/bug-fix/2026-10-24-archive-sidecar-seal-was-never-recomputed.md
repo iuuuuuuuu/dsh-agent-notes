@@ -126,7 +126,10 @@ ok: 1 archived note(s) verified, 1 seal(s) in manifest   ← exit 0，没有任�
 注释就是这么写的），append-only 检查**静默跳过**。这与本仓库早前记过的
 「Git 长名 vs Node 短名别名不等」是同一个坑。
 
-**为什么不在这轮修**：这两条都落在 vendored（只读、哈希受管）与**语义选择**上，
+**为什么不在这轮修**（*2026-10-24 后续：Owner 已裁定第一条钉 `origin/main`，
+下面这段保留原文，决定见*
+[../feature/2026-10-24-archive-append-only-baseline-is-origin-main.md](../feature/2026-10-24-archive-append-only-baseline-is-origin-main.md)*）*：
+这两条都落在 vendored（只读、哈希受管）与**语义选择**上，
 不是本模块的判据错误。第一条必须先定「冻结该以哪个 ref 为基线」（`origin/main`？
 发版 tag？），那是需求侧决定 —— 钉错了会让合法的归档新增被当成违规。
 第二条可以在插件侧把 `AGENT_NOTE_ROOT` 归一成长名（`realpathSync`），
