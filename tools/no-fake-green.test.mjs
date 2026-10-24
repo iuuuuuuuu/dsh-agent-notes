@@ -14,6 +14,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
 import { createNotesService } from '../lib/notes.js';
 
 /** 建一个临时仓库目录（不建笔记树）。 */
@@ -162,6 +164,84 @@ for (const guide of ['AGENTS.md', 'CLAUDE.md']) {
     }
   });
 }
+
+for (const lifecycle of ['proposed', 'implemented', 'rejected']) {
+  test(`${lifecycle} 只有 .zh.md 旁挂：零篇必须判红`, async () => {
+    const dir = bareRepo();
+    try {
+      const target = join(dir, '.agents', 'notes', lifecycle, 'feature');
+      mkdirSync(target, { recursive: true });
+      writeFileSync(join(target, '2026-10-24-only.zh.md'), '# Translation sidecar\n', 'utf8');
+      const result = await createNotesService({}, undefined).runAll({ cwd: dir });
+      assert.equal(result.passed, false, '旁挂文件不得绕过零篇检查');
+      assert.equal(result.noteCount, 0);
+      assert.equal(result.strayCount, 1);
+      for (const entry of result.results) {
+        assert.equal(entry.passed, false);
+        assert.match(entry.reason, /NO_NOTES_YET/);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test('合规笔记加 .zh.md 旁挂：不虚增计数且正常通过', async () => {
+  const dir = goodRepo();
+  try {
+    writeFileSync(join(dir, '.agents', 'notes', 'implemented', 'feature', '2026-10-17-ok.zh.md'), '# Translation sidecar\n', 'utf8');
+    const result = await createNotesService({}, undefined).runAll({ cwd: dir });
+    assert.equal(result.noteCount, 1);
+    assert.equal(result.strayCount, 1);
+    assert.equal(result.passed, true);
+    for (const entry of result.results) {
+      assert.equal(entry.passed, true);
+      assert.equal(entry.exitCode, 0);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('真实 CLI：翻译旁挂不虚增笔记数，也不误报为目录外文件', () => {
+  const dir = goodRepo();
+  try {
+    writeFileSync(join(dir, '.agents', 'notes', 'implemented', 'feature', '2026-10-17-ok.zh.md'), '# Translation sidecar\n', 'utf8');
+    const result = spawnSync(process.execPath, [
+      fileURLToPath(new URL('./verify-notes.mjs', import.meta.url)), '--root', dir
+    ], {
+      cwd: dir,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 30000,
+      env: { ...process.env, AGENT_NOTE_ROOT: join(dir, '.agents', 'notes') }
+    });
+    assert.equal(result.error, undefined);
+    assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stdout, /共 1 篇笔记/);
+    assert.match(result.stdout, /另有 1 个 \.md 散落件、说明文件或翻译旁挂/);
+    assert.doesNotMatch(result.stdout, /散落在生命周期目录之外|也不会被校验/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('其他生命周期根层 Markdown 仍进入布局校验', async () => {
+  const dir = goodRepo();
+  try {
+    writeFileSync(join(dir, '.agents', 'notes', 'implemented', 'unexpected.md'), '# Misplaced note\n', 'utf8');
+    const result = await createNotesService({}, undefined).runAll({ cwd: dir });
+    assert.equal(result.noteCount, 2);
+    assert.equal(result.passed, false);
+    for (const entry of result.results) {
+      assert.equal(entry.exitCode, 1);
+      assert.match(entry.reason, /NOTES_LAYOUT/);
+      assert.ok(entry.stderr.includes('unexpected.md'));
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
 
 test('正常通路：有合规笔记时仍然通过（别把正常场景一起杀掉）', async () => {
   const dir = goodRepo();

@@ -186,11 +186,11 @@ for (const entry of result.results) {
   }
 }
 
-/* 散落在生命周期目录之外的 `.md` 不计入笔记数，也不被任何一道门禁校验。
-   这里必须**说出来**，否则「磁盘上 120 个 .md」与「共 114 篇笔记」的差额
-   永远没人解释（本仓库历史上正是这么漏掉的）。 */
+/* 未计入独立笔记的 Markdown 包括散落件、说明文件和活动翻译旁挂。
+   不能把它们全部描述为目录之外，也不能声称它们不受布局检查。
+   这里解释磁盘 Markdown 数与独立笔记数的差额。 */
 const strayLine = result.strayCount > 0
-  ? `\n另有 ${result.strayCount} 个 .md 散落在生命周期目录之外：它们不计入笔记数，也不会被校验。`
+  ? `\n另有 ${result.strayCount} 个 .md 散落件、说明文件或翻译旁挂：它们不计入独立笔记数。`
   : '';
 
 if (!result.passed) {
