@@ -611,3 +611,34 @@ test('上游清单与元数据可解析且记录了 ref', () => {
   assert.match(upstream.repository, /write-notes-like-deepseek/);
   assert.equal(typeof upstream.syncedAt, 'string');
 });
+
+test('超时必须生效：端点接受连接却永不响应时，必须在有限时间内判「无法校验」', async () => {
+  /* 2026-10-24 实测到的**挂死**：不带超时的 `fetch` 遇到「接受连接但永不响应」会永久卡住 ——
+     用不存在的 ref 打 jsDelivr，CLI 45 秒零输出，测试撞 120 秒上限才被杀。
+     CI 上（upstream-sync.yml 定时跑 --auto）这会把 job 挂到平台超时；
+     而**门禁挂住比门禁红更糟**：没有任何结论，也没人看得见。
+     这里用真服务器（接住请求、永不回包）验证超时确实会触发。 */
+  const { fetchWithTimeout } = await import('./sync-upstream.mjs');
+  const server = createServer(() => { /* 故意不响应 */ });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const started = Date.now();
+    let caught;
+    try {
+      await fetchWithTimeout(`http://127.0.0.1:${port}/hang`, 400);
+    } catch (error) {
+      caught = error;
+    }
+    const elapsed = Date.now() - started;
+    assert.ok(caught !== undefined, '不响应的端点必须抛错，而不是一直等');
+    assert.ok(elapsed < 5000, `超时应很快触发，实际 ${elapsed}ms`);
+    assert.match(caught.message, /127\.0\.0\.1/, '超时错误必须带上地址（否则不知道是哪个请求卡住）');
+    /* 超时属于「没做完」= 环境问题；但**不重试** —— 不响应的端点不会在 250ms 后变得响应。 */
+    const verdict = classifyFailure(caught);
+    assert.equal(verdict.area, 'environment', '超时判环境问题（exit 2），不是「上游有差异」');
+    assert.equal(verdict.retryable, false, '超时不该重试（重试只会把等待乘以三）');
+  } finally {
+    server.close();
+  }
+});

@@ -332,6 +332,11 @@ export function classifyFailure(error) {
   if (/^UND_ERR_/.test(code)) return { area: 'environment', retryable: true };
   if (TRANSPORT_CODES.has(code)) return { area: 'environment', retryable: true };
 
+  /* 超时（AbortSignal.timeout）是「没做完」，但不是抖动 —— 判环境、**不重试**。 */
+  if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+    return { area: 'environment', retryable: false };
+  }
+
   /* 3) 兜底：没有类别字段的错误只能看形状。 */
   const message = String(error?.message ?? error ?? '');
   if (TRANSPORT_MESSAGE.test(message)) return { area: 'environment', retryable: true };
@@ -368,6 +373,34 @@ export function isEnvironmentUnavailable(error) {
  */
 export function exitCodeFor(error) {
   return classifyFailure(error).area === 'contract' ? 1 : 2;
+}
+
+/** 单次请求的超时上限（毫秒）。
+ *
+ * **为什么必须有**（2026-10-24 实测）：不带超时的 `fetch` 遇到「服务端接受连接但永不响应」
+ * 会**永久挂住** —— 用不存在的 ref 打 jsDelivr 时，CLI 45 秒没有任何输出，测试撞 120 秒
+ * 上限才被杀掉。CI 上（`upstream-sync.yml` 定时跑 `--auto`）这会把 job 一直挂到平台超时。
+ * 而门禁挂住比门禁红更糟：没有任何结论，也没有人看得见。 */
+const FETCH_TIMEOUT_MS = 20_000;
+
+/**
+ * 带超时的 `fetch`。超时抛出的错误归入「传输层」——**但不重试**：
+ * 一个不响应的端点不会在 250ms 后变得响应，重试只会把等待乘以三。
+ *
+ * @param {string} url 请求地址。
+ * @returns {Promise<Response>} 响应。
+ */
+export async function fetchWithTimeout(url, timeoutMs = FETCH_TIMEOUT_MS) {
+  try {
+    return await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+  } catch (error) {
+    /* 超时错误本身**不带地址**，而「哪个请求超时」正是排查时最需要的。
+       把 URL 塞进 message，同时保留 name（分类函数靠它判「环境问题、不重试」）。 */
+    const wrapped = new Error(`${error?.message ?? error}（${url}）`);
+    wrapped.name = error?.name ?? 'Error';
+    wrapped.cause = error?.cause;
+    throw wrapped;
+  }
 }
 
 /**
@@ -429,7 +462,7 @@ export async function retryTransport(operation, options = {}) {
 async function fetchUpstream(ref, repoPath) {
   const url = `https://fastly.jsdelivr.net/gh/czm15053/write-notes-like-deepseek@${ref}/${UPSTREAM.pathPrefix}/${repoPath}`;
   return await retryTransport(async () => {
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url);
     if (response.status === 404) return undefined;
     if (!response.ok) throw httpStatusError(response.status, 'file', `拉取失败 ${response.status}: ${url}`);
     return await response.text();
@@ -450,7 +483,7 @@ async function listUpstreamDir(ref, dir) {
      这里的 404 语义与文件端点**不同** —— 它说明 ref 不存在或路径不在那棵树上，
      是**真差异**，所以带 `endpoint: 'manifest'` 让分类函数判成 exit 1。 */
   const payload = await retryTransport(async () => {
-    const response = await fetch(url);
+    const response = await fetchWithTimeout(url);
     if (!response.ok) throw httpStatusError(response.status, 'manifest', `清单拉取失败 ${response.status}: ${url}`);
     return await response.json();
   });

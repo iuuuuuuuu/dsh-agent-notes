@@ -76,6 +76,7 @@ const FAULT_SUITES = [
   ['sync-upstream 参数解析', 'args-parse.test.mjs'],
   ['文本完整性（U+FFFD）', 'text-integrity.test.mjs'],
   ['笔记门禁的跨仓库可用性', 'verify-notes-standalone.test.mjs'],
+  ['笔记门禁配套的一键升级', 'configure-notes-gate.test.mjs'],
   ['commit-msg 钩子正文', 'hook-body.test.mjs'],
   ['CI 与本地门禁对齐', 'ci-alignment.test.mjs'],
   ['插件包契约自检', 'verify-plugin.test.mjs'],
