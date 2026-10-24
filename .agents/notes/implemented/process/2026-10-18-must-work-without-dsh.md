@@ -159,3 +159,31 @@ git commit（挂了 commit-msg） → 拦下，日志未前进
 verify-notes 在独立仓库      → ok，报「1 篇笔记」（不再报 16 篇）
 verify-notes 在无笔记树仓库  → NO_NOTES_TREE，退出码 1
 ```
+
+### 2026-10-24 复验（Owner 追问「现在做到了吗」）
+
+做法：造一个**干净仓库**（`git init` + 一篇笔记；**没有** `package.json`、没有
+`node_modules`、没有 DSH），把实现按 README 承诺的方式拷进去，用系统 `node` 直接跑。
+
+| 场景 | 结果 |
+|---|---|
+| 拷 `lib/` + `tools/verify-notes.mjs` + `skills/` → 跑门禁 | ✅ exit 0，报「共 1 篇笔记」，路径指向**那个仓库** |
+| 同一份拷贝里把笔记改坏 → 再跑 | ✅ exit 1，`missing one of`（真在验，不是空转） |
+| 只拷 `lib/`+`tools/`（漏 `skills/`） | ✅ 红，并给出「脚本缺失 + 候选目录 + `cp -r` 指引」 |
+| `notes-coverage.mjs`（只 staged 受管源码、不带笔记） | ✅ 拦下并提示 `Note-Skip` |
+| `notes-supersession.mjs`（新笔记没声明关系） | ✅ 拦下 |
+| `doc-budget.mjs`（清单缺失） | ✅ exit 2「本次检查无效」 |
+
+6/6 符合预期；既有回归 `standalone.test.mjs` + `verify-notes-standalone.test.mjs`
+共 17 条全绿。
+
+**复验暴露的三条边界**（都属本节上文「边界/已知缺口」的同一族，不是新缺陷）：
+
+- 需要 Node ≥ 22.19（`.ts` 类型剥除）。这一条本轮补了运行时守卫：
+  版本不够时报 `NODE_TOO_OLD` 并说清要什么，而不是死在加载错误上
+  （见 `lib/notes.js` 的 `REQUIRED_NODE`，与 `engines` 由用例互校）。
+- 目标仓库**没有 `package.json`** 时，vendored `.ts` 会打印
+  `MODULE_TYPELESS_PACKAGE_JSON` 警告（输出噪音，退出码与结论都正确）。
+- `doc-budget.mjs` **没有** `--config` 参数，清单固定读
+  `<脚本所在包>/tools/doc-budget.json`；所以它必须放在目标仓库的 `tools/` 下。
+  这是上面「已知缺口 · doc-budget 用脚本位置定位仓库根」的具体表现。
