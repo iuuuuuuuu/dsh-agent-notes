@@ -92,3 +92,51 @@ node --test tools/archive-layout.test.mjs   # 20 tests / 20 pass / 0 fail
 **真变异**：把 `if (actual !== seal)` 改成恒假（即退回「只查键存在」的旧行为）
 ⇒ `18 pass / 2 fail`，红的正是上面第 1、2 条；还原后 `20 pass / 0 fail`，
 `git diff --stat lib/archive-layout.js` 与变异前一致。
+
+## 已知上限（2026-10-24 实测，未在本轮修）
+
+旁挂封印现在会复算了，但**append-only 那一层仍有两个已验证的上限** ——
+两者叠加时，归档区「冻结只读」的保证比它看起来弱：
+
+**一、`AGENT_NOTE_ARCHIVE_BASE_REF` 不设时，比对基准是 `HEAD`。**
+
+vendored 的默认是 `HEAD`（`verify-archived-agent-notes.ts` 里
+`const baseRef = process.env.AGENT_NOTE_ARCHIVE_BASE_REF || "HEAD"`），本插件
+`lib/notes.js` 在归档分支里沿用了同一默认。于是「改归档笔记内容 **并同步更新封印**、
+然后提交」这种改动：当前封印与磁盘一致、HEAD 的封印也与当前一致 ⇒ **判绿**。
+实测（真 git 仓库）：默认配置 `exit=0 / passed=true`；显式传基线 ref 时
+`exit=1`（本插件自己的预检兜住）。`verify.yml` 与 `upstream-sync.yml` 跑
+`npm run notes:gate` 时**都没有设**这个变量，所以 CI 上这条检查同样只到 HEAD。
+
+**二、短名/长名路径不一致会让基线比对静默跳过。**
+
+vendored 用 `relative(repoRoot, manifestPath)` 算仓库内路径，而
+`repoRoot` 来自 `git rev-parse --show-toplevel`（Windows 上返回**长名**），
+`manifestPath` 来自 `AGENT_NOTE_ROOT`（可能是 8.3 **短名**）。实测（临时目录，
+`AGENT_NOTE_ROOT` 为 `…\IUUUUU~1\…` 形态）：
+
+```
+DEBUG repoRoot=C:/Users/iuuuuuuuu/AppData/Local/Temp/f6c
+DEBUG manifestRel=../../../../../IUUUUU~1/AppData/Local/Temp/f6c/.agents/notes/archived/manifest.json
+DEBUG baselineRaw=NULL          ← git show 失败
+ok: 1 archived note(s) verified, 1 seal(s) in manifest   ← exit 0，没有任何 warning
+```
+
+即 `git show` 的任何失败都被当成「基线里没有 manifest」（源码里那个空 catch 的
+注释就是这么写的），append-only 检查**静默跳过**。这与本仓库早前记过的
+「Git 长名 vs Node 短名别名不等」是同一个坑。
+
+**为什么不在这轮修**：这两条都落在 vendored（只读、哈希受管）与**语义选择**上，
+不是本模块的判据错误。第一条必须先定「冻结该以哪个 ref 为基线」（`origin/main`？
+发版 tag？），那是需求侧决定 —— 钉错了会让合法的归档新增被当成违规。
+第二条可以在插件侧把 `AGENT_NOTE_ROOT` 归一成长名（`realpathSync`），
+但那只影响 vendored 那条**已被插件自身预检覆盖**的冗余检查，收益有限。
+
+**重访信号**：
+
+- 若 Owner 要「归档区真的冻结」→ 定一个基线 ref 并写进 CI 的
+  `AGENT_NOTE_ARCHIVE_BASE_REF`；这需要先回答「合法新增 vs 违规改动」的边界。
+- 若本插件开始把 `AGENT_NOTE_ROOT` 传给 vendored 且用户可能在短名路径下运行 →
+  在注入前做一次 `realpathSync` 归一，并补一条「短名 root 下基线比对仍生效」的用例。
+- 若上游把 `git show` 的空 catch 改成失败关闭 → 上面第二条自动消失，
+  这条「已知上限」可以删。
