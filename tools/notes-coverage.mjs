@@ -821,18 +821,24 @@ function explainFailure(scope, managed) {
   console.error(`  检查范围：${scope}`);
   for (const path of managed) console.error(`    ${path}`);
   console.error('');
-  console.error('这些路径一改，行为/工具链/流程就变了，按规范属于「非平凡改动」。');
-  console.error('请在 .agents/notes/ 下补一篇（推荐用 agent-notes 技能，含 Problem /');
-  console.error('Decision / Alternatives considered / Consequences 四节）：');
+  console.error('**先判断这次该不该写** —— 门禁只认「改没改受管路径」，认不出改动性质；');
+  console.error('写一篇凑数的笔记比不写更糟：它会把笔记树注水，后来人分不清哪篇是真决策。');
+  console.error('');
+  console.error('  属于「机械改动」→ 用下面的 Note-Skip，不要补笔记。典型：');
+  console.error('    · 纯格式化 / 错别字 / 无歧义重命名 / 版本打标');
+  console.error('    · 同步 vendored 门禁脚本（决策在上游或本插件仓库记过，这里重复记就是噪声）');
+  console.error('    · 改注释、改文档措辞（不改行为）');
+  console.error('');
+  console.error('  确属非平凡（改了行为/契约/流程/落盘格式）→ 在 .agents/notes/ 下补一篇');
+  console.error('（推荐用 agent-notes 技能，含 Problem / Decision / Alternatives considered /');
+  console.error('Consequences 四节）：');
   console.error('');
   console.error('  .agents/notes/{proposed|implemented|rejected|archived}/');
   console.error('    {feature|bug-fix|simplification|architecture|process|testing}/yyyy-mm-dd-主题.md');
   console.error('');
-  console.error('如果这次确实只是机械改动（错别字、纯注释、生成物），在提交信息里加一行：');
+  console.error('跳过就在提交信息里加一行（理由是必填的，写理由这个动作本身就是要你再想一遍）：');
   console.error('');
   console.error('  Note-Skip: <一句话理由>');
-  console.error('');
-  console.error('理由必须非空 —— 写理由这个动作本身就是要你再想一遍。');
 }
 
 /* ── 区间模式：**逐个提交**检查 ───────────────────────────────────────
