@@ -181,8 +181,21 @@ export function isExempt(rel) {
 /**
  * 执行检查。
  *
+ * 返回值里的 `exitCode` **按类别算**（与 `tools/syntax-check.mjs` 的
+ * `unknown ? 2 : errors.length > 0 ? 1 : 0` 同口径）：
+ *
+ * - `0` = 通过；
+ * - `2` = **无法进行**（`git-error`：语料根本取不到，一条文件都没检查）；
+ * - `1` = **检查失败**（这批文件真的违反了结尾换行规则；`git-empty` 这种
+ *   真语料异常也算失败，它和「真违规」同一通道）。
+ *
+ * `must`：**这两条通道不许合并。** 早先 `main()` 只按 `errors.length > 0`
+ * 判红、一律 exit 1，于是「取不到语料」被调用方/CI 读成「这批文件违反了
+ * 结尾换行规则」—— 而实际上一条文件都没看过。诊断文案一直是对的，错的是通道。
+ * 判据本身（含 `git-error` 与 `git-empty` 的区分）一个字都没改。
+ *
  * @param {{ root?: string }} [options] 可选仓库根（测试用临时目录）。
- * @returns {{ checked: number, errors: string[], source: string }} 结果。
+ * @returns {{ checked: number, errors: string[], source: string, exitCode: 0|1|2 }} 结果。
  */
 export function verifyTrailingNewlines(options = {}) {
   const root = options.root ?? PACKAGE_ROOT;
@@ -190,11 +203,13 @@ export function verifyTrailingNewlines(options = {}) {
   const errors = [];
   let checked = 0;
 
-  /* 取不到语料就是失败关闭，不许拿「扫到了 0 个文件」冒充通过。 */
+  /* 取不到语料就是失败关闭，不许拿「扫到了 0 个文件」冒充通过。
+     失败关闭的表现是 exitCode 2（无法进行），不是 1（检查失败）。 */
   if (source === 'git-error') {
     return {
       checked: 0,
       source,
+      exitCode: 2,
       errors: [
         `取不到已跟踪文件列表（git ls-files 失败）：${gitError ?? '未知错误'} —— `
         + '拒绝改用工作区遍历，因为那会换掉语料并让这道门禁看起来仍然通过'
@@ -205,6 +220,7 @@ export function verifyTrailingNewlines(options = {}) {
     return {
       checked: 0,
       source,
+      exitCode: 1,
       errors: ['仓库里一个已跟踪文件都没有（git ls-files 为空）—— 空语料不得当绿']
     };
   }
@@ -226,13 +242,24 @@ export function verifyTrailingNewlines(options = {}) {
     }
   }
 
-  return { checked, errors, source };
+  /* 走到这里才是「真结论」：扫完了，errors 非空就意味着这批文件真的违规。 */
+  return { checked, errors, source, exitCode: errors.length > 0 ? 1 : 0 };
 }
 
 /* ── CLI ──────────────────────────────────────────────────────────────── */
 
 function main() {
   const result = verifyTrailingNewlines();
+  /* 退出码**按类别**分，两条通道不许合并（约定见
+     `.agents/notes/implemented/bug-fix/2026-10-19-network-down-reported-as-contract-broken.md`）：
+     2 = 无法进行（环境不可用），1 = 检查失败（这批文件真的违反了规则）。 */
+  if (result.exitCode === 2) {
+    console.error(`结尾换行校验无法进行：${result.errors.length} 处 —— 本次没有完成校验，一条文件都没检查`);
+    for (const error of result.errors) console.error(`  ✖ ${error}`);
+    console.error('  退出码 2 = 无法进行（环境不可用），不是「这批文件违反了结尾换行规则」。');
+    console.error('  语料取不到时不许换一份语料继续报通过 —— 所以这里既不改用工作区遍历，也不下失败结论。');
+    process.exit(2);
+  }
   if (result.errors.length === 0) {
     console.log(
       `结尾换行通过：${result.checked} 个文本文件都以恰好一个换行结尾`
@@ -244,6 +271,7 @@ function main() {
   for (const error of result.errors) console.error(`  ✖ ${error}`);
   console.error('  缺结尾换行会让 diff 出现 "\\ No newline at end of file"，看 diff 的人会误读最后一行。');
   console.error('  结尾多空行是纯噪音 —— 每个碰过该文件的 diff 都多两行无关内容。');
+  console.error('  退出码 1 = 检查失败（这批文件确实违反了规则）；环境不可用时的退出码是 2。');
   process.exit(1);
 }
 

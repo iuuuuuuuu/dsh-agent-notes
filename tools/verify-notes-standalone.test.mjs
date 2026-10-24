@@ -112,6 +112,39 @@ function run(dir, entry, env = {}) {
   return { code: r.status ?? -1, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 }
 
+test('独立仓库：git 不可用时必须 exit 2，绝不改验本插件自己的笔记树', () => {
+  /* 审计发现（`.probe/audit-tool-gates.md` 的发现 4）：`repoRoot()` 用
+     `gitRoot.status === 0` 判「cwd 是仓库根」，于是 `status === null`
+     （git 不可用 / ENOENT / 被信号杀）与「真的不是仓库」被混为一谈，
+     一律回退到 PACKAGE_ROOT。后果不是报错，是**换了对象还报了绿**：
+     在别的仓库里跑，指针一偏就去验本插件自己的笔记树，exit 0。
+
+     这条用例用同一份夹具、同一个 cwd，只改 PATH 里有没有 git ——
+     对照足够干净，`assert.doesNotMatch(/笔记门禁通过/)` 直接钉住
+     「不许换个对象继续报绿」。 */
+  const dir = sandbox({ withTools: true, withLib: true, withSkill: true });
+  /* 故意写坏：缺 ## Alternatives considered，它本来就该被判红。 */
+  writeFileSync(
+    join(dir, '.agents', 'notes', 'implemented', 'process', '2026-01-01-x.md'),
+    '# Agent Note: bad\n\nStatus: implemented\n\n## Problem\n\np\n',
+    'utf8'
+  );
+
+  /* 对照：git 正常 → 必须红，并指名那篇违规笔记。 */
+  const ok = run(dir, 'tools/verify-notes.mjs');
+  assert.equal(ok.code, 1, `违规笔记必须判红，实际 ${ok.code}：\n${ok.out}`);
+  assert.match(ok.out, /2026-01-01-x\.md/, `必须指名违规文件：\n${ok.out}`);
+
+  /* 关键：git 不可用 ⇒ 无法判断是哪个仓库 ⇒ exit 2，且**不许**报通过。 */
+  const noGit = run(dir, 'tools/verify-notes.mjs', { PATH: '' });
+  assert.equal(noGit.code, 2,
+    `git 不可用属「无法进行」，必须是 2（不是 1，更不是 0），实际 ${noGit.code}：\n${noGit.out}`);
+  assert.doesNotMatch(noGit.out, /笔记门禁通过/,
+    `绝不许换一份笔记树继续报绿：\n${noGit.out}`);
+  assert.match(noGit.out, /无法判断当前目录属于哪个仓库|没有完成校验/,
+    `必须说清本次没有完成校验：\n${noGit.out}`);
+});
+
 test('独立仓库：自带 .agents/skills/…/scripts 时必须真的验它自己的笔记', () => {
   /* 这是最关键的一条 —— 目标仓库**有自己的**门禁脚本（按 skill 模板，
      脚本与笔记同在 `.agents/skills/` 下），而旧实现只去自己包里找，

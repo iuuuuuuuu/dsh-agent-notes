@@ -128,6 +128,19 @@ const runAllGates = await loadGateRunner().catch((error) => {
  * 现在的规则：cwd 是 git 仓库根就必须验它（没有笔记树 → 由 runAllGates
  * 报 NO_NOTES_TREE）；只有 cwd 完全不是仓库时，才验脚本所在的包。
  *
+ * ## 2026-10-24：把「git 失败」与「不是仓库」分开
+ *
+ * 上面那条规则原先用 `gitRoot.status === 0` 做判据，于是 `status === null`
+ * （git 不可用/ENOENT/被信号杀）与「真的不是仓库」被**混为一谈**，一律落到
+ * `return PACKAGE_ROOT`。实测：在一个**别的**仓库里（该仓库的笔记违规）把
+ * PATH 里的 git 去掉 ⇒ 输出「笔记门禁通过…… 共 116 篇笔记
+ * （<本插件的路径>）」∈ **exit 0**，那篇违规笔记从未被读过。
+ * 这不是报错，是**换了对象还报了绿** —— 本文件自己上面刚写过「回退到别处比报错更危险」。
+ *
+ * 口径照 `tools/eol.mjs` 的既有做法：**只有 git 明确说「不是 git 仓库」**
+ * 才允许回退（那是夹具/导出目录的唯一合法信号）；其余失败一律 exit 2，
+ * 并说清「本次没有完成校验」。没有任何开关可以关掉这条。
+ *
  * @returns {string} 仓库根绝对路径。
  */
 function repoRoot() {
@@ -152,6 +165,19 @@ function repoRoot() {
     const top = String(gitRoot.stdout ?? '').trim();
     if (top !== '') return top;
   }
+
+  /* `status === 0` 但 stdout 为空也算异常：正常仓库根不会这样。
+     成功路径只接受「拿到了一个非空路径」。 */
+  const detail = `${gitRoot.stderr ?? ''}${gitRoot.error?.message ?? ''}`.trim();
+  const notARepo = /not a git repository/i.test(detail);
+  if (gitRoot.status === 0 || !notARepo) {
+    console.error('✖ 无法判断当前目录属于哪个仓库，本次没有完成校验。');
+    console.error(`  原始报错：${detail === '' ? `git 退出码 ${String(gitRoot.status)}（无输出）` : detail}`);
+    console.error('  退出码 2 = 无法进行；这不是「笔记违规」，也不等于通过。');
+    console.error('  若确实要验本插件自己的笔记，请显式传 --root <路径>。');
+    process.exit(2);
+  }
+  /* git 说「这里不是仓库」—— 夹具/导出目录的合法形态，验脚本所在的包。 */
   return PACKAGE_ROOT;
 }
 
