@@ -7,14 +7,15 @@
  */
 import { strict as assert } from 'node:assert';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync, mkdtempSync, mkdirSync, writeFileSync, copyFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 
-import { isEnvironmentUnavailable, retryTransport } from './sync-upstream.mjs';
+import { isEnvironmentUnavailable, retryTransport, classifyFailure, httpStatusError } from './sync-upstream.mjs';
 import { createServer } from 'node:http';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
 const SCRIPT = join(PACKAGE_ROOT, 'tools', 'sync-upstream.mjs');
@@ -38,6 +39,132 @@ function runSync(args) {
 
 /** 快照时跳过的目录：`.git` 与依赖目录不是仓库内容，`.probe` 是探针自己的地盘。 */
 const SNAPSHOT_SKIP = new Set(['.git', 'node_modules', '.probe']);
+
+/**
+ * 拦截脚本源码：**只替换 `globalThis.fetch`**（外部依赖那一层），
+ * 被测逻辑（分类、计数、退出码、写盘闸门）全部真跑。
+ *
+ * ## 为什么必须拦在 fetch 这一层，而不是去 mock 被测函数
+ *
+ * 本仓库的纪律是门禁必须驱动真实路径。这里的边界很清楚：`fetch` 是**外部依赖**，
+ * jsDelivr 的 503 / 全 404 / 半途断流没法在测试里真实复现（那是 CDN 的行为），
+ * 所以把这一层换掉是唯一可行的办法 —— 而换掉之后，从 `classifyFailure`
+ * 到 `process.exitCode` 的每一行都仍是生产代码。
+ *
+ * 清单端点的 JSON 由**本地真实清单**（`tools/upstream-manifest.json`）构造，
+ * 保证 `collectPaths()` 枚举出的路径数与真实运行一致（脚本有
+ * `paths.length < 10` 的兜底，凭空的形状会让测试在错误的点上失败）。
+ * 每次请求往 stderr 打一行 `INTERCEPT-CALL`，用于数「到底请求了几次」——
+ * 「5xx 有没有重试」这种断言只能靠计数，改判据而没重试时消息是一样的。
+ */
+const INTERCEPT_SOURCE = `
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+const MODE = process.env.INTERCEPT_MODE ?? '503';
+const manifestPath = resolve(process.env.INTERCEPT_MANIFEST);
+const rels = Object.keys(JSON.parse(readFileSync(manifestPath, 'utf8')).files ?? {});
+
+/* 按 jsDelivr packages 端点的形状造目录树。 */
+const root = { type: 'gh', name: 'gh', files: [] };
+for (const rel of rels) {
+  const segs = ['skills', 'write-notes-like-deepseek', ...rel.split('/')];
+  let cursor = root.files;
+  for (let index = 0; index < segs.length; index += 1) {
+    const leaf = index === segs.length - 1;
+    let node = cursor.find((entry) => entry.name === segs[index]
+      && (leaf ? entry.type === 'file' : entry.type === 'directory'));
+    if (node === undefined) {
+      node = leaf
+        ? { type: 'file', name: segs[index] }
+        : { type: 'directory', name: segs[index], files: [] };
+      cursor.push(node);
+    }
+    if (!leaf) cursor = node.files;
+  }
+}
+
+let call = 0;
+globalThis.fetch = async (input) => {
+  const url = typeof input === 'string' ? input : String(input?.url ?? input);
+  call += 1;
+  process.stderr.write('INTERCEPT-CALL #' + call + ' ' + url + '\\n');
+
+  if (url.includes('data.jsdelivr.com')) {
+    return new Response(JSON.stringify(root), {
+      status: 200, headers: { 'content-type': 'application/json' }
+    });
+  }
+
+  if (MODE === 'socket') {
+    const cause = Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' });
+    throw new TypeError('terminated', { cause });
+  }
+  if (MODE === 'all404') return new Response('not found', { status: 404 });
+  return new Response('service unavailable', { status: 503 });
+};
+`;
+
+/**
+ * 起一次「网络边界被拦住」的真实 CLI 运行。
+ *
+ * @param {'503' | 'all404' | 'socket'} mode 拦截模式。
+ * @param {string[]} [args] CLI 参数。
+ * @param {{ sandbox?: boolean }} [options] `sandbox=true` 时在**仓库的隔离副本**里跑
+ *   （脚本 + 两份数据文件都是副本）—— 凡是要走写盘路径的用例都必须用它。
+ * @returns {{ code: number, out: string, fileCalls: number, manifestCalls: number, sandboxRoot?: string, manifestPath: string }} 结果与请求计数。
+ */
+function runSyncIntercepted(mode, args = ['--check'], options = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'sync-intercept-'));
+  let root = PACKAGE_ROOT;
+  let script = SCRIPT;
+  let manifestFile = join(PACKAGE_ROOT, 'tools', 'upstream-manifest.json');
+  try {
+    if (options.sandbox === true) {
+      /* ★ 隔离副本。**凡是要走写盘路径的用例都必须这样跑**：
+         `writeManifest` 的默认落点就是仓库里的两份数据文件，一旦被测的闸门
+         自身被改坏（正是变异测试在做的事），对真仓库跑就等于把 21 条基线写没。
+         这不是假设 —— 本轮初次写这条用例时就真把 `files` 从 21 条写成 0 条，
+         只能从 HEAD 恢复。仓库里 `.agents/notes/implemented/bug-fix/
+         2026-10-18-ci-vendored-tampered-by-tests.md` 早记过同一类事故。 */
+      mkdirSync(join(dir, 'tools'), { recursive: true });
+      copyFileSync(join(PACKAGE_ROOT, 'tools', 'sync-upstream.mjs'), join(dir, 'tools', 'sync-upstream.mjs'));
+      copyFileSync(join(PACKAGE_ROOT, 'tools', 'upstream-manifest.json'), join(dir, 'tools', 'upstream-manifest.json'));
+      copyFileSync(join(PACKAGE_ROOT, 'upstream.json'), join(dir, 'upstream.json'));
+      root = dir;
+      script = join(dir, 'tools', 'sync-upstream.mjs');
+      manifestFile = join(dir, 'tools', 'upstream-manifest.json');
+    }
+
+    const preload = join(dir, 'intercept.mjs');
+    writeFileSync(preload, INTERCEPT_SOURCE, 'utf8');
+    const result = spawnSync(NODE, ['--import', pathToFileURL(preload).href, script, ...args], {
+      cwd: root,
+      encoding: 'utf8',
+      windowsHide: true,
+      timeout: 120_000,
+      env: {
+        ...process.env,
+        INTERCEPT_MODE: mode,
+        INTERCEPT_MANIFEST: manifestFile
+      }
+    });
+    const out = `${result.stdout ?? ''}${result.stderr ?? ''}`;
+    const lines = out.split('\n').filter((line) => line.includes('INTERCEPT-CALL'));
+    return {
+      code: result.status ?? -1,
+      out,
+      fileCalls: lines.filter((line) => line.includes('fastly.jsdelivr.net')).length,
+      manifestCalls: lines.filter((line) => line.includes('data.jsdelivr.com')).length,
+      sandboxRoot: options.sandbox === true ? root : undefined,
+      manifestPath: manifestFile
+    };
+  } finally {
+    /* 副本要留到断言之后才能删 —— 由调用方在 finally 里删，这里只清 preload 所在目录
+       （sandbox 时 preload 与副本同目录，所以 sandbox 的清理交给调用方）。 */
+    if (options.sandbox !== true) rmSync(dir, { recursive: true, force: true });
+  }
+}
 
 /**
  * 给整棵仓库做内容快照：相对路径 → 大小/mtime/内容摘要。
@@ -303,6 +430,110 @@ test('HTTP 状态码失败不重试：404 是明确回答，不是抖动', async
     /404/
   );
   assert.equal(attempts, 1, `非传输层错误只该试 1 次，实际 ${attempts} 次`);
+});
+
+test('口径表：认类别不认措辞 —— HTTP 状态、传输层、认不出来的各归其位', () => {
+  /* 这张表是 2026-10-24 那次假红的直接对治。旧实现用
+     `/\b(401|403|429)\b/` 匹配**消息里的数字**，5xx 整族因此落进
+     「检查失败」(exit 1)，把「这次没做成校验」说成「上游有差异」。
+     逐格钉住，免得日后又被改回穷举。 */
+  const env = (error) => classifyFailure(error).area === 'environment';
+  const retry = (error) => classifyFailure(error).retryable;
+
+  /* 环境问题 + 可重试：5xx 与 408 是经典瞬态。 */
+  for (const status of [500, 502, 503, 504, 408]) {
+    const error = httpStatusError(status, 'file', `拉取失败 ${status}: http://x/y`);
+    assert.equal(env(error), true, `${status} 属「这次没做成校验」，必须退 2`);
+    assert.equal(retry(error), true, `${status} 是可重试瞬态`);
+  }
+  /* 环境问题但**不**重试：立刻重试只会加深限流。 */
+  for (const status of [401, 403, 429]) {
+    const error = httpStatusError(status, 'file', `拉取失败 ${status}: http://x/y`);
+    assert.equal(env(error), true, `${status} 属环境问题`);
+    assert.equal(retry(error), false, `${status} 不该重试（会加深限流）`);
+  }
+  /* 其余 4xx 也是「没做成」，但不是抖动，不重试。 */
+  for (const status of [400, 405, 451]) {
+    const error = httpStatusError(status, 'file', `拉取失败 ${status}: http://x/y`);
+    assert.equal(env(error), true, `${status} 不是「上游内容变了」，退 2`);
+    assert.equal(retry(error), false, `${status} 不重试`);
+  }
+  /* 唯一的例外：**清单端点**的 404 说明 ref 不存在，那是真差异。 */
+  const missingRef = httpStatusError(404, 'manifest', '清单拉取失败 404: http://x/y');
+  assert.equal(classifyFailure(missingRef).area, 'contract',
+    '清单端点 404 = ref 不存在，是真差异，必须留在 exit 1 —— 全改 2 会掩盖它');
+  assert.equal(retry(missingRef), false);
+  /* 文件端点的 404 根本不会走到这里（fetchUpstream 返回 undefined，是有效结果）。 */
+  assert.equal(env(httpStatusError(404, 'file', '拉取失败 404: http://x/y')), true,
+    '文件端点 404 若真被抛出来，也属「没做成」；正常路径由 fetchUpstream 直接返回 undefined');
+
+  /* 传输层族：前缀与 errno 码，不认措辞。 */
+  for (const code of ['UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']) {
+    const error = Object.assign(new Error('x'), { cause: { code } });
+    assert.equal(env(error), true, `${code} 属环境问题`);
+    assert.equal(retry(error), true, `${code} 可重试`);
+  }
+  assert.equal(retry(new TypeError('terminated')), true, '没有 code 的 terminated 也应重试');
+  assert.equal(retry(new Error('read ECONNRESET')), true, 'errno 措辞兜底');
+
+  /* 认不出来时默认站在「真差异」一侧：认不出来不等于没问题。 */
+  assert.equal(env(new Error('404 Not Found')), false, '认不出来的默认按真差异处理');
+});
+
+test('5xx 是环境问题**且会被重试**：真跑 CLI + 拦网络边界，靠请求计数判定', () => {
+  /* 消息断言证明不了重试 —— 不重试时消息一模一样。所以必须数请求次数。
+     期望：清单 4 次（collectPaths 每个目录一次）+ 文件端点 3 次（retryTransport 的 3 次尝试）。 */
+  const r = runSyncIntercepted('503');
+  assert.equal(r.code, 2, `5xx 必须退 2（无法进行），实际 ${r.code}：\n${r.out}`);
+  assert.match(r.out, /无法校验上游/, `必须说「无法校验」而不是「合并失败」：\n${r.out}`);
+  assert.match(r.out, /503/, '要指出真实状态码');
+  assert.doesNotMatch(r.out, /合并失败/, '不得再报成「合并失败」（那是 exit 1 的措辞）');
+  assert.equal(r.fileCalls, 3, `文件端点必须重试 3 次，实际 ${r.fileCalls} 次`);
+});
+
+test('全 404 不得报「一致」：必须判「没能完成校验」且零写入', () => {
+  /* 这是本仓库最忌的「空集合当绿」：21 个文件全部取不到内容，
+     旧实现打印「内置副本与上游一致，无需合并」并 exit 0，
+     不带 --check 时还把 21 条基线写成 0 条。 */
+  const manifest = join(PACKAGE_ROOT, 'tools', 'upstream-manifest.json');
+  const before = readFileSync(manifest, 'utf8');
+  const r = runSyncIntercepted('all404', ['--check']);
+  const after = readFileSync(manifest, 'utf8');
+
+  assert.equal(r.code, 2, `全 404 = 没做成校验，必须退 2，实际 ${r.code}：\n${r.out}`);
+  assert.doesNotMatch(r.out, /内置副本与上游一致|无需合并|一致，无漂移/,
+    `一个文件都没读到内容时绝不能报「一致」：\n${r.out}`);
+  assert.match(r.out, /一个\*\*上游文件都没比对成|都没比对成/, '要说清缺口有多大');
+  assert.equal(after, before, '--check 不得改动 manifest');
+  assert.equal(r.fileCalls, 21, `21 个文件都要真请求过（说明是真枚举出来的），实际 ${r.fileCalls}`);
+});
+
+test('全 404 的**写盘路径**也不许写：零写入比写坏好', () => {
+  /* 去掉 --check，走「合并」那条路。旧实现在这里把 manifest 写空，
+     且不需要 --yes。判据是比对下限守卫在**写盘之前**抛出。
+
+     ★ 这条用例必须在**隔离副本**里跑（`sandbox: true`）：它刻意触发写盘路径，
+     而被测闸门一旦被改坏（变异测试干的正是这件事），对真仓库跑就会把
+     21 条基线写成 0 条 —— 初次写这条用例时真的发生了，只能从 HEAD 恢复。
+     隔离之后，「闸门坏了」表现为**用例变红**，而不是**仓库被写坏**。 */
+  const real = join(PACKAGE_ROOT, 'tools', 'upstream-manifest.json');
+  const realBefore = readFileSync(real, 'utf8');
+  const r = runSyncIntercepted('all404', [], { sandbox: true }); // 既无 --check 也无 --yes
+  try {
+    assert.equal(r.code, 2, `必须退 2（无法进行），实际 ${r.code}：\n${r.out}`);
+    assert.doesNotMatch(r.out, /内置副本与上游一致|无需合并/,
+      `一个文件都没比对成时绝不能报「一致」：\n${r.out}`);
+    assert.doesNotMatch(r.out, /已记录 tools\/upstream-manifest\.json/, '不得打印「已记录」');
+    /* 副本里的基线必须一条不动。 */
+    const sandboxManifest = JSON.parse(readFileSync(r.manifestPath, 'utf8'));
+    assert.equal(Object.keys(sandboxManifest.files ?? {}).length, 21,
+      '一个文件都没比对成时，基线必须一条不动 —— 写一份缩水的清单比不写更糟');
+    /* 真仓库也必须没被动过（双保险：防止将来有人把 sandbox 去掉）。 */
+    assert.equal(readFileSync(real, 'utf8'), realBefore,
+      '这条用例绝不许改动真仓库的基线（需要写盘路径的用例一律 sandbox: true）');
+  } finally {
+    rmSync(r.sandboxRoot, { recursive: true, force: true });
+  }
 });
 
 test('同步清单确实存在且覆盖全部上游文件', { timeout: 180_000 }, () => {
