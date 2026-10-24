@@ -113,11 +113,11 @@ vendored 的默认是 `HEAD`（`verify-archived-agent-notes.ts` 里
 vendored 用 `relative(repoRoot, manifestPath)` 算仓库内路径，而
 `repoRoot` 来自 `git rev-parse --show-toplevel`（Windows 上返回**长名**），
 `manifestPath` 来自 `AGENT_NOTE_ROOT`（可能是 8.3 **短名**）。实测（临时目录，
-`AGENT_NOTE_ROOT` 为 `…\IUUUUU~1\…` 形态）：
+`AGENT_NOTE_ROOT` 为 `…\<8.3 短名>\…` 形态）：
 
 ```
 DEBUG repoRoot=C:/Users/iuuuuuuuu/AppData/Local/Temp/f6c
-DEBUG manifestRel=../../../../../IUUUUU~1/AppData/Local/Temp/f6c/.agents/notes/archived/manifest.json
+DEBUG manifestRel=../../../../../<8.3 短名>/AppData/Local/Temp/f6c/.agents/notes/archived/manifest.json
 DEBUG baselineRaw=NULL          ← git show 失败
 ok: 1 archived note(s) verified, 1 seal(s) in manifest   ← exit 0，没有任何 warning
 ```
