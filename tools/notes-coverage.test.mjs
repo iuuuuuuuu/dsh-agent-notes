@@ -852,3 +852,30 @@ test('notes-coverage: 配置文件可覆盖自动检测', () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('notes-coverage: 拦截文案必须先讲「该不该写」，并点明机械同步可跳过', () => {
+  /* 需求来源（Owner 2026-10-24）：「可不要为了写笔记而写笔记，要预防这种情况」。
+     门禁只能识别「改了受管路径」，识别不了改动性质；如果文案一上来就催「补一篇」，
+     人就会为凑数而写 —— 笔记树注水之后，后来人分不清哪篇是真决策。
+     所以文案要先让人判断，并把最常见的机械形态（含 vendored 脚本同步）说清楚。 */
+  const dir = makeRepo();
+  try {
+    const { code, out } = commitAndCheck(dir, { 'lib/board.js': 'export const a = 1;\n' }, 'feat: 改行为');
+    assert.notEqual(code, 0);
+    assert.match(out, /先判断这次该不该写/, '必须先讲判断，再讲怎么补');
+    assert.match(out, /凑数的笔记比不写更糟/, '要说清写凑数笔记的代价');
+    assert.match(out, /同步 vendored 门禁脚本/, '必须点明「同步门禁脚本」属于可跳过的机械改动');
+    assert.match(out, /Note-Skip/, '仍要给出合法出口');
+    /* 顺序：先判断 → 先给「便宜的出口」（机械改动 + Note-Skip）→ 再说「确属非平凡才补写」。
+       用出现位置钉住，防止将来被改回「一上来就催写」。 */
+    const judgeAt = out.indexOf('先判断这次该不该写');
+    const skipAt = out.indexOf('属于「机械改动」');
+    const writeAt = out.indexOf('确属非平凡');
+    assert.ok(
+      judgeAt !== -1 && skipAt !== -1 && writeAt !== -1 && judgeAt < skipAt && skipAt < writeAt,
+      `文案顺序不合理：judge=${judgeAt} skip=${skipAt} write=${writeAt}`
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
