@@ -274,3 +274,16 @@ test('scriptsDirCandidates：认识 .agents/notes-scripts/（真实项目长出�
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('独立仓库：GIT_DIR 等环境覆盖时不许退回包根（无法判断就失败关闭）', () => {
+  /* CodeRabbit 在 PR #44 上点名：`GIT_DIR` 指错地方时 git 报的也是
+     「not a git repository」，单凭这句话回退到包根，就会去验**本插件自己的**笔记树
+     并报绿 —— 又回到「换了对象还报了绿」。覆盖存在时一律 exit 2。 */
+  const dir = sandbox({ withTools: true, withLib: true, withSkill: true });
+  const r = run(dir, 'tools/verify-notes.mjs', {
+    GIT_DIR: join(dir, 'no-such-git-dir')
+  });
+  assert.equal(r.code, 2, `覆盖下无法判断仓库归属，必须 exit 2，实际 ${r.code}：\n${r.out}`);
+  assert.doesNotMatch(r.out, /笔记门禁通过/, `不许换一份笔记树继续报绿：\n${r.out}`);
+  assert.match(r.out, /GIT_DIR|无法判断当前目录属于哪个仓库/, `要说清原因：\n${r.out}`);
+});

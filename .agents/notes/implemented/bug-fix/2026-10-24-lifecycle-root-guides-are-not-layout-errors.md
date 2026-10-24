@@ -54,7 +54,7 @@ if (segs.length === 2 && ROOT_ALLOWLIST.has(segs[1] ?? '')) continue
 - **收益**：按上游布局写的笔记树不再被插件判红。`vendored 绿 / 插件红` 这种最令人困惑的组合消失。
 - **收益**：零篇守卫不受影响 —— 目录说明仍不进 `noteFiles`，只有它一个文件的树仍然判 `NO_NOTES_YET`。
 - **收益**：放宽的边界被一条现有用例钉住（`implemented/unexpected.md` 必须仍然红），不会滑成「任意 `.md` 都放行」。
-- **代价与已知上限**：**白名单有两份**（vendored 的 `ROOT_ALLOWLIST` 与本模块的 `LIFECYCLE_ROOT_GUIDES`）。vendored 是只读副本，无法从它 import 常量，所以两份必然共存；上游一旦新增白名单条目，插件这边要跟着加，否则又会出现「vendored 绿 / 插件红」。这是本轮明确接受的代价。
+- **代价与已知上限**：**白名单有两份**（vendored 的 `ROOT_ALLOWLIST` 与本模块的 `LIFECYCLE_ROOT_GUIDES`）。**2026-10-24 评审补强**：这份漂移现在由 `npm run verify` 机械比对（`tools/verify-plugin.mjs` 里新增的「生命周期白名单」检查，解析两份源码的常量并逐项比较，不一致即非零退出）——CodeRabbit 在 PR #44 上点名「仅把检查加入 sync:check 不足以覆盖常规门禁」，所以放进了 check 链。两份仍然存在、仍要人工同步，但**不一致会被门禁抓住**，不再靠注释自律。vendored 是只读副本，无法从它 import 常量，所以两份必然共存；上游一旦新增白名单条目，插件这边要跟着加，否则又会出现「vendored 绿 / 插件红」。这是本轮明确接受的代价。
 - **代价与已知上限**：本篇推翻了 `2026-10-22-stray-notes-at-notes-root-are-invisible.md` 里「说明文件仍受布局检查」那一句的一半；那篇原文按「不得把一篇笔记改写成另一个决定」的规矩**不改写**，只加互链指向本篇。
 - **重访信号**：
   - 上游 `ROOT_ALLOWLIST` 有变动（增删名字）→ 必须同步本模块的常量，并跑 `node --test tools/no-fake-green.test.mjs`。

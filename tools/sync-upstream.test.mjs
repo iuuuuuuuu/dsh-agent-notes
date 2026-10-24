@@ -106,6 +106,21 @@ globalThis.fetch = async (input) => {
 `;
 
 /**
+ * 当前上游清单里的文件条目数。
+ *
+ * **不要在这个文件里写死 21**：`tools/upstream-manifest.json` 会随上游增删文件而变，
+ * 而 `upstream-sync.yml` 的 `--auto` 路径**会改写它**。写死数字的后果是：
+ * 上游加一个文件，这些断言就变红 —— 红的原因是「用例写死了数字」而不是门禁坏了，
+ * 正是本 PR 要消灭的那种假红。断言的真实意图是「请求数/基线条数 = 清单条目数」。
+ *
+ * @returns {number} 条目数。
+ */
+function manifestEntryCount() {
+  const file = join(PACKAGE_ROOT, 'tools', 'upstream-manifest.json');
+  return Object.keys(JSON.parse(readFileSync(file, 'utf8')).files ?? {}).length;
+}
+
+/**
  * 起一次「网络边界被拦住」的真实 CLI 运行。
  *
  * @param {'503' | 'all404' | 'socket'} mode 拦截模式。
@@ -505,7 +520,8 @@ test('全 404 不得报「一致」：必须判「没能完成校验」且零写
     `一个文件都没读到内容时绝不能报「一致」：\n${r.out}`);
   assert.match(r.out, /一个\*\*上游文件都没比对成|都没比对成/, '要说清缺口有多大');
   assert.equal(after, before, '--check 不得改动 manifest');
-  assert.equal(r.fileCalls, 21, `21 个文件都要真请求过（说明是真枚举出来的），实际 ${r.fileCalls}`);
+  assert.equal(r.fileCalls, manifestEntryCount(),
+    `清单里的每个文件都要真请求过（说明是真枚举出来的），实际 ${r.fileCalls}`);
 });
 
 test('全 404 的**写盘路径**也不许写：零写入比写坏好', () => {
@@ -518,6 +534,9 @@ test('全 404 的**写盘路径**也不许写：零写入比写坏好', () => {
      隔离之后，「闸门坏了」表现为**用例变红**，而不是**仓库被写坏**。 */
   const real = join(PACKAGE_ROOT, 'tools', 'upstream-manifest.json');
   const realBefore = readFileSync(real, 'utf8');
+  /* 条目数从清单读，不写死 21：上游增删文件时数字会变，写死会让用例因为
+     「数字过时」而红 —— 那是假红，不是门禁坏了。 */
+  const realEntryCount = Object.keys(JSON.parse(realBefore).files ?? {}).length;
   const r = runSyncIntercepted('all404', [], { sandbox: true }); // 既无 --check 也无 --yes
   try {
     assert.equal(r.code, 2, `必须退 2（无法进行），实际 ${r.code}：\n${r.out}`);
@@ -526,7 +545,7 @@ test('全 404 的**写盘路径**也不许写：零写入比写坏好', () => {
     assert.doesNotMatch(r.out, /已记录 tools\/upstream-manifest\.json/, '不得打印「已记录」');
     /* 副本里的基线必须一条不动。 */
     const sandboxManifest = JSON.parse(readFileSync(r.manifestPath, 'utf8'));
-    assert.equal(Object.keys(sandboxManifest.files ?? {}).length, 21,
+    assert.equal(Object.keys(sandboxManifest.files ?? {}).length, realEntryCount,
       '一个文件都没比对成时，基线必须一条不动 —— 写一份缩水的清单比不写更糟');
     /* 真仓库也必须没被动过（双保险：防止将来有人把 sandbox 去掉）。 */
     assert.equal(readFileSync(real, 'utf8'), realBefore,
@@ -539,7 +558,8 @@ test('全 404 的**写盘路径**也不许写：零写入比写坏好', () => {
 test('同步清单确实存在且覆盖全部上游文件', { timeout: 180_000 }, () => {
   const { code, out } = runSync(['--check']);
   assertCheckPassed(code, out, '--check 在上游一致时');
-  assert.match(out, /相同\s*21/, `应核对到 21 个文件，实际输出:\n${out}`);
+  assert.match(out, new RegExp(`相同\\s*${manifestEntryCount()}`),
+    `应核对到清单里的全部文件，实际输出:\n${out}`);
   assert.doesNotMatch(out, /只枚举到|找不到目录/, '不应出现枚举失败');
 });
 

@@ -170,9 +170,19 @@ function repoRoot() {
      成功路径只接受「拿到了一个非空路径」。 */
   const detail = `${gitRoot.stderr ?? ''}${gitRoot.error?.message ?? ''}`.trim();
   const notARepo = /not a git repository/i.test(detail);
-  if (gitRoot.status === 0 || !notARepo) {
+  /* `GIT_DIR` / `GIT_WORK_TREE` / `GIT_COMMON_DIR` 被显式覆盖时，
+     「not a git repository」**不再能证明**「cwd 不是仓库」—— 覆盖指错地方时
+     git 报的正是这一句，而真实仓库就在 cwd。这种情形必须失败关闭，
+     否则又回到「换了对象还报了绿」。（CodeRabbit 在 PR #44 上点名过。） */
+  const hasGitEnvOverride = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR']
+    .some((name) => typeof process.env[name] === 'string' && process.env[name].trim() !== '');
+  if (gitRoot.status === 0 || !notARepo || hasGitEnvOverride) {
     console.error('✖ 无法判断当前目录属于哪个仓库，本次没有完成校验。');
     console.error(`  原始报错：${detail === '' ? `git 退出码 ${String(gitRoot.status)}（无输出）` : detail}`);
+    if (hasGitEnvOverride) {
+      console.error('  检测到 GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR 覆盖 ——'
+        + ' 此时 git 的报错不能证明 cwd 不是仓库。');
+    }
     console.error('  退出码 2 = 无法进行；这不是「笔记违规」，也不等于通过。');
     console.error('  若确实要验本插件自己的笔记，请显式传 --root <路径>。');
     process.exit(2);

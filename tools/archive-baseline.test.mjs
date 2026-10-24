@@ -282,3 +282,21 @@ for (const [label, ref, expected] of [
     }
   });
 }
+
+test('archived: Git 本身故障时不许退回 HEAD 顶替（必须失败关闭）', async () => {
+  /* CodeRabbit 在 PR #44 上点名：把「超时 / Git 执行错误」当成「没有 origin/main」，
+     就会悄悄退回 HEAD，于是一批已提交的封印改动被放过，而门禁照样打印绿。
+     这里用 GIT_DIR 指到一个不存在的目录制造真实的 Git 故障 ——
+     判据是「不许绿」，而不是某个具体退出码（失败关闭的形态可以不同）。 */
+  const { cwd, root } = resealFixture({ withOriginMain: true });
+  try {
+    const result = await runGate('archived', {
+      cwd, notesRoot: root,
+      env: { AGENT_NOTE_ROOT: root, GIT_DIR: join(cwd, 'no-such-git-dir') }
+    });
+    assert.equal(result.passed, false, `Git 故障下不许判绿：${JSON.stringify(result)}`);
+    assert.notEqual(result.exitCode, 0);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});

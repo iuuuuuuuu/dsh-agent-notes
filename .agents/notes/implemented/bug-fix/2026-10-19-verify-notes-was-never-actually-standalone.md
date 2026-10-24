@@ -144,6 +144,12 @@ Independent: 本篇处理的是**笔记门禁外壳的跨仓库可用性**，与
   里有没有 git」的对照用例 —— git 正常时 exit 1 并指名违规文件，git 不可用时
   exit 2 且断言输出**不含**「笔记门禁通过」。真变异（退回无条件回退）⇒ 该用例红，
   实际输出正是去验了插件自己的 `ok: 1 note(s)`。
+- **2026-10-24 评审补强（CodeRabbit on PR #44）：`GIT_DIR` 覆盖也算「无法判断」。**
+  `GIT_DIR` / `GIT_WORK_TREE` / `GIT_COMMON_DIR` 被显式覆盖且指错地方时，
+  git 报的**同样是**「not a git repository」—— 单凭这句话回退到包根，
+  又会去验插件自己的笔记树并报绿。现在只要检测到这类覆盖就 exit 2。
+  回归：`tools/verify-notes-standalone.test.mjs` 用 `GIT_DIR=<不存在的目录>`
+  断言 exit 2、输出不含「笔记门禁通过」、且说明原因；真变异（去掉覆盖判断）⇒ 该用例红。
 
 ## Verification
 

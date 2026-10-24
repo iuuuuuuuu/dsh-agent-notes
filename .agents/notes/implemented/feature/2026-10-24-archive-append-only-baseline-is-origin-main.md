@@ -92,3 +92,24 @@ node --test tools/archive-baseline.test.mjs   # 11 tests / 11 pass / 0 fail
 
 **真变异**（把默认改回 `explicitBaseline || 'HEAD'`）⇒ `0 pass / 2 fail`，
 两条新用例同时红；还原后 `11/11`。
+
+### 评审补强（CodeRabbit on PR #44）：把「Git 故障」与「没有该 ref」分开
+
+上面第一版把 `git rev-parse --verify` 的**任何**非零退出都当成「没有 origin/main」，
+于是超时、`spawn` 失败、仓库损坏都会悄悄退回 HEAD —— 而退回之后，
+一批**已提交**的封印改动就被放过，门禁照样打印绿。这正是本篇要消除的那种失效。
+
+现在：
+
+- 探测命令加 `--quiet`：**只有「ref 不存在」才是退 1 且无输出**；
+- 退 1 且非超时 ⇒ 退回 HEAD + 告警（原行为）；
+- **其余（128 / 超时 / 被信号杀）⇒ 失败关闭**（`ARCHIVE_BASELINE: origin/main baseline probe failed`）。
+
+另补一条同源洞：`GIT_DIR` / `GIT_WORK_TREE` / `GIT_COMMON_DIR` 被覆盖时，
+`git` 报的也是「not a git repository」—— 插件预检会以为「这里不是仓库」而跳过，
+vendored 也会跳过，**两层一起静默降级**、`exit 0` 还带一句 warning（实测）。
+现在这种情形直接失败关闭：**无法判断仓库归属就不许判绿。**
+
+两条都有回归（`tools/archive-baseline.test.mjs` 11 → 12 条）：
+「Git 本身故障时不许退回 HEAD 顶替」用 `GIT_DIR` 指向不存在的目录制造真实故障，
+断言不许绿；真变异（去掉覆盖判断）⇒ 该用例红。
