@@ -404,3 +404,89 @@ test('输出清洗：过滤 node 噪声但保留真实诊断', () => {
   assert.equal(cleaned.includes('Reparsing'), false, '噪声应被过滤');
   assert.match(cleaned, /missing ## Alternatives considered/, '真实诊断必须保留');
 });
+
+/**
+ * 造一个只有一篇 implemented 笔记的临时仓库。
+ *
+ * @param {string} body 正文（`## Problem` 之后的内容）。
+ * @returns {string} 仓库根。
+ */
+function maskingRepo(body) {
+  const dir = mkdtempSync(join(tmpdir(), 'an-mask-'));
+  mkdirSync(join(dir, '.git'), { recursive: true });
+  const noteDir = join(dir, '.agents', 'notes', 'implemented', 'bug-fix');
+  mkdirSync(noteDir, { recursive: true });
+  writeFileSync(join(noteDir, '2026-01-01-x.md'), [
+    '# Agent Note: masking fixture', '',
+    'Status: implemented', '',
+    '## Problem', '', body, '',
+    '## Decision', '', 'd', '',
+    '## Alternatives considered', '', 'a', '',
+    '## Consequences', '', 'c', ''
+  ].join('\n'), 'utf8');
+  return dir;
+}
+
+test('格式门禁：行内代码里的 `<!--` 不得被当成 HTML 注释（真实子进程）', async () => {
+  /* 实测来源（sourin-flutter-spike，2026-10-22）：一篇**必须**写出 `<!--` 才能
+     说明问题的笔记，因为这串字符出现在行内代码里、同行又没有结尾标记，
+     vendored 的蒙版把后面每一行都当成注释 ⇒ 报「缺 ## Consequences」，
+     而那一节明明在文件里。作者的第一反应只会是删掉证据去迁就工具。
+     这是最坏的一种门禁缺陷：它诱导维护者销毁证据。
+     *
+     修法在执行期的临时副本上打补丁（vendored 原文件逐字节不变），
+     这条用例走**真子进程**，断言补丁确实让结论变成绿。 */
+  const dir = maskingRepo('正文里展示 `<!--` 这个语法，同行没有闭合标记。');
+  try {
+    const result = await runGate('format', {
+      cwd: dir, notesRoot: join(dir, '.agents', 'notes')
+    });
+    assert.equal(result.passed, true,
+      `行内代码里的 HTML 注释开头不该开注释：${result.stderr}`);
+    assert.equal(result.exitCode, 0);
+    /* 证据：磁盘上的 vendored 源码**仍然**是未打补丁的样子 ——
+       绿是补丁带来的，不是上游本来就是对的。 */
+    const vendored = readFileSync(
+      join(import.meta.dirname, '..', 'skills', 'agent-notes', 'scripts', 'verify-agent-note-format.ts'),
+      'utf8'
+    );
+    assert.match(vendored, /l\.indexOf\("<!--"\)/,
+      'vendored 原文件必须保持未打补丁（哈希门禁在盯着），补丁只作用于临时副本');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('格式门禁：真正的未闭合注释仍然判红（补丁不许把真的遮罩一起放宽）', async () => {
+  /* 对照组。补丁只让**行内代码**里的注释标记不参与状态机；
+     正文里真的开了一个不闭合的 HTML 注释时，后面的 `## Consequences`
+     本来就不该被算作小节 —— 这条必须继续红。 */
+  const dir = maskingRepo('正常的散文行。\n\n<!-- 这里开了一个注释且永远不闭合\n');
+  try {
+    const result = await runGate('format', {
+      cwd: dir, notesRoot: join(dir, '.agents', 'notes')
+    });
+    assert.equal(result.passed, false, '真未闭合的注释必须继续判红');
+    assert.match(result.stderr, /missing one of \["## Consequences"/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('vendored 补丁：锚点对不上时必须报 missed（不许静默降级）', async () => {
+  const { patchVendoredScript } = await import('../lib/vendored-patch.js');
+  /* 拿真实源码打，确认两处都命中。 */
+  const real = readFileSync(
+    join(import.meta.dirname, '..', 'skills', 'agent-notes', 'scripts', 'verify-agent-note-format.ts'),
+    'utf8'
+  );
+  const patched = patchVendoredScript('verify-agent-note-format.ts', real);
+  assert.equal(patched.missed.length, 0, `真实源码应两处都命中：${patched.missed.join('；')}`);
+  assert.equal(patched.applied.length, 2);
+
+  /* 上游改了这段代码的模拟：两处锚点都不在。 */
+  const drift = patchVendoredScript('verify-agent-note-format.ts', 'function maskSource() {}\n');
+  assert.equal(drift.applied.length, 0);
+  assert.equal(drift.missed.length, 2,
+    '锚点对不上必须如实报 missed —— 调用方要据此告警，缺陷才不会被悄悄放回来');
+});

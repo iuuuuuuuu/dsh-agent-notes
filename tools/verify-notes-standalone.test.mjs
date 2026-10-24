@@ -248,3 +248,29 @@ test('scriptsDirCandidates：能发现目标仓库里的技能脚本目录', () 
   const found = dirs.some((d) => d.includes(join('.agents', 'skills')));
   assert.ok(found, `必须发现目标仓库的技能脚本目录，实际：${JSON.stringify(dirs)}`);
 });
+
+test('scriptsDirCandidates：认识 .agents/notes-scripts/（真实项目长出来的布局）', () => {
+  /* sourin-flutter-spike 把门禁脚本放在 `.agents/notes-scripts/`，还把
+     notes-coverage / notes-selftest 等项目专用脚本混在同一目录，所以迁不走。
+     插件此前只认 `.agents/skills/<技能名>/scripts`，于是「脚本就在眼前却看不见」，
+     那个仓库只能绕开插件自建一层壳 —— 规则从那一刻起就有两份。 */
+  const dir = mkdtempSync(join(tmpdir(), 'an-layout-'));
+  SANDBOXES.push(dir);
+  try {
+    mkdirSync(join(dir, '.agents', 'notes-scripts'), { recursive: true });
+    const dirs = scriptsDirCandidates(dir);
+    assert.ok(
+      dirs.some((entry) => entry.split(String.fromCharCode(92)).join('/').endsWith('/.agents/notes-scripts')),
+      `必须把 notes-scripts 列进候选，实际 ${JSON.stringify(dirs)}`
+    );
+    /* 官方目录优先：两者都在时不能让历史布局抢先。 */
+    mkdirSync(join(dir, '.agents', 'skills', 'agent-notes', 'scripts'), { recursive: true });
+    const both = scriptsDirCandidates(dir);
+    const official = both.findIndex((entry) => entry.split(String.fromCharCode(92)).join('/').endsWith('/.agents/skills/agent-notes/scripts'));
+    const legacy = both.findIndex((entry) => entry.split(String.fromCharCode(92)).join('/').endsWith('/.agents/notes-scripts'));
+    assert.ok(official !== -1 && legacy !== -1, '两个候选都该在：' + JSON.stringify(both));
+    assert.ok(official < legacy, '官方技能目录必须排在历史布局之前：' + JSON.stringify(both));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
