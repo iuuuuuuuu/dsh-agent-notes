@@ -1,6 +1,6 @@
 {
   "name": "@iuuuuuuuu/agent-notes",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "DSH 决策笔记（Agent Notes）：把「为什么这样改、放弃了什么」沉淀成可机械校验的仓库笔记，提供 Skill、会话级开关、真门禁与上游合并。",
   "type": "module",
   "main": "lib/index.js",
