@@ -12,7 +12,8 @@ import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 
-import { isEnvironmentUnavailable } from './sync-upstream.mjs';
+import { isEnvironmentUnavailable, retryTransport } from './sync-upstream.mjs';
+import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 
 const PACKAGE_ROOT = fileURLToPath(new URL('..', import.meta.url));
@@ -145,7 +146,14 @@ test('退出码必须区分「环境不可用」(2) 与「检查失败」(1)', (
     new Error('connect ECONNREFUSED'),
     new Error('unable to verify the first certificate'),
     new Error('rate limit exceeded (429)'),
-    Object.assign(new Error('fetch failed'), { cause: { code: 'ENETUNREACH' } })
+    Object.assign(new Error('fetch failed'), { cause: { code: 'ENETUNREACH' } }),
+    /* 断流族：措辞各不相同，语义都是「请求没做完」。 */
+    Object.assign(new TypeError('terminated'), { cause: { code: 'UND_ERR_SOCKET', message: 'other side closed' } }),
+    new TypeError('terminated'),
+    new Error('socket hang up'),
+    new Error('read ECONNRESET'),
+    Object.assign(new Error('operation aborted'), { cause: { code: 'UND_ERR_CONNECT_TIMEOUT' } }),
+    Object.assign(new Error('operation aborted'), { cause: { code: 'UND_ERR_BODY_TIMEOUT' } })
   ];
   for (const error of envErrors) {
     assert.equal(
@@ -166,6 +174,135 @@ test('退出码必须区分「环境不可用」(2) 与「检查失败」(1)', (
       '「' + (error.message ?? '') + '」是有效检查结果，不该判为环境问题'
     );
   }
+});
+
+test('真实断流：对端读到一半掐断连接，必须判为环境不可用（不是契约破坏）', async () => {
+  /* 2026-10-24 实测踩到的漏判：`--check` 报
+     「合并失败: terminated」并退 1 —— 而 1 的语义是「上游真有差异」，
+     实际是 CDN 把连接掐了，检查压根没做完。
+     上面那条表驱动用例覆盖不到它，因为**当时谁也不知道真实错误长什么样**：
+     undici 的 shape 是 TypeError('terminated') + cause.code='UND_ERR_SOCKET'。
+     所以这里不用手搓错误对象，而是起一个真服务器、真的把 socket 打掉，
+     拿到的就是生产环境那个错误。手搓的壳子只能证明「我以为的形状」。 */
+  const server = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain', 'content-length': '4096' });
+    res.write('partial body');
+    setTimeout(() => res.socket.destroy(), 20);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    let caught;
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/partial`);
+      await response.text();
+    } catch (error) {
+      caught = error;
+    }
+    assert.ok(caught !== undefined, '服务器提前掐断连接时 fetch 必须抛错，否则这个用例什么也没验');
+    assert.equal(caught.message, 'terminated', `真实错误形状变了，先核对再更新判据（实际: ${caught.message}）`);
+    assert.equal(
+      isEnvironmentUnavailable(caught), true,
+      '断流属于「检查没做完」，必须退 2；退回 1 会把网络问题报成「上游有差异」'
+    );
+  } finally {
+    server.close();
+  }
+});
+
+test('对照：真实 404 必须留在「检查失败」，别被断流判据一起吞掉', async () => {
+  /* 另一半风险：为了让断流退 2，把判据放宽到「任何 fetch 异常」，
+     就会连「上游路径真的没了」也报成环境问题 —— 那反而放过了真差异。
+     这里用真服务器返回 404，走的是脚本里同一条 `!response.ok` 分支。 */
+  const server = createServer((req, res) => {
+    res.writeHead(404, { 'content-type': 'text/plain' });
+    res.end('not found');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const response = await fetch(`http://127.0.0.1:${port}/missing`);
+    assert.equal(response.ok, false);
+    /* 与 fetchUpstream 自造的错误同形（那里的 message 就是 `拉取失败 404: <url>`）。 */
+    const error = new Error(`拉取失败 ${response.status}: http://127.0.0.1:${port}/missing`);
+    assert.equal(
+      isEnvironmentUnavailable(error), false,
+      '404 是有效检查结果（上游真的没有这个文件），必须留在 exit 1'
+    );
+  } finally {
+    server.close();
+  }
+});
+
+test('传输层失败会重试：真实套接字被打断两次后第三次成功', async () => {
+  /* 2026-10-24 实测：`--check` 顺序取 21 个文件时，jsDelivr 偶发掐断连接
+     （UND_ERR_SOCKET / fetch failed），5 轮里 2 轮失败；同一文件单请求 10/10 成功。
+     也就是说这条校验会随机红 —— 假红和假绿一样要修。
+     这里用真服务器，前两次真的把 socket 打掉，第三次正常返回，
+     验的是重试逻辑本身，不是「我以为的错误对象」。 */
+  let hits = 0;
+  const server = createServer((req, res) => {
+    hits += 1;
+    if (hits <= 2) {
+      res.writeHead(200, { 'content-type': 'text/plain', 'content-length': '1024' });
+      res.write('partial');
+      setTimeout(() => res.socket.destroy(), 10);
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('recovered body');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    const body = await retryTransport(async () => {
+      const response = await fetch(`http://127.0.0.1:${port}/flaky`);
+      return await response.text();
+    }, { attempts: 3, backoffMs: 5 });
+    assert.equal(body, 'recovered body', '第三次应拿到完整响应');
+    assert.equal(hits, 3, `应正好尝试 3 次，实际 ${hits} 次`);
+  } finally {
+    server.close();
+  }
+});
+
+test('重试用尽后仍抛原错误，且仍判为环境不可用（不许变成「检查失败」）', async () => {
+  const server = createServer((req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain', 'content-length': '4096' });
+    res.write('partial');
+    setTimeout(() => res.socket.destroy(), 10);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address();
+    let attempts = 0;
+    await assert.rejects(
+      retryTransport(async () => {
+        attempts += 1;
+        const response = await fetch(`http://127.0.0.1:${port}/always-broken`);
+        return await response.text();
+      }, { attempts: 3, backoffMs: 5 }),
+      (error) => {
+        assert.equal(isEnvironmentUnavailable(error), true, '重试失败仍属环境问题，必须退 2');
+        return true;
+      }
+    );
+    assert.equal(attempts, 3, `应尝试 3 次，实际 ${attempts} 次`);
+  } finally {
+    server.close();
+  }
+});
+
+test('HTTP 状态码失败不重试：404 是明确回答，不是抖动', async () => {
+  let attempts = 0;
+  await assert.rejects(
+    retryTransport(async () => {
+      attempts += 1;
+      throw new Error('拉取失败 404: https://example.invalid/x');
+    }, { attempts: 3, backoffMs: 5 }),
+    /404/
+  );
+  assert.equal(attempts, 1, `非传输层错误只该试 1 次，实际 ${attempts} 次`);
 });
 
 test('同步清单确实存在且覆盖全部上游文件', { timeout: 180_000 }, () => {

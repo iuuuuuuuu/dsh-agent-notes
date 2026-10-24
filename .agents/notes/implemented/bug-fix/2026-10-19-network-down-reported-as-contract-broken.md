@@ -52,6 +52,24 @@ main().catch((error) => {
 
 404 留在 1 是有意的：**上游确实没那个 ref，那是真问题**，不是「查不到」。
 
+**2026-10-24 补充：词表漏了一整族。** 判据当初是穷举**具体措辞**的，而 CDN
+读到一半关连接时，undici 抛的是
+`TypeError: terminated` + `cause: SocketError: other side closed`（`code=UND_ERR_SOCKET`）
+—— 三样都不在词表里，于是又退回 exit 1「合并失败: terminated」，
+**同一种误导性诊断换个马甲复发**。现补三类（详见
+[2026-10-24-transport-flake-made-upstream-check-falsely-red.md](2026-10-24-transport-flake-made-upstream-check-falsely-red.md)）：
+
+| 新增类别 | 例子 | 为什么算环境问题 |
+|---|---|---|
+| 连接被掐断 | `terminated`、`socket hang up`、`other side closed`、`ECONNRESET`、`EPIPE` | 请求没做完，不是上游内容变了 |
+| 传输层错误码 | `code === 'ECONNRESET'` / `'EPIPE'` | 同上 |
+| undici 错误码族 | `^UND_ERR_`（SOCKET / CONNECT_TIMEOUT / HEADERS_TIMEOUT / BODY_TIMEOUT / CLOSED …） | 前缀即语义：全是「本次请求没能完成」 |
+
+`must`：**改用前缀而不是继续穷举措辞。** 一条条抄 message 就是上面这个缺陷的成因
+（换一种断法就漏）。`UND_ERR_` 一族没有一个是「上游有差异」，不可能把真差异
+误判成环境问题；HTTP 状态码失败走的是自造错误（`拉取失败 404: <url>`），
+不带 `UND_ERR_`，分类不会被带偏 —— 有对照用例钉住。
+
 `must`：**措辞向既有约定靠拢，不要求既有约定改。** 我最初写「无法检查上游」，
 而 `self-update.test.mjs:299` 早就断言 exit 2 时消息匹配
 `/查不到上游 HEAD|无法校验/`，注释还写着「网络不可用时明确跳过，不算假绿」
@@ -98,14 +116,17 @@ if (code === 2) {
 - **收益**：新增的纯函数用例在任何网络状态下都能跑，**不把门禁的可用性绑在网络上**。
 - **代价与已知上限**：断网时 `npm test` 仍然红。这是有意的 —— 环境不可用不是通过。代价是断网时 CI 会红，需要人判断「是环境问题还是真问题」（现在错误信息会明说）。
 - **代价与已知上限**：`isEnvironmentUnavailable` 用**消息与错误码的字符串匹配**判定。若上游把 `fetch failed` 改成别的措辞，这个判定会失效 —— 而失效的表现是「exit 2 变回 exit 1」，即回到今天这个状态。有测试钉住当前措辞，但措辞变了要改测试。
+  - **2026-10-24：这个上限应验了，且是以我没预料的形态。** 我当初写的是「换了 HTTP 客户端措辞会变」，实际客户端没换 —— 是**同一客户端的另一种失败形态**（读到一半被掐断）。教训：**把「措辞会变」列成风险，不如直接把判据从「措辞」改成「类别（错误码族）」**，因为风险清单挡不住没想到的那一种。现已按 `UND_ERR_` 前缀判定。
 - **代价与已知上限**：401/403 被判为「环境不可用」而非「检查失败」。若上游真的返回 403 表示「该 ref 不可见」，那会掩盖问题。**判据是「403 更可能是限流或权限问题，而不是内容差异」** —— 这是一个判断，不是事实。
 - **重访信号**：若 `sync-upstream` 改用别的 HTTP 客户端（消息措辞会变）→ 要更新 `isEnvironmentUnavailable` 并跑那条纯函数用例。若本仓库开始支持私有上游（403 变成正常路径）→ 要把 403 从「环境不可用」里移出。
+  - **2026-10-24 追加**：契约测试已从「手搓错误对象」升级为**真起服务器真掐断 socket**（`tools/sync-upstream.test.mjs` 的「真实断流」用例）。理由是手搓壳子只能证明「我以为的错误形状」，而正是在「真实形状和以为的不一样」时这个判据失灵。改判据时请连着那两条真实用例一起看。
+  - 传输层失败还会被 `retryTransport()` 重试 3 次（见上面那篇新笔记）。**重试不改变本条语义**：重试用尽后仍按本判据退 2，环境不可用依然不是通过。
 
 ## Verification
 
 ```sh
-node --test tools/sync-upstream.test.mjs   # 5 个用例
-npm run check                              # exit 0（313 测试）
+node --test tools/sync-upstream.test.mjs   # 5 个用例（2026-10-24 起为 10 个）
+npm run check                              # exit 0（313 测试，当时）
 ```
 
 **实测断网时的行为**（真的断了网络）：

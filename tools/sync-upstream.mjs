@@ -201,10 +201,72 @@ async function compareWithBranch(branch = 'main') {
 }
 
 /**
+ * 这个错误属于「传输层抖动」吗？（决定要不要重试）
+ *
+ * 与 {@link isEnvironmentUnavailable} 的区别是**故意更窄**：
+ * 那里把 401/403/429 也算「暂时查不到」（该退 2），但那些是服务端的
+ * 明确回答，立刻重试只会加深限流，所以不进重试。
+ * 这里只认「连接没建起来 / 读到一半被掐断 / 超时」这一类。
+ *
+ * @param {unknown} error 捕获到的错误。
+ * @returns {boolean} true 表示值得重试。
+ */
+function isTransportError(error) {
+  const message = String(error?.message ?? error ?? '');
+  const code = String(error?.cause?.code ?? error?.code ?? '');
+  if (/^UND_ERR_/.test(code)) return true;
+  if (['ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'EAI_AGAIN', 'ENETUNREACH', 'ECONNREFUSED'].includes(code)) {
+    return true;
+  }
+  return /(fetch failed|terminated|socket hang up|other side closed|ECONNRESET|EPIPE|ETIMEDOUT|EAI_AGAIN|ENETUNREACH|ECONNREFUSED)/i
+    .test(message);
+}
+
+/**
+ * 对传输层失败做有限次重试。
+ *
+ * **为什么需要**（2026-10-24 实测）：`--check` 要顺序取 21 个上游文件，
+ * jsDelivr 在这串高频请求里会偶发掐断连接（`UND_ERR_SOCKET` /
+ * `fetch failed`）。实测 5 轮完整序列里有 2 轮失败，直接跑 CLI 也约 2/3 失败。
+ * 单次请求重试一下就过（同一文件单测 10/10 成功）—— 也就是说，
+ * 不重试时这条同步校验会**经常性地红**，而红的原因是抖动不是差异。
+ * 假绿要修，假红同样要修：一个会随机红的门禁，人很快就会学会忽略它。
+ *
+ * 重试只覆盖传输层，**不覆盖** HTTP 4xx/5xx：那是服务端的明确回答，
+ * 重试会把「上游真的没有这个文件」拖慢成三次请求还报同样的话。
+ *
+ * @template T
+ * @param {(attempt: number) => Promise<T>} operation 要执行的操作。
+ * @param {{attempts?: number, backoffMs?: number, sleep?: (ms: number) => Promise<void>}} [options]
+ *   attempts=总尝试次数（含首次）；backoffMs=退避基数；sleep=可注入的等待。
+ * @returns {Promise<T>} 操作结果。
+ * @throws {Error} 重试用尽后抛出最后一次的错误（保持原始形状，分类函数照旧能判）。
+ */
+export async function retryTransport(operation, options = {}) {
+  const attempts = options.attempts ?? 3;
+  const backoffMs = options.backoffMs ?? 250;
+  const sleep = options.sleep ?? ((ms) => new Promise((resolve) => { setTimeout(resolve, ms); }));
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation(attempt);
+    } catch (error) {
+      lastError = error;
+      if (!isTransportError(error) || attempt === attempts) throw error;
+      await sleep(backoffMs * attempt);
+    }
+  }
+  throw lastError;
+}
+
+/**
  * 通过 jsDelivr CDN 读上游文件。
  *
  * 直连 raw.githubusercontent / github 在本机实测被重置（ECONNRESET），
  * jsDelivr 可稳定访问；它按 commit 或分支提供同一份仓库内容。
+ *
+ * 传输层失败走 {@link retryTransport}；404 是有效结果，直接返回 undefined，
+ * 不进重试。
  *
  * @param {string} ref 分支或 commit。
  * @param {string} repoPath 仓库内相对路径。
@@ -212,10 +274,12 @@ async function compareWithBranch(branch = 'main') {
  */
 async function fetchUpstream(ref, repoPath) {
   const url = `https://fastly.jsdelivr.net/gh/czm15053/write-notes-like-deepseek@${ref}/${UPSTREAM.pathPrefix}/${repoPath}`;
-  const response = await fetch(url);
-  if (response.status === 404) return undefined;
-  if (!response.ok) throw new Error(`拉取失败 ${response.status}: ${url}`);
-  return await response.text();
+  return await retryTransport(async () => {
+    const response = await fetch(url);
+    if (response.status === 404) return undefined;
+    if (!response.ok) throw new Error(`拉取失败 ${response.status}: ${url}`);
+    return await response.text();
+  });
 }
 
 /**
@@ -227,9 +291,13 @@ async function fetchUpstream(ref, repoPath) {
  */
 async function listUpstreamDir(ref, dir) {
   const url = `https://data.jsdelivr.com/v1/packages/gh/czm15053/write-notes-like-deepseek@${ref}`;
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`清单拉取失败 ${response.status}: ${url}`);
-  const payload = await response.json();
+  /* 清单请求同样会偶发被掐断（实测失败就出现在「待核对」之前的那一步），
+     所以也走同一套传输层重试；HTTP 状态码失败仍然直接抛，不重试。 */
+  const payload = await retryTransport(async () => {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`清单拉取失败 ${response.status}: ${url}`);
+    return await response.json();
+  });
 
   /** 在 jsDelivr 的树里按路径找节点；根节点自身 type 为 'gh'，只有子层才是 directory。 */
   const find = (node, segments) => {
@@ -650,6 +718,15 @@ const invokedDirectly = process.argv[1] !== undefined
  * 断言在说契约被破坏，实际是网络不行。**那是误导性诊断**，
  * 会把人引向错误的方向去查。
  *
+ * **只认 `fetch failed` 仍然漏了一整族**（2026-10-24 实测）：CDN 在读到一半时
+ * 关掉连接，undici 抛的是 `TypeError: terminated`，`cause` 为
+ * `SocketError: other side closed` / `code=UND_ERR_SOCKET`。名字、message、code
+ * 三样都不在上面的词表里，于是又退回 exit 1「合并失败: terminated」——
+ * 同一种误导性诊断换个马甲复发。所以这里不能只列举具体措辞，还要认
+ * undici 的传输层错误码前缀 `UND_ERR_`：那一族**全部**是「请求没做完」，
+ * 没有一个是「上游内容变了」。HTTP 状态码类失败（如 404）走的是
+ * `拉取失败 404` 这种自造错误，不带 `UND_ERR_`，分类不会被带偏。
+ *
  * @param {unknown} error 捕获到的错误。
  * @returns {boolean} true 表示环境不可用（该用 exit 2）。
  */
@@ -663,6 +740,20 @@ export function isEnvironmentUnavailable(error) {
     return true;
   }
   if (['ENOTFOUND', 'ETIMEDOUT', 'ECONNREFUSED', 'EAI_AGAIN', 'ENETUNREACH', 'EPROTO'].includes(code)) {
+    return true;
+  }
+  /* 连接在读到一半被对端掐断：undici 报 `terminated` / `socket hang up`，
+   * Node 的 http 客户端报 `ECONNRESET` / `EPIPE`。都是「没做完」，不是「上游变了」。 */
+  if (/(^|\W)(terminated|socket hang up|other side closed|ECONNRESET|EPIPE)(\W|$)/i.test(message)) {
+    return true;
+  }
+  if (['ECONNRESET', 'EPIPE'].includes(code)) {
+    return true;
+  }
+  /* undici 的传输层错误码族（UND_ERR_SOCKET / UND_ERR_CONNECT_TIMEOUT /
+   * UND_ERR_HEADERS_TIMEOUT / UND_ERR_BODY_TIMEOUT / UND_ERR_CLOSED …）。
+   * 前缀即语义：这一类全是「这次的请求没能完成」。 */
+  if (/^UND_ERR_/.test(code)) {
     return true;
   }
   /* 认证与限流：是「暂时查不到」，不是「上游变了」。 */
