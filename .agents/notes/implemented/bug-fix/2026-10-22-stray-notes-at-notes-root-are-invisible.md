@@ -219,6 +219,14 @@ vendored 的 `agent-note-tree.ts:44-47` 只对 `INDEX.md` 判红，其余根层
 `must`：**排除范围要按「有没有被验过」画，不能按「哪个生命周期」画。**
 后者会让相邻目录留一个同样的洞，而缺陷的形状完全一样。
 
+> **2026-10-24 后续裁决（本篇这一半被推翻）**：上面「生命周期根层的说明文件
+> 不计数、但仍受布局检查」里的**后半句**改掉了 —— vendored 的 `ROOT_ALLOWLIST`
+> 明确放行 `{lifecycle}/AGENTS.md` 与 `{lifecycle}/CLAUDE.md`，上游自己也这么放，
+> 插件判红就成了假红（vendored 绿 / 插件红）。现在这两个确切名字既不计数、
+> 也不报布局错误。原文按「不得把一篇笔记改写成另一个决定」的规矩保留不改，
+> 决定与理由见
+> [2026-10-24-lifecycle-root-guides-are-not-layout-errors.md](2026-10-24-lifecycle-root-guides-are-not-layout-errors.md)。
+
 ## Verification
 
 `node --test tools/notes-layout.test.mjs` → **19 tests / 19 pass / 0 fail**，

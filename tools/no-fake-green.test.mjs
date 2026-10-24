@@ -145,19 +145,23 @@ for (const guide of ['AGENTS.md', 'CLAUDE.md']) {
     }
   });
 
-  test(`合规笔记加生命周期根层 ${guide}：只计一篇且保留布局检查`, async () => {
+  test(`合规笔记加生命周期根层 ${guide}：只计一篇，且不再判红（与 vendored 白名单一致）`, async () => {
+    /* 2026-10-24 裁决：原先这条断言的是「保留布局检查」（passed=false / NOTES_LAYOUT）。
+       但 vendored 的 `agent-note-tree.ts` 里 `ROOT_ALLOWLIST` **明确放行**
+       `{lifecycle}/AGENTS.md` 与 `{lifecycle}/CLAUDE.md`，上游仓库自己也真的这么放。
+       插件包着 vendored 却判它红 —— 同一棵树 vendored 全绿、插件红，那是**假红**：
+       用户按上游布局写笔记，插件告诉他违规。
+       所以现在跟着放行（只放这两个确切名字），但仍然**不计数**。 */
     const dir = goodRepo();
     try {
       writeFileSync(join(dir, '.agents', 'notes', 'implemented', guide), '# 目录说明\n', 'utf8');
       const result = await createNotesService({}, undefined).runAll({ cwd: dir });
-      assert.equal(result.passed, false, '计数修复不得顺带放宽现有布局规则');
+      assert.equal(result.passed, true, 'vendored 放行的目录说明不该被插件判红');
       assert.equal(result.noteCount, 1, '说明文件不得虚增笔记数');
-      assert.equal(result.strayCount, 1);
+      assert.equal(result.strayCount, 1, '说明文件仍如实报为未计入独立笔记');
       for (const entry of result.results) {
-        assert.equal(entry.passed, false, `${entry.gate} 应保留布局检查`);
-        assert.equal(entry.exitCode, 1);
-        assert.match(entry.reason, /NOTES_LAYOUT/);
-        assert.ok(entry.stderr.includes(`implemented/${guide}`), '应指出具体的错层说明文件');
+        assert.equal(entry.passed, true, `${entry.gate} 不该再报布局错误`);
+        assert.equal(entry.exitCode, 0);
       }
     } finally {
       rmSync(dir, { recursive: true, force: true });
