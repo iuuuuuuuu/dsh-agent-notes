@@ -202,6 +202,23 @@ vendored 的 `agent-note-tree.ts:44-47` 只对 `INDEX.md` 判红，其余根层
 单独复核上游同步测试时，5 条中 3 条通过、2 条因 `fetch failed` 失败；
 网络相关契约仍未完成验证，未降低断言或改写成功标准。
 
+### 归档侧的同一个假绿（2026-10-24 补）
+
+上面那次只排除了**活动**生命周期的 `.zh.md`，archived 侧照旧计入 ——
+于是同一个零篇假绿在归档一侧**原样存活**：树里只放一个
+`archived/<class>/x.zh.md` 外加给它的封印，就得到 `passed: true` /
+`noteCount: 1`，而三条门禁实际校验的是 `ok: 0 note(s)`（Lead 独立复现，
+`.probe/lead-repro-s1.mjs`）。
+
+判据改成**任何生命周期的 `.zh.md` 都不算独立笔记**：vendored 扫描时一律跳过
+`.zh.md`，归档旁挂另由 `lib/archive-layout.js` 管**封印**——那是另一件事，
+不等于「验过这篇笔记的格式」。既然没有任何门禁验它的笔记格式，
+它就不能顶一篇笔记的额度。修复后同一棵树：`passed: false`、
+`noteCount: 0`、`strayCount: 1`，三条门禁全部 `NO_NOTES_YET`。
+
+`must`：**排除范围要按「有没有被验过」画，不能按「哪个生命周期」画。**
+后者会让相邻目录留一个同样的洞，而缺陷的形状完全一样。
+
 ## Verification
 
 `node --test tools/notes-layout.test.mjs` → **19 tests / 19 pass / 0 fail**，

@@ -13,10 +13,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
-import { createNotesService } from '../lib/notes.js';
+import { createNotesService, runGate } from '../lib/notes.js';
 
 /** 建一个临时仓库目录（不建笔记树）。 */
 function bareRepo() {
@@ -240,6 +240,134 @@ test('其他生命周期根层 Markdown 仍进入布局校验', async () => {
     }
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('archived 只有 .zh.md 旁挂：零篇必须判红（归档侧不许留同一个洞）', async () => {
+  /* 2026-10-24 自审补：上面那三条只覆盖活动生命周期，archived 侧照旧把旁挂
+     算作一篇笔记 —— 同一个零篇假绿在归档一侧原样存活。真实复现：
+     只放一个 archived/<class>/x.zh.md + 给它的封印 ⇒ passed:true / noteCount:1，
+     而三条门禁实际校验 ok: 0。 */
+  const dir = bareRepo();
+  try {
+    const target = join(dir, '.agents', 'notes', 'archived', 'feature');
+    mkdirSync(target, { recursive: true });
+    const body = '# Translation sidecar\n';
+    writeFileSync(join(target, '2026-10-20-arch.zh.md'), body, 'utf8');
+    mkdirSync(join(dir, '.agents', 'notes', 'archived'), { recursive: true });
+    const { createHash } = await import('node:crypto');
+    const seal = `sha256:${createHash('sha256').update(body, 'utf8').digest('hex')}`;
+    writeFileSync(
+      join(dir, '.agents', 'notes', 'archived', 'manifest.json'),
+      `${JSON.stringify({ version: 1, files: { 'archived/feature/2026-10-20-arch.zh.md': seal } }, null, 2)}\n`,
+      'utf8'
+    );
+
+    const result = await createNotesService({}, undefined).runAll({ cwd: dir });
+    assert.equal(result.passed, false, '归档旁挂不得顶一篇笔记的额度');
+    assert.equal(result.noteCount, 0, '没有任何 vendored 门禁验过它，计数必须是 0');
+    assert.equal(result.strayCount, 1, '旁挂仍应如实报为未计入独立笔记');
+    for (const entry of result.results) {
+      assert.equal(entry.passed, false);
+      assert.match(entry.reason, /NO_NOTES_YET/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('只传 env.AGENT_NOTE_ROOT：预检 / 门禁 / 计数必须看同一棵树', async () => {
+  /* 审计 S4：原先四处各自解析笔记根、优先级还不一样，于是「只传 options.env」
+     这个用法被服务层无条件盖掉 —— 调用方以为在验 env 那棵树，
+     实际验的是默认位置（预检/计数一处、spawn 另一处）。 */
+  const base = mkdtempSync(join(tmpdir(), 'an-envroot-'));
+  try {
+    const cwdNoTree = join(base, 'cwd-no-tree');
+    const envTree = join(base, 'env-tree');
+    mkdirSync(join(cwdNoTree, '.git'), { recursive: true });
+    mkdirSync(join(envTree, 'implemented', 'feature'), { recursive: true });
+    writeFileSync(join(envTree, 'implemented', 'feature', '2026-01-01-a.md'), [
+      '# Agent Note: fixture', '', 'Status: implemented', '',
+      '## Problem', 'p', '', '## Decision', 'd', '',
+      '## Alternatives considered', 'a', '', '## Consequences', 'c', ''
+    ].join('\n'), 'utf8');
+
+    const result = await createNotesService({}, undefined).runAll({
+      cwd: cwdNoTree,
+      env: { AGENT_NOTE_ROOT: envTree }
+    });
+
+    assert.equal(result.passed, true, `env 指的树是合规的，应通过：${JSON.stringify(result.results.map((e) => e.reason ?? e.stdout))}`);
+    assert.equal(result.noteCount, 1, '计数必须来自 env 那棵树');
+    assert.equal(resolve(result.notesRoot), resolve(envTree), '报告的根必须是 env 指的树');
+    /* 关键：门禁**真的验到了那一篇**，不是「计数说有、门禁验零篇」。 */
+    for (const gate of ['tree', 'format']) {
+      const entry = result.results.find((e) => e.gate === gate);
+      assert.match(entry.stdout ?? '', /ok: 1 note\(s\)/, `${gate} 必须真验到 1 篇：${entry.stdout}`);
+    }
+  } finally {
+    rmSync(base, { recursive: true, force: true });
+  }
+});
+
+test('取消信号必须真的传到子进程（运行中 abort 与已 abort 都要生效）', async () => {
+  /* 审计发现 3：`lib/tools.js` 把宿主的 signal 交给 runGate，spawnCapture 也支持，
+     但中间那一跳把它丢了 —— 点了取消，子进程仍跑满（最长 120s），
+     结论还是 ExitCode=0 / passed=true。取消是契约，不该只是「传进去了」。 */
+  const scripts = mkdtempSync(join(tmpdir(), 'an-slowgate-'));
+  const repo = mkdtempSync(join(tmpdir(), 'an-slowrepo-'));
+  const previous = process.env.AGENT_NOTE_SCRIPTS_DIR;
+  try {
+    mkdirSync(scripts, { recursive: true });
+    mkdirSync(join(repo, '.git'), { recursive: true });
+    mkdirSync(join(repo, '.agents', 'notes', 'implemented', 'feature'), { recursive: true });
+    writeFileSync(join(repo, '.agents', 'notes', 'implemented', 'feature', '2026-01-01-a.md'), [
+      '# Agent Note: fixture', '', 'Status: implemented', '',
+      '## Problem', 'p', '', '## Decision', 'd', '',
+      '## Alternatives considered', 'a', '', '## Consequences', 'c', ''
+    ].join('\n'), 'utf8');
+    /* 假门禁：用**定时器**把进程按住 4 秒再报绿。
+       不要用顶层 `await` —— 那在 .ts 下会解析失败、子进程立刻退出，
+       用例就会「通过」在一条根本没跑起来的分支上（本轮真踩过：把 signal
+       变异掉之后用例照样绿）。定时器不需要额外语法支持，且能保证进程真活着。 */
+    writeFileSync(
+      join(scripts, 'verify-agent-note-tree.ts'),
+      'setTimeout(() => { console.log("ok: 1 note(s) fake"); }, 4000);\n',
+      'utf8'
+    );
+    process.env.AGENT_NOTE_SCRIPTS_DIR = scripts;
+
+    const notesRoot = join(repo, '.agents', 'notes');
+
+    /* ① 运行中 abort。 */
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 300);
+    const t1 = Date.now();
+    const running = await runGate('tree', { cwd: repo, notesRoot, signal: controller.signal });
+    clearTimeout(timer);
+    const elapsed1 = Date.now() - t1;
+    /* 关键断言：必须是**被我们杀掉**的（SIGKILL）。signal 被吞或假脚本没跑起来时
+       这里是 null，用例立刻红 —— 这正是上一版用例空转的原因。 */
+    assert.equal(running.signal, 'SIGKILL',
+      `子进程必须被取消杀掉（signal=SIGKILL），实际 exitCode=${running.exitCode} signal=${running.signal}`);
+    assert.ok(elapsed1 < 2000, `运行中 abort 应立刻结束，实际 ${elapsed1}ms`);
+    assert.equal(running.passed, false, '被取消不等于通过');
+
+    /* ② 传入时**已经** abort：addEventListener 不会再触发，必须显式补一次。 */
+    const dead = new AbortController();
+    dead.abort();
+    const t2 = Date.now();
+    const pre = await runGate('tree', { cwd: repo, notesRoot, signal: dead.signal });
+    const elapsed2 = Date.now() - t2;
+    assert.equal(pre.signal, 'SIGKILL',
+      `已 abort 的信号也必须杀掉子进程，实际 exitCode=${pre.exitCode} signal=${pre.signal}`);
+    assert.ok(elapsed2 < 2000, `已 abort 的信号也应立刻生效，实际 ${elapsed2}ms`);
+    assert.equal(pre.passed, false);
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_NOTE_SCRIPTS_DIR;
+    else process.env.AGENT_NOTE_SCRIPTS_DIR = previous;
+    rmSync(scripts, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
   }
 });
 
