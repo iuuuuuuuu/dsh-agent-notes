@@ -16,8 +16,8 @@
  * 草稿」把门禁弄红 —— 那是最容易被绕过的门禁形态。
  */
 import { strict as assert } from 'node:assert';
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { copyFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -65,6 +65,48 @@ function corruptIndex(dir) {
   writeFileSync(join(dir, '.git', 'index'), 'DIRC\x00\x00\x00\x00 这不是真的索引', 'utf8');
 }
 
+/**
+ * 把**被测脚本本体**复制进夹具根下的 `tools/eol.mjs` 再运行它。
+ *
+ * 为什么复制而不是跑仓库里那个：`main()` 的语料根是脚本自己所在位置推出来的
+ * （`PACKAGE_ROOT`），只有让脚本落在夹具里，才能在**不改本仓库任何文件**的
+ * 前提下真跑一遍 CLI 的退出码通道。复制的就是磁盘上这份被测代码本身 ——
+ * 不是副本实现，所以退出码逻辑改了它一定会红。
+ *
+ * @param {string} dir 夹具根（临时仓库或普通临时目录）。
+ * @returns {string} 夹具里的脚本路径。
+ */
+function copyToolInto(dir) {
+  mkdirSync(join(dir, 'tools'), { recursive: true });
+  const script = join(dir, 'tools', 'eol.mjs');
+  copyFileSync(join(ROOT, 'tools', 'eol.mjs'), script);
+  return script;
+}
+
+/**
+ * 运行 CLI（真子进程），返回退出码与合并输出。
+ *
+ * `status === null` 时退出码记 `-1`：那种情况是「没正常结束」，
+ * 不能与任何按契约的退出码混淆（`tools/syntax-check.mjs` 同口径）。
+ *
+ * @param {string} script 夹具里的脚本路径。
+ * @param {Record<string, string>} [env] 追加/覆盖的环境变量。
+ * @returns {{ code: number, status: number|null, signal: string|null, out: string }} 退出码与输出。
+ */
+function runCli(script, env = {}) {
+  const result = spawnSync(process.execPath, [script], {
+    encoding: 'utf8',
+    env: { ...process.env, ...env },
+    windowsHide: true
+  });
+  return {
+    code: result.status ?? -1,
+    status: result.status,
+    signal: result.signal ?? null,
+    out: `${result.stdout ?? ''}${result.stderr ?? ''}`
+  };
+}
+
 test('eol: 当前仓库所有文本文件都以恰好一个换行结尾', () => {
   const result = verifyTrailingNewlines({ root: ROOT });
   assert.deepEqual(result.errors, [], `不得有结尾形态问题：\n${result.errors.join('\n')}`);
@@ -79,6 +121,7 @@ test('eol: 缺结尾换行必须红', () => {
     assert.equal(result.errors.length, 1, '缺结尾换行必须判失败');
     assert.match(result.errors[0], /a\.md/);
     assert.match(result.errors[0], /没有以换行结尾/);
+    assert.equal(result.exitCode, 1, '真违规走「检查失败」通道 —— 不许放宽成 2');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -203,6 +246,7 @@ test('eol: 真仓库里 git 坏了必须失败关闭（不许静默改用工作�
     const result = verifyTrailingNewlines({ root: dir });
     assert.equal(result.checked, 0, '取不到语料时不许声称检查过文件');
     assert.equal(result.source, 'git-error');
+    assert.equal(result.exitCode, 2, '取不到语料 ⇒ 2（无法进行），不是 1（检查失败）');
     assert.match(result.errors.join('\n'), /取不到已跟踪文件列表/);
     assert.doesNotMatch(result.errors.join('\n'), /bad\.md/, '不许改用工作区遍历后报文件级结果');
   } finally {
@@ -217,7 +261,88 @@ test('eol: 空仓库（一个已跟踪文件都没有）必须红，不是「0 �
     execFileSync('git', ['rm', '-q', '--cached', 'keep.txt'], { cwd: dir, windowsHide: true });
     const result = verifyTrailingNewlines({ root: dir });
     assert.equal(result.source, 'git-empty');
+    assert.equal(result.exitCode, 1, '索引为空是真语料异常 ⇒ 检查失败（1），不是「无法进行」（2）');
     assert.match(result.errors.join('\n'), /空语料不得当绿/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/* ── CLI 退出码通道（真子进程，断言的是调用方/CI 真正读到的那个数） ──────────
+   为什么必须真跑 CLI：本缺陷的形态就是「函数返回得很诚实，通道是错的」。
+   只断言 `verifyTrailingNewlines()` 的返回值会让「`main()` 里把 2 又压回 1」
+   这类改法留一条活路 —— 而 CI 只看退出码，所以退出码必须端到端钉住。 */
+
+test('eol: git 不可用时 CLI 退 2（无法进行），不是「校验失败」的 1', () => {
+  /* 复现审计报告「发现 5」的场景：`PATH` 里没有 git。用 `PATH: ''` 而不是
+     删单个条目 —— 夹具目录里放着一个**真的违规文件**（缺结尾换行），
+     所以「退 2 且不提这个文件」同时证明了「没有偷偷改用工作区遍历」。 */
+  const dir = mkdtempSync(join(tmpdir(), 'an-eol-nogit-bin-'));
+  try {
+    const script = copyToolInto(dir);
+    writeFileSync(join(dir, 'bad.md'), '没有结尾换行', 'utf8');
+    const { code, status, out } = runCli(script, { PATH: '' });
+    assert.equal(status, 2, `git 取不到 ⇒ 退出码 2（无法进行），实际 ${code}；输出：\n${out}`);
+    assert.match(out, /无法进行/, '必须明说「无法进行」');
+    assert.match(out, /没有完成校验/, '必须明说本次没有完成校验');
+    /* 「把结论说错」是这条缺陷的本体：不许再把「取不到语料」讲成「文件违规」。 */
+    assert.doesNotMatch(out, /校验失败/, '不许把「无法进行」报成「校验失败」');
+    assert.doesNotMatch(out, /bad\.md/, '一条文件都没检查，不许出现文件级结论');
+    assert.doesNotMatch(out, /No newline at end of file/, '没检查成时不许解释违规的后果');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('eol: 真仓库里 git 坏了时 CLI 也退 2（不依赖 PATH 的花招）', () => {
+  /* 与上一条同一通道，另一条触发路径：git 在 PATH 里、`.git` 也在，
+     但 `git ls-files` 真报错（索引被写坏）。
+     现有断言只到返回值；这条把「真故障 → 退出码 2」端到端钉住。 */
+  const dir = gitSandbox({ 'bad.md': '没有结尾换行' });
+  try {
+    corruptIndex(dir);
+    const script = copyToolInto(dir);
+    const { code, status, out } = runCli(script);
+    assert.equal(status, 2, `git ls-files 失败 ⇒ 退出码 2，实际 ${code}；输出：\n${out}`);
+    assert.match(out, /取不到已跟踪文件列表/, '诚实诊断必须保留');
+    assert.match(out, /无法进行/);
+    assert.doesNotMatch(out, /bad\.md/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('eol: 真违规文件时 CLI 仍然退 1（没有把 1 一起放宽成 2）', () => {
+  /* 反面对照。缺了它，「把所有 errors 一律压成 2」这种改法会全绿 ——
+     而那样真违规就失去了可区分的退出码，CI 分不清「该修文件」还是「环境不行」。 */
+  const dir = gitSandbox({ 'bad.md': '第一行\n\n' });
+  try {
+    const script = copyToolInto(dir);
+    const { code, status, out } = runCli(script);
+    assert.equal(status, 1, `真违规 ⇒ 退出码 1（检查失败），实际 ${code}；输出：\n${out}`);
+    assert.match(out, /结尾换行校验失败/, '真违规仍走「校验失败」通道');
+    assert.match(out, /bad\.md/, '必须点名违规文件');
+    assert.match(out, /多余的空行/);
+    assert.doesNotMatch(out, /无法进行/, '真违规不是「无法进行」');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('eol: CLI 在「不是 git 仓库」时仍退回文件系统遍历并退 1（那是合法回退信号）', () => {
+  /* 这条钉住两种状态的边界，免得为修退出码把回退口子也一起关掉：
+     - 「这里不是 git 仓库」= 可判定的稳定状态（夹具/导出目录）⇒ 退回 fs 遍历；
+     - 其它任何 git 失败 ⇒ `git-error` ⇒ 2。
+     同一条测试也证明 fs 遍历路径上的**真违规**依旧是 1，不是 2。 */
+  const dir = mkdtempSync(join(tmpdir(), 'an-eol-nogit-fs-'));
+  try {
+    const script = copyToolInto(dir);
+    writeFileSync(join(dir, 'bad.md'), '没有结尾换行', 'utf8');
+    const { code, status, out } = runCli(script);
+    assert.equal(status, 1, `fs 遍历发现真违规 ⇒ 1，实际 ${code}；输出：\n${out}`);
+    assert.match(out, /bad\.md/, 'fs 遍历必须报出文件级结论');
+    assert.doesNotMatch(out, /取不到已跟踪文件列表/, '「不是 git 仓库」不是错误，不许走 git-error 的文案');
+    assert.doesNotMatch(out, /无法进行/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

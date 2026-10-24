@@ -128,3 +128,34 @@ Owner 原话：「我说的版本更新，是指这个注入的**笔记规范**�
 补充验证：`node --test tools/version-notice.test.mjs` ⇒ `pass 10 / fail 0`
 （新增两条：标签始终带版本号、刚变过才带「已更新」；标签必须落在标题行且正文顺序正确）。
 `npm test` ⇒ `tests 578 / pass 578 / fail 0`。
+
+### 补充（2026-10-24）：上面这些用例全是「直接调函数」，接线本身没人验
+
+自审发现上面 10 条用例**全部直接调用** `buildVersionLabel` / `buildVersionChangeHint` /
+`buildPolicyText`（连那条「端到端」也是在子进程里直接调这三个函数）。
+也就是说：**零件彼此都对，但把它们接起来的 `lib/index.js` 挂载路径一条都没验** ——
+而 Owner 报的缺陷（「版本更新了，对话根本不触发提示」）恰恰就在那条接线上。
+**这正是「函数全绿、功能不生效」的成因**：测试覆盖了被调用的函数，没覆盖调用者。
+
+补三条**真实挂载**用例（真 Cordis 上下文 → 真 `agent/created` 事件 → 真读状态文件）：
+
+1. 版本变了：注入段落**第一行**必须带 `· v<当前版本> · 已更新`，且当前版本真落盘
+   （不落盘就永远算不出「变过」，标签退不回去）。
+2. 下一次挂载：标签必须退回只有版本号，且正文不再出现「已更新」/「插件版本已」。
+3. 首次运行：只加版本号，不加「已更新」（没记录 ≠ 更新过）。
+
+真故障注入（改完还原）：
+
+- 接线时丢掉标签（`buildPolicyText(driftHint, undefined, versionHint)`）⇒
+  `pass 12 / fail 3`，红的正是这三条挂载用例（旧的 10 条**全绿**——
+  证明它们确实抓不到接线缺陷）。
+- 不落盘当前版本（注释掉 `state.setPluginVersion`）⇒ `pass 13 / fail 2`，
+  红的正是依赖「真读盘」的那两条。
+
+`node --test tools/version-notice.test.mjs` ⇒ `tests 15 / pass 15 / fail 0`。
+
+`must`：**这类「零件测试」不能替代接线测试。** 判据是「缺陷会出现在哪一层」——
+Owner 报的现象是「功能不生效」，那对应的验证必须从宿主事件走到可观测输出，
+而不是停在中间某个纯函数上。这与本仓库既有的
+[2026-10-23-check-chain-must-use-read-only-modes.md](../process/2026-10-23-check-chain-must-use-read-only-modes.md)
+是同一类教训：**验的东西要覆盖真正会出错的那一段。**

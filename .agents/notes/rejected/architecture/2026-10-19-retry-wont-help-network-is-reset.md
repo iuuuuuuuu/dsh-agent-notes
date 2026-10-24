@@ -1,6 +1,18 @@
 # Agent Note: 网络抖动不是抖动 —— 重试被实测否决
 
-Status: rejected — 7/7 立刻重试全部 ECONNRESET，加重试是纯浪费
+Status: rejected — 7/7 立刻重试全部 ECONNRESET，据此判定加重试是纯浪费（2026-10-24 该结论被新证据推翻，见下）
+
+> **⚠ 本篇的结论已于 2026-10-24 被推翻，但原文一字不改保留。**
+> 推翻它的证据与新的实现见
+> [2026-10-24-transport-flake-made-upstream-check-falsely-red.md](../../implemented/bug-fix/2026-10-24-transport-flake-made-upstream-check-falsely-red.md)。
+>
+> 保留原文的理由：**它错在把一种失败形态的结论外推成全部**，而那个外推过程本身
+> 有值得留下的东西 —— 它做了三步实测（失败率 → 成簇性 → 重试有效性），
+> 方法是对的；今天推翻它不是靠「当年测错了」，而是**今天的失败形态不同**
+> （零散的 `UND_ERR_SOCKET` 掐断，而非成簇的 `ECONNRESET` 重置）。
+> 其中「成簇断网时立即重试无效」这一半**今天仍然成立**，仍是有用的判据。
+> 这条链路本身就是一个教训：**同一个问题在不同失败形态下会得到相反结论**，
+> 所以结论必须钉在「测的是什么形态」上。
 
 > 同属**流程补齐**这条线，接续
 > [2026-10-19-network-down-reported-as-contract-broken.md](../../implemented/bug-fix/2026-10-19-network-down-reported-as-contract-broken.md)

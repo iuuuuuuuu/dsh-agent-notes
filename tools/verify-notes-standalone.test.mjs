@@ -112,6 +112,39 @@ function run(dir, entry, env = {}) {
   return { code: r.status ?? -1, out: `${r.stdout ?? ''}${r.stderr ?? ''}` };
 }
 
+test('独立仓库：git 不可用时必须 exit 2，绝不改验本插件自己的笔记树', () => {
+  /* 审计发现（`.probe/audit-tool-gates.md` 的发现 4）：`repoRoot()` 用
+     `gitRoot.status === 0` 判「cwd 是仓库根」，于是 `status === null`
+     （git 不可用 / ENOENT / 被信号杀）与「真的不是仓库」被混为一谈，
+     一律回退到 PACKAGE_ROOT。后果不是报错，是**换了对象还报了绿**：
+     在别的仓库里跑，指针一偏就去验本插件自己的笔记树，exit 0。
+
+     这条用例用同一份夹具、同一个 cwd，只改 PATH 里有没有 git ——
+     对照足够干净，`assert.doesNotMatch(/笔记门禁通过/)` 直接钉住
+     「不许换个对象继续报绿」。 */
+  const dir = sandbox({ withTools: true, withLib: true, withSkill: true });
+  /* 故意写坏：缺 ## Alternatives considered，它本来就该被判红。 */
+  writeFileSync(
+    join(dir, '.agents', 'notes', 'implemented', 'process', '2026-01-01-x.md'),
+    '# Agent Note: bad\n\nStatus: implemented\n\n## Problem\n\np\n',
+    'utf8'
+  );
+
+  /* 对照：git 正常 → 必须红，并指名那篇违规笔记。 */
+  const ok = run(dir, 'tools/verify-notes.mjs');
+  assert.equal(ok.code, 1, `违规笔记必须判红，实际 ${ok.code}：\n${ok.out}`);
+  assert.match(ok.out, /2026-01-01-x\.md/, `必须指名违规文件：\n${ok.out}`);
+
+  /* 关键：git 不可用 ⇒ 无法判断是哪个仓库 ⇒ exit 2，且**不许**报通过。 */
+  const noGit = run(dir, 'tools/verify-notes.mjs', { PATH: '' });
+  assert.equal(noGit.code, 2,
+    `git 不可用属「无法进行」，必须是 2（不是 1，更不是 0），实际 ${noGit.code}：\n${noGit.out}`);
+  assert.doesNotMatch(noGit.out, /笔记门禁通过/,
+    `绝不许换一份笔记树继续报绿：\n${noGit.out}`);
+  assert.match(noGit.out, /无法判断当前目录属于哪个仓库|没有完成校验/,
+    `必须说清本次没有完成校验：\n${noGit.out}`);
+});
+
 test('独立仓库：自带 .agents/skills/…/scripts 时必须真的验它自己的笔记', () => {
   /* 这是最关键的一条 —— 目标仓库**有自己的**门禁脚本（按 skill 模板，
      脚本与笔记同在 `.agents/skills/` 下），而旧实现只去自己包里找，
@@ -214,4 +247,43 @@ test('scriptsDirCandidates：能发现目标仓库里的技能脚本目录', () 
   const dirs = scriptsDirCandidates(dir);
   const found = dirs.some((d) => d.includes(join('.agents', 'skills')));
   assert.ok(found, `必须发现目标仓库的技能脚本目录，实际：${JSON.stringify(dirs)}`);
+});
+
+test('scriptsDirCandidates：认识 .agents/notes-scripts/（真实项目长出来的布局）', () => {
+  /* sourin-flutter-spike 把门禁脚本放在 `.agents/notes-scripts/`，还把
+     notes-coverage / notes-selftest 等项目专用脚本混在同一目录，所以迁不走。
+     插件此前只认 `.agents/skills/<技能名>/scripts`，于是「脚本就在眼前却看不见」，
+     那个仓库只能绕开插件自建一层壳 —— 规则从那一刻起就有两份。 */
+  const dir = mkdtempSync(join(tmpdir(), 'an-layout-'));
+  SANDBOXES.push(dir);
+  try {
+    mkdirSync(join(dir, '.agents', 'notes-scripts'), { recursive: true });
+    const dirs = scriptsDirCandidates(dir);
+    assert.ok(
+      dirs.some((entry) => entry.split(String.fromCharCode(92)).join('/').endsWith('/.agents/notes-scripts')),
+      `必须把 notes-scripts 列进候选，实际 ${JSON.stringify(dirs)}`
+    );
+    /* 官方目录优先：两者都在时不能让历史布局抢先。 */
+    mkdirSync(join(dir, '.agents', 'skills', 'agent-notes', 'scripts'), { recursive: true });
+    const both = scriptsDirCandidates(dir);
+    const official = both.findIndex((entry) => entry.split(String.fromCharCode(92)).join('/').endsWith('/.agents/skills/agent-notes/scripts'));
+    const legacy = both.findIndex((entry) => entry.split(String.fromCharCode(92)).join('/').endsWith('/.agents/notes-scripts'));
+    assert.ok(official !== -1 && legacy !== -1, '两个候选都该在：' + JSON.stringify(both));
+    assert.ok(official < legacy, '官方技能目录必须排在历史布局之前：' + JSON.stringify(both));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('独立仓库：GIT_DIR 等环境覆盖时不许退回包根（无法判断就失败关闭）', () => {
+  /* CodeRabbit 在 PR #44 上点名：`GIT_DIR` 指错地方时 git 报的也是
+     「not a git repository」，单凭这句话回退到包根，就会去验**本插件自己的**笔记树
+     并报绿 —— 又回到「换了对象还报了绿」。覆盖存在时一律 exit 2。 */
+  const dir = sandbox({ withTools: true, withLib: true, withSkill: true });
+  const r = run(dir, 'tools/verify-notes.mjs', {
+    GIT_DIR: join(dir, 'no-such-git-dir')
+  });
+  assert.equal(r.code, 2, `覆盖下无法判断仓库归属，必须 exit 2，实际 ${r.code}：\n${r.out}`);
+  assert.doesNotMatch(r.out, /笔记门禁通过/, `不许换一份笔记树继续报绿：\n${r.out}`);
+  assert.match(r.out, /GIT_DIR|无法判断当前目录属于哪个仓库/, `要说清原因：\n${r.out}`);
 });

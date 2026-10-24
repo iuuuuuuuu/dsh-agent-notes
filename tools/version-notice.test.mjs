@@ -9,11 +9,13 @@
 //   ③ 版本号形态不认识就不猜（宁可不说话）
 
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import test from 'node:test';
+
+import { mountHarness as mount, tempState, emit } from './harness.mjs';
 
 import {
   isVersion,
@@ -128,6 +130,91 @@ test('版本判据只有一处：state 落盘与提示生成共用 isVersion', (
   assert.equal(isVersion('0.9'), false);
   assert.equal(isVersion('v0.9.0'), false);
   assert.equal(isVersion(undefined), false);
+});
+
+test('真实挂载：版本变了，注入段落的标题带「已更新」，且新版本真落盘', () => {
+  /* 为什么非补这条（2026-10-24 自审）：上面所有用例都是**直接调函数** ——
+     `buildVersionLabel` / `buildVersionChangeHint` / `buildPolicyText` 各自都对，
+     但 Owner 报的缺陷恰恰出在它们之间的**接线**上（`lib/index.js` 的挂载路径）。
+     只测零件不测接线，正是「函数全绿、功能不生效」的成因。
+     这里用真 Cordis 上下文（解析不到则同契约承接器）真挂一次插件，
+     从 `agent/created` 事件走到注入段落，再真读状态文件。 */
+  const { dir, file } = tempState();
+  try {
+    const current = readPluginVersion();
+    assert.match(current, /^\d+\.\d+\.\d+/, '取不到当前版本，这条用例就失去意义');
+    /* 造出「装过旧版、现在装了新版」的真实形态：状态文件里留着上次见到的旧版本。 */
+    writeFileSync(file, JSON.stringify({
+      version: 1, global: true, sessions: {}, pluginVersion: '0.0.1'
+    }), 'utf8');
+
+    const { registered } = mount({ stateFile: file, config: { enabled: true } });
+    emit(registered, 'agent/created', { agent: { id: 'sess-ver' } });
+
+    assert.equal(registered.sections.length, 1, '开关打开时应挂规范段');
+    const text = registered.sections[0].text;
+    const firstLine = text.split('\n')[0];
+    const escaped = current.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    assert.match(
+      firstLine, new RegExp(`· v${escaped} · 已更新$`),
+      `标签必须挂在标题行并标出这次变化，实际: ${firstLine}`
+    );
+    assert.match(text, /插件版本已/, '正文应带一次性的版本变化说明');
+
+    /* 真读状态文件：不落盘的话，下次挂载算不出「变过」，标签永远退不回去。 */
+    const state = JSON.parse(readFileSync(file, 'utf8'));
+    assert.equal(state.pluginVersion, current, '当前版本必须真写进状态文件');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('真实挂载：下一次挂载标签退回只有版本号，一次性提示消失', () => {
+  const { dir, file } = tempState();
+  try {
+    const current = readPluginVersion();
+    writeFileSync(file, JSON.stringify({
+      version: 1, global: true, sessions: {}, pluginVersion: '0.0.1'
+    }), 'utf8');
+
+    const first = mount({ stateFile: file, config: { enabled: true } });
+    emit(first.registered, 'agent/created', { agent: { id: 'sess-a' } });
+    const firstText = first.registered.sections[0].text;
+    assert.ok(firstText.split('\n')[0].endsWith('· 已更新'), '第一次挂载应标「已更新」');
+
+    /* 下一次挂载读的是**刚被上一次写过的状态文件** —— 这一步不真读盘就验不到。 */
+    const second = mount({ stateFile: file, config: { enabled: true } });
+    emit(second.registered, 'agent/created', { agent: { id: 'sess-b' } });
+    const secondText = second.registered.sections[0].text;
+    const secondFirst = secondText.split('\n')[0];
+    assert.ok(
+      secondFirst.endsWith(`· v${current}`),
+      `标签应退回只有版本号，实际: ${secondFirst}`
+    );
+    assert.doesNotMatch(secondText, /已更新/, '「已更新」标记的是那一次变化，不是永久徽章');
+    assert.doesNotMatch(secondText, /插件版本已/, '正文提示每个版本只该出现一次');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('真实挂载：首次运行只加版本号，不加「已更新」', () => {
+  const { dir, file } = tempState();
+  try {
+    const current = readPluginVersion();
+    /* 状态文件里连 pluginVersion 字段都没有 —— 装上插件、从没升过级的真实形态。 */
+    writeFileSync(file, JSON.stringify({ version: 1, global: true, sessions: {} }), 'utf8');
+
+    const { registered } = mount({ stateFile: file, config: { enabled: true } });
+    emit(registered, 'agent/created', { agent: { id: 'sess-fresh' } });
+
+    const text = registered.sections[0].text;
+    const firstLine = text.split('\n')[0];
+    assert.ok(firstLine.endsWith(`· v${current}`), `首次运行应只有版本号，实际: ${firstLine}`);
+    assert.doesNotMatch(text, /已更新|插件版本已/, '没记录过就不算发生过更新');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('端到端（真子进程 + 真状态文件）：升级提示只出现一次，第三次消失', () => {

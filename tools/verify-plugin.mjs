@@ -249,6 +249,41 @@ for (const rel of required) {
   check(existsSync(join(skillDir, rel)), `vendored 文件缺失: skills/agent-notes/${rel}`);
 }
 
+/* 5b. 生命周期白名单：插件侧必须与 vendored 逐字一致。
+ *
+ * 两份名单天然共存：vendored 是只读哈希受管副本，`lib/notes-layout.js`
+ * 不能 import 它的常量（.ts + 哈希门禁）。于是上游改了 `ROOT_ALLOWLIST`、
+ * 插件这边没跟，就会出现「同一棵树 vendored 全绿、插件判红」——
+ * 而这正是本轮修掉的那个假红，只是换了个触发条件。
+ *
+ * CodeRabbit 在 PR #44 上点名过这一点：「仅把检查加入 sync:check 不足以覆盖常规门禁」。
+ * 所以放进 `npm run verify`（在 `npm run check` 链里）。
+ */
+function readListFromSource(text, pattern, label) {
+  const m = pattern.exec(text);
+  if (m === null) return undefined;
+  const names = [...m[1].matchAll(/['"]([^'"]+)['"]/g)].map((entry) => entry[1]);
+  if (names.length === 0) fail(`${label}：括号里一个名字都没解析到`);
+  return names.sort();
+}
+const treeSrc = readFileSync(join(skillDir, 'scripts', 'agent-note-tree.ts'), 'utf8');
+const layoutSrc = readFileSync(join(PACKAGE_ROOT, 'lib', 'notes-layout.js'), 'utf8');
+const vendoredAllow = readListFromSource(
+  treeSrc, /ROOT_ALLOWLIST\s*=\s*new Set\(\s*\[([^\]]*)\]\s*\)/, 'vendored ROOT_ALLOWLIST'
+);
+const pluginAllow = readListFromSource(
+  layoutSrc, /LIFECYCLE_ROOT_GUIDES\s*=\s*Object\.freeze\(\s*\[([^\]]*)\]\s*\)/, 'lib/notes-layout.js LIFECYCLE_ROOT_GUIDES'
+);
+check(vendoredAllow !== undefined, '解析不到 vendored 的 ROOT_ALLOWLIST —— 上游可能改了写法，请更新这条门禁');
+check(pluginAllow !== undefined, '解析不到 lib/notes-layout.js 的 LIFECYCLE_ROOT_GUIDES');
+if (vendoredAllow !== undefined && pluginAllow !== undefined) {
+  check(
+    vendoredAllow.join(',') === pluginAllow.join(','),
+    `生命周期根层白名单不一致：vendored=[${vendoredAllow.join(', ')}]，`
+    + `插件=[${pluginAllow.join(', ')}] —— 会让同一棵树出现「vendored 绿 / 插件红」`
+  );
+}
+
 // 6. 上游清单 vs 磁盘
 const manifestFile = join(PACKAGE_ROOT, 'tools', 'upstream-manifest.json');
 check(existsSync(manifestFile), 'tools/upstream-manifest.json 不存在（先跑 node tools/sync-upstream.mjs --yes）');

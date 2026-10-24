@@ -128,6 +128,19 @@ const runAllGates = await loadGateRunner().catch((error) => {
  * 现在的规则：cwd 是 git 仓库根就必须验它（没有笔记树 → 由 runAllGates
  * 报 NO_NOTES_TREE）；只有 cwd 完全不是仓库时，才验脚本所在的包。
  *
+ * ## 2026-10-24：把「git 失败」与「不是仓库」分开
+ *
+ * 上面那条规则原先用 `gitRoot.status === 0` 做判据，于是 `status === null`
+ * （git 不可用/ENOENT/被信号杀）与「真的不是仓库」被**混为一谈**，一律落到
+ * `return PACKAGE_ROOT`。实测：在一个**别的**仓库里（该仓库的笔记违规）把
+ * PATH 里的 git 去掉 ⇒ 输出「笔记门禁通过…… 共 116 篇笔记
+ * （<本插件的路径>）」∈ **exit 0**，那篇违规笔记从未被读过。
+ * 这不是报错，是**换了对象还报了绿** —— 本文件自己上面刚写过「回退到别处比报错更危险」。
+ *
+ * 口径照 `tools/eol.mjs` 的既有做法：**只有 git 明确说「不是 git 仓库」**
+ * 才允许回退（那是夹具/导出目录的唯一合法信号）；其余失败一律 exit 2，
+ * 并说清「本次没有完成校验」。没有任何开关可以关掉这条。
+ *
  * @returns {string} 仓库根绝对路径。
  */
 function repoRoot() {
@@ -152,6 +165,29 @@ function repoRoot() {
     const top = String(gitRoot.stdout ?? '').trim();
     if (top !== '') return top;
   }
+
+  /* `status === 0` 但 stdout 为空也算异常：正常仓库根不会这样。
+     成功路径只接受「拿到了一个非空路径」。 */
+  const detail = `${gitRoot.stderr ?? ''}${gitRoot.error?.message ?? ''}`.trim();
+  const notARepo = /not a git repository/i.test(detail);
+  /* `GIT_DIR` / `GIT_WORK_TREE` / `GIT_COMMON_DIR` 被显式覆盖时，
+     「not a git repository」**不再能证明**「cwd 不是仓库」—— 覆盖指错地方时
+     git 报的正是这一句，而真实仓库就在 cwd。这种情形必须失败关闭，
+     否则又回到「换了对象还报了绿」。（CodeRabbit 在 PR #44 上点名过。） */
+  const hasGitEnvOverride = ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_COMMON_DIR']
+    .some((name) => typeof process.env[name] === 'string' && process.env[name].trim() !== '');
+  if (gitRoot.status === 0 || !notARepo || hasGitEnvOverride) {
+    console.error('✖ 无法判断当前目录属于哪个仓库，本次没有完成校验。');
+    console.error(`  原始报错：${detail === '' ? `git 退出码 ${String(gitRoot.status)}（无输出）` : detail}`);
+    if (hasGitEnvOverride) {
+      console.error('  检测到 GIT_DIR / GIT_WORK_TREE / GIT_COMMON_DIR 覆盖 ——'
+        + ' 此时 git 的报错不能证明 cwd 不是仓库。');
+    }
+    console.error('  退出码 2 = 无法进行；这不是「笔记违规」，也不等于通过。');
+    console.error('  若确实要验本插件自己的笔记，请显式传 --root <路径>。');
+    process.exit(2);
+  }
+  /* git 说「这里不是仓库」—— 夹具/导出目录的合法形态，验脚本所在的包。 */
   return PACKAGE_ROOT;
 }
 
@@ -186,11 +222,11 @@ for (const entry of result.results) {
   }
 }
 
-/* 散落在生命周期目录之外的 `.md` 不计入笔记数，也不被任何一道门禁校验。
-   这里必须**说出来**，否则「磁盘上 120 个 .md」与「共 114 篇笔记」的差额
-   永远没人解释（本仓库历史上正是这么漏掉的）。 */
+/* 未计入独立笔记的 Markdown 包括散落件、说明文件和活动翻译旁挂。
+   不能把它们全部描述为目录之外，也不能声称它们不受布局检查。
+   这里解释磁盘 Markdown 数与独立笔记数的差额。 */
 const strayLine = result.strayCount > 0
-  ? `\n另有 ${result.strayCount} 个 .md 散落在生命周期目录之外：它们不计入笔记数，也不会被校验。`
+  ? `\n另有 ${result.strayCount} 个 .md 散落件、说明文件或翻译旁挂：它们不计入独立笔记数。`
   : '';
 
 if (!result.passed) {

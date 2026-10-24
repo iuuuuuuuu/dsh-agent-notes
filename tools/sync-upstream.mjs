@@ -200,11 +200,227 @@ async function compareWithBranch(branch = 'main') {
   return { changed, missing, checked };
 }
 
+/* ── 失败分类：一处判据回答两个问题 ─────────────────────────────────────
+
+   两个问题必须由**同一张表**回答，否则它们必然漂移：
+
+     1. 这次失败算「无法进行」（exit 2）还是「检查失败 / 真差异」（exit 1）？
+     2. 这个失败值不值得重试？
+
+   2026-10-24 之前这里是两份独立词表（`isEnvironmentUnavailable` 与
+   `isTransportError`），5xx 同时从两张表里漏出去：既不判环境（报假红 exit 1，
+   说「上游有差异」），也不重试（一次 CDN 抖动就让整条门禁红）。
+   同一族错误只能有一处判据 —— 收敛成下面的 `classifyFailure()`。
+
+   **认类别，不认措辞**：本脚本自己抛的 HTTP 错误带结构化字段
+   `{ kind: 'http-status', status, endpoint }`，分类函数读字段；
+   undici / Node 的传输层失败读 `code`（`UND_ERR_` 前缀与 errno 码）。
+   消息文本只在最后兜底，服务的是「别的来源抛来的错误对象」——
+   拿消息里的数字当判据，正是那次假红的成因（`/\b(401|403|429)\b/` 罩不住 5xx）。
+
+   ## 口径表
+
+   | 情形 | 分类 | 重试 | 退出码 |
+   |---|---|---|---|
+   | 文件端点 404（`fetchUpstream` 返回 `undefined`） | 有效结果 `upstream-missing`，不是错误 | — | 见下面的「比对下限」 |
+   | 清单端点 404（ref 不存在 / 路径不在那棵树上） | `http-status`(manifest, 404) → 契约 | 否 | **1**（真差异） |
+   | 408 与 5xx（500/502/503/504…） | `http-status` → 环境 | **是**（3 次，250/500ms） | 2 |
+   | 401/403/429 | `http-status` → 环境 | 否（立刻重试只会加深限流） | 2 |
+   | 其余 4xx（400/405/451…） | `http-status` → 环境 | 否 | 2 |
+   | 传输层（`UND_ERR_*` / `ECONNRESET` / `terminated` / `socket hang up`…） | `transport` → 环境 | 是（3 次） | 2 |
+   | 上游目录结构变了（找不到目录 / `assets` 为空 / 只枚举到 <10 个文件） | `upstream-layout` → 契约 | 否 | 1 |
+   | 同步路径没能比对完全部枚举文件；本地与清单的比对条目为空或少于记录数 | `incomplete-check` → 无法进行 | 否 | 2，**且零写入** |
+   | 认不出来的错误 | 契约（默认拒绝方向，与改动前一致） | 否 | 1 |
+
+   `must`：**只有清单端点的 404 让 HTTP 失败留在 exit 1**。其余 HTTP 失败一律
+   「这次没做成校验」（exit 2）—— 全都改成 exit 2 会把「ref 不存在」这种真差异
+   一起掩盖掉，而那正是本仓库最不该放过的一类。
+   ──────────────────────────────────────────────────────────────────────── */
+
+/** HTTP 状态类失败的类别标签：分类函数读它，不读消息里的数字。 */
+const KIND_HTTP_STATUS = 'http-status';
+
+/** 值得重试的 HTTP 状态码：5xx 是经典瞬态，408 是服务端说「再来一次」。 */
+function isRetryableStatus(status) {
+  return status === 408 || (status >= 500 && status <= 599);
+}
+
+/**
+ * 造一条带结构化字段的 HTTP 失败。
+ *
+ * 字段就是判据：`status` 与 `endpoint` 让分类函数不必去消息里数数字。
+ * 消息里照样写状态码 —— 那是给人看的，不是给判据看的。
+ *
+ * @param {number} status HTTP 状态码。
+ * @param {'file' | 'manifest'} endpoint 请求的是哪一类端点（决定 404 的语义）。
+ * @param {string} message 给人看的消息。
+ * @returns {Error} 带 `kind` / `status` / `endpoint` 的错误。
+ */
+export function httpStatusError(status, endpoint, message) {
+  return Object.assign(new Error(message), {
+    kind: KIND_HTTP_STATUS,
+    status,
+    endpoint
+  });
+}
+
+/**
+ * 造一条「本次没能完成校验」的错误（exit 2）。
+ *
+ * 与「环境不可用」分开成两个类别，是因为要说的话不同：环境问题是
+ * 「网络不行」，这一类是「一个文件都没读到 / 只读到一部分」——
+ * 两者都不是「上游有差异」，也都不是「一致」。
+ *
+ * @param {string} message 说明缺口在哪。
+ * @returns {Error} 带 `kind: 'incomplete-check'` 的错误。
+ */
+function incompleteCheckError(message) {
+  return Object.assign(new Error(message), { kind: 'incomplete-check' });
+}
+
+/**
+ * 造一条「上游结构变了」的错误（契约问题，exit 1）。
+ *
+ * @param {string} message 说明哪里对不上。
+ * @returns {Error} 带 `kind: 'upstream-layout'` 的错误。
+ */
+function upstreamLayoutError(message) {
+  return Object.assign(new Error(message), { kind: 'upstream-layout' });
+}
+
+/** 传输层 errno 码族：连接没建起来 / 读到一半被掐断 / 超时。 */
+const TRANSPORT_CODES = new Set([
+  'ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'EAI_AGAIN', 'ENETUNREACH', 'ECONNREFUSED', 'ENOTFOUND', 'EPROTO'
+]);
+
+/**
+ * 传输层失败的**兜底**词表：只用于「别的来源抛来的错误对象」。
+ *
+ * 本脚本自己的错误走结构化字段，不经过这里。这几条是给 undici / Node / 测试
+ * 手搓的错误留的 —— 它们没有可读的类别字段，只能看形状。
+ */
+const TRANSPORT_MESSAGE = /(fetch failed|ENOTFOUND|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|EPROTO|self-signed|certificate|(^|\W)(terminated|socket hang up|other side closed|ECONNRESET|EPIPE)(\W|$))/i;
+
+/**
+ * 一次失败属于哪一类（`area`）、值不值得重试（`retryable`）。
+ *
+ * 「算不算环境问题」与「要不要重试」都从这一个返回值里读 —— 一份判据，
+ * 两个用途（口径表见文件顶部那段注释）。
+ *
+ * @param {unknown} error 捕获到的错误。
+ * @returns {{area: 'environment' | 'contract' | 'incomplete', retryable: boolean, status?: number}}
+ *   `environment` = 环境不可用（exit 2）；`contract` = 真差异（exit 1）；
+ *   `incomplete` = 本次没能完成校验（exit 2）。
+ */
+export function classifyFailure(error) {
+  const kind = typeof error?.kind === 'string' ? error.kind : '';
+  const status = typeof error?.status === 'number' ? error.status : undefined;
+  const endpoint = typeof error?.endpoint === 'string' ? error.endpoint : '';
+
+  /* 1) 本脚本自己抛的类别：看字段，不看消息。 */
+  if (kind === 'incomplete-check') return { area: 'incomplete', retryable: false };
+  if (kind === 'upstream-layout') return { area: 'contract', retryable: false };
+  if (kind === KIND_HTTP_STATUS) {
+    /* 唯一的例外：清单端点的 404 说明 ref 不存在（或路径不在那棵树上），
+       那是**真差异**。把它判成环境问题会掩盖真问题。 */
+    if (status === 404 && endpoint === 'manifest') return { area: 'contract', retryable: false, status };
+    return { area: 'environment', retryable: isRetryableStatus(status), status };
+  }
+
+  /* 2) 传输层错误码族：判据是前缀与 errno 码，不是措辞穷举。 */
+  const code = String(error?.cause?.code ?? error?.code ?? '');
+  if (/^UND_ERR_/.test(code)) return { area: 'environment', retryable: true };
+  if (TRANSPORT_CODES.has(code)) return { area: 'environment', retryable: true };
+
+  /* 3) 兜底：没有类别字段的错误只能看形状。 */
+  const message = String(error?.message ?? error ?? '');
+  if (TRANSPORT_MESSAGE.test(message)) return { area: 'environment', retryable: true };
+  /* 认证与限流：是「暂时查不到」，但立刻重试只会加深限流，所以不重试。 */
+  if (/\b(401|403|429)\b/.test(message)) return { area: 'environment', retryable: false };
+
+  /* 默认站在「真差异」一侧：认不出来不等于没问题（与改动前的默认一致）。 */
+  return { area: 'contract', retryable: false };
+}
+
+/**
+ * 这个错误属于「本次没能完成校验」吗？（该用 exit 2）
+ *
+ * **环境不可用**：网络不行、被限流。（`incomplete` 也退 2，但原因不是环境，
+ * 是「一个文件都没读到 / 只读到一部分」，所以它算在 `true` 里 ——
+ * 两者对调用方的含义一样：这次没有完成校验，别去查差异。）
+ *
+ * @param {unknown} error 捕获到的错误。
+ * @returns {boolean} true 表示该用 exit 2。
+ */
+export function isEnvironmentUnavailable(error) {
+  const { area } = classifyFailure(error);
+  return area === 'environment' || area === 'incomplete';
+}
+
+/**
+ * 这个错误该用哪个退出码。
+ *
+ * 唯一一处把分类映射成退出码的地方（口径表见文件顶部）：
+ * exit 1 = 检查失败（上游真有差异 / 上游结构变了）；exit 2 = 无法进行。
+ *
+ * @param {unknown} error 捕获到的错误。
+ * @returns {1 | 2} 退出码。
+ */
+export function exitCodeFor(error) {
+  return classifyFailure(error).area === 'contract' ? 1 : 2;
+}
+
+/**
+ * 对传输层失败做有限次重试。
+ *
+ * **为什么需要**（2026-10-24 实测）：`--check` 要顺序取 21 个上游文件，
+ * jsDelivr 在这串高频请求里会偶发掐断连接（`UND_ERR_SOCKET` /
+ * `fetch failed`）。实测 5 轮完整序列里有 2 轮失败，直接跑 CLI 也约 2/3 失败。
+ * 单次请求重试一下就过（同一文件单测 10/10 成功）—— 也就是说，
+ * 不重试时这条同步校验会**经常性地红**，而红的原因是抖动不是差异。
+ * 假绿要修，假红同样要修：一个会随机红的门禁，人很快就会学会忽略它。
+ *
+ * 重试范围由 {@link classifyFailure} 的 `retryable` 决定：传输层与 **5xx / 408**
+ * 都重试；**4xx 其余一律不重试**（那是服务端的明确回答，重试只会把
+ * 「上游真的没有这个文件」拖慢成三次请求还报同样的话，也加深限流）。
+ *
+ * 5xx 为什么必须进重试（2026-10-24 实测）：CDN 返回 503 时旧实现一次都不重试，
+ * 而 503 恰恰是最经典的可重试瞬态 —— 同一探针换成传输层断流时重试了 3 次、
+ * 正确退 2，换成 503 却只请求 1 次并退 1（假红）。同一个「这次没做完」，
+ * 两种形态必须得到同一处理。
+ *
+ * @template T
+ * @param {(attempt: number) => Promise<T>} operation 要执行的操作。
+ * @param {{attempts?: number, backoffMs?: number, sleep?: (ms: number) => Promise<void>}} [options]
+ *   attempts=总尝试次数（含首次）；backoffMs=退避基数；sleep=可注入的等待。
+ * @returns {Promise<T>} 操作结果。
+ * @throws {Error} 重试用尽后抛出最后一次的错误（保持原始形状，分类函数照旧能判）。
+ */
+export async function retryTransport(operation, options = {}) {
+  const attempts = options.attempts ?? 3;
+  const backoffMs = options.backoffMs ?? 250;
+  const sleep = options.sleep ?? ((ms) => new Promise((resolve) => { setTimeout(resolve, ms); }));
+  let lastError;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation(attempt);
+    } catch (error) {
+      lastError = error;
+      if (!classifyFailure(error).retryable || attempt === attempts) throw error;
+      await sleep(backoffMs * attempt);
+    }
+  }
+  throw lastError;
+}
+
 /**
  * 通过 jsDelivr CDN 读上游文件。
  *
  * 直连 raw.githubusercontent / github 在本机实测被重置（ECONNRESET），
  * jsDelivr 可稳定访问；它按 commit 或分支提供同一份仓库内容。
+ *
+ * 传输层失败与 5xx / 408 走 {@link retryTransport}；404 是有效结果，直接返回
+ * undefined，不进重试。
  *
  * @param {string} ref 分支或 commit。
  * @param {string} repoPath 仓库内相对路径。
@@ -212,10 +428,12 @@ async function compareWithBranch(branch = 'main') {
  */
 async function fetchUpstream(ref, repoPath) {
   const url = `https://fastly.jsdelivr.net/gh/czm15053/write-notes-like-deepseek@${ref}/${UPSTREAM.pathPrefix}/${repoPath}`;
-  const response = await fetch(url);
-  if (response.status === 404) return undefined;
-  if (!response.ok) throw new Error(`拉取失败 ${response.status}: ${url}`);
-  return await response.text();
+  return await retryTransport(async () => {
+    const response = await fetch(url);
+    if (response.status === 404) return undefined;
+    if (!response.ok) throw httpStatusError(response.status, 'file', `拉取失败 ${response.status}: ${url}`);
+    return await response.text();
+  });
 }
 
 /**
@@ -227,9 +445,15 @@ async function fetchUpstream(ref, repoPath) {
  */
 async function listUpstreamDir(ref, dir) {
   const url = `https://data.jsdelivr.com/v1/packages/gh/czm15053/write-notes-like-deepseek@${ref}`;
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`清单拉取失败 ${response.status}: ${url}`);
-  const payload = await response.json();
+  /* 清单请求同样会偶发被掐断（实测失败就出现在「待核对」之前的那一步），
+     所以也走同一套判据：传输层与 5xx/408 重试，其余 HTTP 失败直接抛。
+     这里的 404 语义与文件端点**不同** —— 它说明 ref 不存在或路径不在那棵树上，
+     是**真差异**，所以带 `endpoint: 'manifest'` 让分类函数判成 exit 1。 */
+  const payload = await retryTransport(async () => {
+    const response = await fetch(url);
+    if (!response.ok) throw httpStatusError(response.status, 'manifest', `清单拉取失败 ${response.status}: ${url}`);
+    return await response.json();
+  });
 
   /** 在 jsDelivr 的树里按路径找节点；根节点自身 type 为 'gh'，只有子层才是 directory。 */
   const find = (node, segments) => {
@@ -244,7 +468,7 @@ async function listUpstreamDir(ref, dir) {
   const target = find(payload, segments);
   if (target === undefined) {
     // 静默返回空会让「上游路径改了」伪装成「无需合并」，那是假绿；必须响。
-    throw new Error(
+    throw upstreamLayoutError(
       `上游清单中找不到目录 "${UPSTREAM.pathPrefix}${dir === '' ? '' : `/${dir}`}"（ref=${ref}）。`
       + '上游目录结构可能已变更，请人工核对后再同步。'
     );
@@ -268,10 +492,13 @@ function digest(text) {
  * SKILL.md 落在 skills/agent-notes/，其余子目录原样保留。
  *
  * @param {string} rel 仓库内相对 pathPrefix 的路径。
+ * @param {string} [packageRoot] 本包根目录，默认本包根。
+ *   **测试要传临时目录**：`checkLocalAgainstManifest()` 的注入根必须作用到读盘上，
+ *   否则「拿临时清单去比真实副本」会得到无意义的结论。
  * @returns {string} 本包内绝对路径。
  */
-function targetPath(rel) {
-  return join(PACKAGE_ROOT, 'skills', 'agent-notes', ...rel.split('/'));
+function targetPath(rel, packageRoot = PACKAGE_ROOT) {
+  return join(packageRoot, 'skills', 'agent-notes', ...rel.split('/'));
 }
 
 /**
@@ -287,7 +514,7 @@ async function collectPaths(ref) {
     for (const name of names) paths.push(`${dir}/${name}`);
     if (dir === 'assets' && names.length === 0) {
       // 上游 assets 含看板模板；变空说明结构变了，不能当「没有这个目录」放过。
-      throw new Error(`上游 ${UPSTREAM.pathPrefix}/assets 为空，看板模板可能已改名或移走。`);
+      throw upstreamLayoutError(`上游 ${UPSTREAM.pathPrefix}/assets 为空，看板模板可能已改名或移走。`);
     }
   }
   return paths;
@@ -365,21 +592,63 @@ function printUsage() {
 }
 
 /**
+ * 读 `upstream.json` 里记录的 `fileCount`（上次同步写下的条目数）。
+ *
+ * 用途：给「本地与清单比对」一个**下**限参照。记录数与清单条目数对不上时，
+ * 说明清单被截断过，那就不能拿它当「一致」的依据。
+ *
+ * @param {string} [packageRoot] 本包根目录。
+ * @returns {number | undefined} 记录的条目数；没有记录或不是正整数时 undefined。
+ */
+function readRecordedFileCount(packageRoot = PACKAGE_ROOT) {
+  try {
+    const file = join(packageRoot, 'upstream.json');
+    if (!existsSync(file)) return undefined;
+    const parsed = JSON.parse(readFileSync(file, 'utf8'));
+    const count = parsed?.fileCount;
+    return typeof count === 'number' && Number.isInteger(count) && count > 0 ? count : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * 校验内置副本与清单记录的摘要是否一致（纯本地，不联网）。
  *
  * 用途：`--auto` 发现 ref 未变时，不能就此断定「没事」—— ref 只记录
  * 上次同步的目标 commit，本地文件仍可能被改过或被别的工具覆盖。
  *
+ * ## 下限：空集合不得当绿（本仓库的既有纪律）
+ *
+ * `for (const [rel, expected] of Object.entries(manifest.files ?? {}))` 没有下限时，
+ * **空清单 → 0 次比对 → `{mismatched: [], missing: []}`**，调用方读到的就是
+ * 「一致」。实测过：那份空清单正是「全 404 时把清单写空」那个缺陷的产物，
+ * 喂回 `--auto` 就得到一句「✔ 已是最新，且内置副本与清单一致，无需合并」。
+ * 所以这里补齐两条：**清单为空**、以及**条目数少于 `upstream.json` 记录的数**
+ * 一律返回 undefined（= 这次没能校验），由调用方报 exit 2，绝不当成一致。
+ *
+ * @param {{packageRoot?: string}} [options] 本包根目录，可注入**仅为可测**
+ *   （临时仓库）：它同时作用于清单读取与副本读盘（`targetPath(rel, packageRoot)`）。
+ *   注入的是**根**，不是清单内容 —— 清单一律从盘上读，测试才不会验到
+ *   「一个只有测试会构造的对象」。
  * @returns {{ mismatched: string[], missing: string[] } | undefined}
- *   有出入的文件；清单缺失或不可读时 undefined（调用方据此报错，不当成「无差异」）。
+ *   有出入的文件；清单缺失、不可读、或没达到下限时 undefined
+ *   （调用方据此报错，不当成「无差异」）。
  */
-function checkLocalAgainstManifest() {
-  const manifest = readManifest();
+export function checkLocalAgainstManifest(options = {}) {
+  const packageRoot = options.packageRoot ?? PACKAGE_ROOT;
+  const manifest = readManifest(packageRoot);
   if (manifest === undefined) return undefined;
+
+  const entries = Object.entries(manifest.files ?? {});
+  const recorded = readRecordedFileCount(packageRoot);
+  if (entries.length === 0) return undefined;
+  if (recorded !== undefined && entries.length < recorded) return undefined;
+
   const mismatched = [];
   const missing = [];
-  for (const [rel, expected] of Object.entries(manifest.files ?? {})) {
-    const local = targetPath(rel);
+  for (const [rel, expected] of entries) {
+    const local = targetPath(rel, packageRoot);
     if (!existsSync(local)) {
       missing.push(rel);
       continue;
@@ -456,6 +725,16 @@ async function main() {
       console.error('  这不是「已是最新」—— 本次检查无效，请稍后重试。');
       process.exit(2);
     }
+    /* 比对下限：**一个文件都没比对成时不许下任何结论**。
+       基准是本地清单，21 个文件全 404 时旧实现会打印
+       「0 个文件内容变了，21 个文件上游已删除」并 exit 1 —— 那是在报告
+       一个**没有依据**的结论（「上游真删光了」与「CDN 全线 404」在输出上完全一样）。
+       这里改成如实说「没比成」（exit 2）。 */
+    if (result.checked === 0) {
+      console.error(`✖ 本次一个文件都没比对成功：基准里的 ${result.missing.length} 个文件全部取不到内容。`);
+      console.error('  这不是「已是最新」，也不是「上游已删除」—— 本次检查无效，请稍后重试。');
+      process.exit(2);
+    }
     console.log(`上游默认分支: ${branch}`);
     console.log(`已核对 ${result.checked} 个文件（基准: tools/upstream-manifest.json）`);
     const changedCount = result.changed.length;
@@ -477,7 +756,7 @@ async function main() {
   const paths = await collectPaths(ref);
   // 兜底：枚举结果异常少说明清单解析坏了，不能当「无需合并」放过。
   if (paths.length < 10) {
-    throw new Error(
+    throw upstreamLayoutError(
       `只枚举到 ${paths.length} 个上游文件（预期 >= 10），清单解析很可能已失效。`
       + `已枚举: ${paths.join(', ')}`
     );
@@ -515,9 +794,33 @@ async function main() {
     }
   }
 
-  // 本包内有、上游没有的文件（例如我们自己加的东西）。
-  for (const entry of report) {
-    if (entry.status === 'upstream-missing') console.log(`  ? ${entry.rel} — 上游已无此文件（保留本地）`);
+  /* ── 比对下限：空集合不得当绿 ────────────────────────────────────────────
+
+     21 个文件**全部 404** 与 21 个文件**全部相同**必须走不同的分支。
+     旧实现在这里分不开：`upstream-missing` 不计入任何计数，于是
+     「一个文件都没比对成」也打印「内置副本与上游一致，无需合并」并 exit 0，
+     不带 `--check` 时还**在不需要 `--yes` 的路径上**把 21 条摘要写成 0 条
+     （实测：隔离副本里 files 从 21 条变 0 条，`upstream.json.fileCount=0`）。
+
+     为什么连「只少读到一个」也判红：`manifest` 是「这次真读到了什么」的记录，
+     少读一个就抹掉一条基线，而结论照样会印成「一致」。宁可不写，
+     也不要写一份缩水的清单 —— **零写入比写坏好**。
+     ──────────────────────────────────────────────────────────────────────── */
+  const missingContent = report
+    .filter((entry) => entry.status === 'upstream-missing')
+    .map((entry) => entry.rel);
+  if (missingContent.length > 0) {
+    const comparedCount = paths.length - missingContent.length;
+    const head = comparedCount === 0
+      ? `本次**一个**上游文件都没比对成（${paths.length} 个全部没读到内容）`
+      : `本次只比对成功 ${comparedCount}/${paths.length} 个上游文件`;
+    throw incompleteCheckError(
+      `${head}：${missingContent.join('、')}\n`
+      + '文件端点的 404 在「上游真删了这个文件」时是有效结果；但这些路径是**刚从上游目录清单里'
+      + '枚举出来的**，同一份清单里既列出又取不到，说明这次校验没做完（CDN 不一致、负缓存，'
+      + '或者 `--ref` 指的是会移动的分支而不是钉住的 commit）。'
+      + '所以这里既不说「一致」也不说「有差异」：**一条基线都不改写**，请稍后重试。'
+    );
   }
 
   const changed = report.filter((entry) => entry.status === 'changed');
@@ -567,11 +870,13 @@ async function main() {
  * 清单是「上次同步时每个上游文件的摘要」，也是 `--latest` 的比对基准 ——
  * 有了它就不必远端枚举目录（jsDelivr 对分支的清单缓存会滞后）。
  *
+ * @param {string} [packageRoot] 本包根目录，默认本包根（可注入，见
+ *   `checkLocalAgainstManifest()` 的说明）。
  * @returns {{ version: number, ref: string, files: Record<string, string> } | undefined}
  *   清单；缺失或损坏时 undefined（调用方据此明确报错，不当成「无差异」）。
  */
-function readManifest() {
-  const manifestFile = join(PACKAGE_ROOT, 'tools', 'upstream-manifest.json');
+function readManifest(packageRoot = PACKAGE_ROOT) {
+  const manifestFile = join(packageRoot, 'tools', 'upstream-manifest.json');
   if (!existsSync(manifestFile)) return undefined;
   try {
     const parsed = JSON.parse(readFileSync(manifestFile, 'utf8'));
@@ -639,59 +944,34 @@ export function writeManifest(manifest, ref, packageRoot = PACKAGE_ROOT) {
 const invokedDirectly = process.argv[1] !== undefined
   && process.argv[1].replace(/\\/g, '/').endsWith('/tools/sync-upstream.mjs');
 
-/**
- * 这个错误是「环境不可用」还是「检查失败」？
- *
- * 必须分清：exit 1 = 检查失败，exit 2 = 无法进行（本仓库既有约定，
- * 见 verify-notes / install-hooks / doc-budget）。
- *
- * 混为一谈的后果实测到了：断网时 `--check` 返回 1，测试报
- * 「--check 在上游一致时应 exit 0，实际 1 / 合并失败: fetch failed」——
- * 断言在说契约被破坏，实际是网络不行。**那是误导性诊断**，
- * 会把人引向错误的方向去查。
- *
- * @param {unknown} error 捕获到的错误。
- * @returns {boolean} true 表示环境不可用（该用 exit 2）。
- */
-export function isEnvironmentUnavailable(error) {
-  /* fetch 的失败一律是 TypeError，message 各平台不同，但都含这几个词。 */
-  const message = String(error?.message ?? error ?? '');
-  const code = String(error?.cause?.code ?? error?.code ?? '');
-
-  /* 网络层：连不上、超时、DNS 失败、TLS 失败。 */
-  if (/(fetch failed|ENOTFOUND|ETIMEDOUT|ECONNREFUSED|EAI_AGAIN|ENETUNREACH|EPROTO|self-signed|certificate)/i.test(message)) {
-    return true;
-  }
-  if (['ENOTFOUND', 'ETIMEDOUT', 'ECONNREFUSED', 'EAI_AGAIN', 'ENETUNREACH', 'EPROTO'].includes(code)) {
-    return true;
-  }
-  /* 认证与限流：是「暂时查不到」，不是「上游变了」。 */
-  if (/\b(401|403|429)\b/.test(message)) {
-    return true;
-  }
-  return false;
-}
+/* 失败分类（`classifyFailure` / `exitCodeFor`）与口径表在文件上半部分 ——
+   它们必须与「要不要重试」共用同一张表，所以放在一起，不再各留一份词表。 */
 
 if (invokedDirectly) {
   main().catch((error) => {
     const message = error?.message ?? error;
-    if (isEnvironmentUnavailable(error)) {
-      /* 措辞与既有约定一致：`tools/self-update.test.mjs` 早就在断言 exit 2
-         时消息匹配「查不到上游 HEAD|无法校验」，注释还写着「网络不可用时
-         明确跳过，不算假绿」—— 它比我先处理了这个问题。所以是新代码向
-         既有约定靠拢，不是要求既有约定改。 */
-      console.error(`无法校验上游: ${message}`);
-      console.error('这是**环境问题**（网络不可用或被限流），不是「上游有差异」。');
-      console.error('退出码 2 = 无法进行（本次没有完成校验）；上游真有差异时退出码是 1。');
-      process.exitCode = 2;
+    const { area } = classifyFailure(error);
+    if (area === 'contract') {
+      console.error(`合并失败: ${message}`);
+      /* 这里**不能用 process.exit()**：线上实测过（Node 22.19 + Windows 11），
+         在「HTTP 4xx，响应体还没读」之后立刻 process.exit 会撞 libuv 断言
+         `!(handle->flags & UV_HANDLE_CLOSING)`（async.c:76），退出码变成 127。
+         127 既不是「检查失败」也不是「无法进行」，还会把调用方吓成「工具崩了」。
+         设 exitCode 让事件循环自然收干，退出码就是约定的 1。 */
+      process.exitCode = 1;
       return;
     }
-    console.error(`合并失败: ${message}`);
-    /* 这里**不能用 process.exit()**：线上实测过（Node 22.19 + Windows 11），
-       在「HTTP 4xx，响应体还没读」之后立刻 process.exit 会撞 libuv 断言
-       `!(handle->flags & UV_HANDLE_CLOSING)`（async.c:76），退出码变成 127。
-       127 既不是「检查失败」也不是「无法进行」，还会把调用方吓成「工具崩了」。
-       设 exitCode 让事件循环自然收干，退出码就是约定的 1。 */
-    process.exitCode = 1;
+    /* 措辞与既有约定一致：`tools/self-update.test.mjs` 早就在断言 exit 2 时
+       消息匹配「查不到上游 HEAD|无法校验」，注释还写着「网络不可用时明确跳过，
+       不算假绿」—— 它比我先处理了这个问题。所以是新代码向既有约定靠拢，
+       不是要求既有约定改。 */
+    console.error(`无法校验上游: ${message}`);
+    if (area === 'incomplete') {
+      console.error('这是**本次没能完成校验**（没读到内容 / 只读到一部分），不是「上游有差异」。');
+    } else {
+      console.error('这是**环境问题**（网络不可用或被限流），不是「上游有差异」。');
+    }
+    console.error('退出码 2 = 无法进行（本次没有完成校验）；上游真有差异时退出码是 1。');
+    process.exitCode = exitCodeFor(error);
   });
 }
