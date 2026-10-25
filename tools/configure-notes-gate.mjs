@@ -62,7 +62,15 @@ const SCRIPT_FILES = [
  * @returns {{ root?: string, dryRun: boolean, check: boolean, help: boolean }} 解析结果。
  */
 export function parseArgs(argv) {
-  const out = { root: undefined, dryRun: false, check: false, force: false, help: false };
+  /* 两种「强制」分开：vendored 脚本与仓库级工具被本地改过的概率完全不同 ——
+     实测 6 个在用仓库里有 2 个 fork 过 vendored 的归档脚本（route-deck、wt-port），
+     而那两个工具**没有**任何一个仓库动过。用一个 --force 会把两种风险捆在一起：
+     只想更新工具时，顺手把人家修好的 vendored 脚本覆盖掉（本轮真的发生过一次）。 */
+  const out = {
+    root: undefined, dryRun: false, check: false,
+    force: false, forceVendored: false, forceTools: false,
+    withTools: false, help: false
+  };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--root') {
@@ -73,6 +81,9 @@ export function parseArgs(argv) {
     } else if (arg === '--dry-run') out.dryRun = true;
     else if (arg === '--check') out.check = true;
     else if (arg === '--force') out.force = true;
+    else if (arg === '--force-vendored') out.forceVendored = true;
+    else if (arg === '--force-tools') out.forceTools = true;
+    else if (arg === '--with-tools') out.withTools = true;
     else if (arg === '--help' || arg === '-h') out.help = true;
     else throw new Error(`未知参数: ${arg}`);
   }
@@ -149,8 +160,8 @@ export function buildPlan(root, options = {}) {
     const targetPath = join(scriptsDir, name);
     const existing = existsSync(targetPath) ? readFileSync(targetPath, 'utf8') : undefined;
     const isStock = existing === undefined || existing === original || existing === code;
-    if (!isStock && options.force !== true) {
-      skipped.push({ path: targetPath, reason: '本地改过（与上游/补丁版本都不同），跳过；要覆盖请加 --force' });
+    if (!isStock && options.forceVendored !== true) {
+      skipped.push({ path: targetPath, reason: '本地改过（与上游/补丁版本都不同），跳过；确认要覆盖请加 --force-vendored' });
       continue;
     }
     if (missed.length > 0) {
@@ -165,6 +176,26 @@ export function buildPlan(root, options = {}) {
       content: applied.length > 0 ? code : original,
       patched: applied
     });
+  }
+
+  /* 仓库级门禁工具：notes-coverage / notes-supersession。
+     它们是**插件侧的流程判据**（要看 git 区间、要认 Note-Skip / Note-Ref），
+     由目标仓库自己的 CI 调用，所以必须随配套一起升级 ——
+     否则会出现「插件里加了新出口，目标仓库那份还不认」的漂移
+     （实测：6 个仓库的副本都停在 Note-Ref 之前的版本，73 行差异）。 */
+  if (options.withTools === true) {
+    for (const name of ['notes-coverage.mjs', 'notes-supersession.mjs']) {
+      const from = join(PACKAGE_ROOT, 'tools', name);
+      if (!existsSync(from)) continue;
+      const targetPath = join(root, 'tools', name);
+      const content = readFileSync(from, 'utf8');
+      const existing = existsSync(targetPath) ? readFileSync(targetPath, 'utf8') : undefined;
+      if (existing !== undefined && existing !== content && options.forceTools !== true) {
+        skipped.push({ path: targetPath, reason: '与当前版本不同（可能是旧副本，也可能本地改过）；确认后加 --force-tools' });
+        continue;
+      }
+      files.push({ path: targetPath, content, patched: [] });
+    }
   }
 
   /* 看板模板：build-board.ts 按 `../assets/agent-notes-board.html` 找它。 */
@@ -225,7 +256,10 @@ function main() {
       '',
       '  --dry-run  只打印将要写入/新建的文件，不落盘',
       '  --check    有差异即退出 1（适合放进 CI 防止配套落后）',
-      '  --force    连「本地改过」的文件一起覆盖（默认跳过它们）',
+      '  --force-vendored  覆盖「本地改过」的 vendored 脚本（默认跳过 —— 有仓库 fork 过它们）',
+      '  --force-tools     覆盖「与当前版本不同」的仓库级工具（默认跳过）',
+      '  --force           上面两者都强制（会用一行告警提醒你它很宽）',
+      '  --with-tools 同时同步仓库级门禁工具（tools/notes-coverage.mjs、notes-supersession.mjs）',
       '',
       '布局沿用目标仓库已有的 .agents/notes-scripts/；没有则用 .agents/skills/agent-notes/。',
       '不触碰目标仓库的 .agents/notes/ 与其自己的门禁壳/额外脚本。'
@@ -239,14 +273,37 @@ function main() {
     process.exit(2);
   }
 
-  const { files, skipped, layout } = buildPlan(root, { force: args.force === true });
+  if (args.force === true) {
+    process.stderr.write('[configure-notes-gate] 警告：--force 会同时覆盖 vendored 脚本与仓库级工具；'
+      + '只想更新其中一类时请用 --force-vendored / --force-tools。\n');
+  }
+  const { files, skipped, layout } = buildPlan(root, {
+    forceVendored: args.forceVendored === true || args.force === true,
+    forceTools: args.forceTools === true || args.force === true,
+    withTools: args.withTools === true
+  });
   const { changed, same } = diffPlan(files);
 
   process.stdout.write(`布局: ${layout}\n`);
-  process.stdout.write(`配套文件: ${files.length} 个（一致 ${same.length}，需更新 ${changed.length}）\n`);
+  process.stdout.write(
+    `配套文件: ${files.length} 个（一致 ${same.length}，需更新 ${changed.length}，跳过 ${skipped.length}）\n`
+  );
+  /* 被跳过的必须逐条打印 —— 它们**没有**被检查、也不会被更新。
+     实测教训：我把 route-deck 里一份本地 fork 误覆盖后又还原，之后跑 --dry-run
+     只看到「一致 9，需更新 0」，完全看不出那份 fork 已被跳过、更看不出它存在。
+     而 --check 在这种情况下还会说「已是最新」—— 那是假绿。 */
+  for (const item of skipped) {
+    process.stdout.write(`  跳过 ${item.path}\n        原因：${item.reason}\n`);
+  }
 
   if (args.check) {
     for (const path of changed) process.stdout.write(`  需更新 ${path}\n`);
+    if (skipped.length > 0) {
+      /* 已存在且被跳过 ⇒ 这一份**与当前版本不同**，只是工具不去动它。
+         不把它算成失败（fork 可能是刻意的），但必须让调用方看见 ——
+         否则 --check 的「已是最新」就是假绿。 */
+      process.stdout.write(`  注意：${skipped.length} 个文件与当前版本不同，但按规则未被检查/更新（见上）。\n`);
+    }
     process.exit(changed.length > 0 ? 1 : 0);
   }
 

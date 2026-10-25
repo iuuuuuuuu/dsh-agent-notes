@@ -120,7 +120,7 @@ test('覆盖策略：本地改过的脚本默认跳过（不许拿「版本旧�
     assert.match(plan.skipped[0].reason, /本地改过/);
 
     /* --force 才覆盖，且要让人知道自己在覆盖什么。 */
-    const forced = buildPlan(dir, { force: true });
+    const forced = buildPlan(dir, { forceVendored: true });
     assert.ok(forced.files.some((file) => file.path.endsWith('verify-agent-note-format.ts')));
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -181,6 +181,77 @@ test('--dry-run 不落盘', () => {
     });
     assert.equal(r.status, 0);
     assert.ok(!existsSync(join(dir, '.agents', 'skills', 'agent-notes', 'scripts')), '--dry-run 不许创建目录');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('force 拆成两类：--force-tools 不会碰本地改过的 vendored 脚本', () => {
+  /* 实测事故（2026-10-25）：我用一个 --force 同步工具，顺手把 route-deck 里
+     **本地 fork 过的** verify-archived-agent-notes.ts 覆盖了（他们自己修了
+     短名/长名路径问题）。只靠 --force 一个开关，等于把两种风险捆在一起。 */
+  const dir = fixture((root) => {
+    const scripts = join(root, '.agents', 'skills', 'agent-notes', 'scripts');
+    mkdirSync(scripts, { recursive: true });
+    writeFileSync(join(scripts, 'verify-archived-agent-notes.ts'), '// 本地 fork：修了别的东西\n', 'utf8');
+    mkdirSync(join(root, 'tools'), { recursive: true });
+    writeFileSync(join(root, 'tools', 'notes-coverage.mjs'), '// 旧副本\n', 'utf8');
+  });
+  try {
+    const plan = buildPlan(dir, { forceTools: true, withTools: true });
+    const vendored = plan.files.find((file) => file.path.endsWith('verify-archived-agent-notes.ts'));
+    assert.equal(vendored, undefined, '--force-tools 不许覆盖本地 fork 的 vendored 脚本');
+    assert.ok(plan.skipped.some((item) => item.path.endsWith('verify-archived-agent-notes.ts')),
+      '被跳过的 vendored 脚本必须出现在 skipped 里');
+    assert.ok(plan.files.some((file) => file.path.split(String.fromCharCode(92)).join("/").endsWith('tools/notes-coverage.mjs')),
+      '--force-tools 应当更新仓库级工具');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('force 拆成两类：--force-vendored 不会碰与当前版本不同的工具', () => {
+  const dir = fixture((root) => {
+    const scripts = join(root, '.agents', 'skills', 'agent-notes', 'scripts');
+    mkdirSync(scripts, { recursive: true });
+    writeFileSync(join(scripts, 'verify-archived-agent-notes.ts'), '// 本地 fork\n', 'utf8');
+    mkdirSync(join(root, 'tools'), { recursive: true });
+    writeFileSync(join(root, 'tools', 'notes-coverage.mjs'), '// 旧副本\n', 'utf8');
+  });
+  try {
+    const plan = buildPlan(dir, { forceVendored: true, withTools: true });
+    assert.ok(plan.files.some((file) => file.path.endsWith('verify-archived-agent-notes.ts')),
+      '--force-vendored 应当覆盖 vendored 脚本');
+    assert.equal(plan.files.find((file) => file.path.split(String.fromCharCode(92)).join("/").endsWith('tools/notes-coverage.mjs')), undefined,
+      '--force-vendored 不许覆盖仓库级工具');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('被跳过的文件必须在输出里逐条出现（否则 --check 的「已是最新」是假绿）', () => {
+  /* 实测教训：把 fork 还原之后跑 --dry-run，只看到「一致 9，需更新 0」，
+     完全看不出那份 fork 被跳过、更看不出它存在。 */
+  const dir = fixture((root) => {
+    const scripts = join(root, '.agents', 'skills', 'agent-notes', 'scripts');
+    mkdirSync(scripts, { recursive: true });
+    writeFileSync(join(scripts, 'verify-archived-agent-notes.ts'), '// 本地 fork\n', 'utf8');
+  });
+  try {
+    const r = spawnSync(NODE, [join(ROOT, 'tools', 'configure-notes-gate.mjs'), '--root', dir, '--dry-run'], {
+      encoding: 'utf8', windowsHide: true
+    });
+    assert.equal(r.status, 0);
+    const out = `${r.stdout}${r.stderr}`;
+    assert.match(out, /跳过 1/, `汇总行要带跳过数量：${out}`);
+    assert.match(out, /verify-archived-agent-notes\.ts/, `要指名被跳过的是哪个文件：${out}`);
+    assert.match(out, /--force-vendored/, `要告诉人怎么强制覆盖：${out}`);
+
+    const check = spawnSync(NODE, [join(ROOT, 'tools', 'configure-notes-gate.mjs'), '--root', dir, '--check'], {
+      encoding: 'utf8', windowsHide: true
+    });
+    assert.match(`${check.stdout}${check.stderr}`, /未被检查/,
+      '--check 必须说明「有文件按规则未被检查」，不能只说已是最新');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
