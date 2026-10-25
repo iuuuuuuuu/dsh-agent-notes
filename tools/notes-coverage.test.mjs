@@ -57,6 +57,32 @@ function makeRepo() {
  * @param {string} message 提交信息。
  * @returns {{ code: number, out: string }} 退出码与输出。
  */
+
+/**
+ * 带提交信息跑一次（等价于 `commit-msg` 钩子：`--staged --message-file <path>`）。
+ *
+ * @param {string} dir 仓库。
+ * @param {Record<string,string>} files 要写的文件。
+ * @param {string} message 提交信息。
+ * @returns {{ code: number, out: string }} 结果。
+ */
+function commitWithMessage(dir, files, message) {
+  const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true });
+  for (const [rel, content] of Object.entries(files)) {
+    const full = join(dir, rel);
+    mkdirSync(join(full, '..'), { recursive: true });
+    writeFileSync(full, content, 'utf8');
+  }
+  git('add', '-A');
+  const msgFile = join(dir, '.git', 'COMMIT_EDITMSG_TEST');
+  writeFileSync(msgFile, message, 'utf8');
+  const result = spawnSync(NODE, [SCRIPT, '--staged', '--message-file', msgFile], {
+    cwd: dir, encoding: 'utf8', windowsHide: true,
+    env: { ...process.env, NOTES_COVERAGE_SKIP: '' }
+  });
+  return { code: result.status ?? -1, out: `${result.stdout ?? ''}${result.stderr ?? ''}` };
+}
+
 function commitAndCheck(dir, files, message) {
   const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true });
   for (const [rel, content] of Object.entries(files)) {
@@ -875,6 +901,117 @@ test('notes-coverage: 拦截文案必须先讲「该不该写」，并点明机�
       judgeAt !== -1 && skipAt !== -1 && writeAt !== -1 && judgeAt < skipAt && skipAt < writeAt,
       `文案顺序不合理：judge=${judgeAt} skip=${skipAt} write=${writeAt}`
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * 在临时仓库里做一次**真实提交**。
+ *
+ * 为什么要真提交：Note-Ref 解决的是「同一个决定拆成多个提交」，而这个机制只在
+ * **区间模式**下逐提交生效；staged 模式整批一起看，区分不出「两篇笔记」与
+ * 「一个决定两次提交」。（我第一版就用 staged 写，结果第二个提交里那篇笔记
+ * 还留在暂存区，用例测的是同一批，等于什么都没验。）
+ *
+ * @param {string} dir 仓库。
+ * @param {Record<string, string>} files 这次提交要写的文件。
+ * @param {string} message 提交信息（可含 Note-Ref / Note-Skip）。
+ * @returns {string} 这次提交的 sha。
+ */
+function commitReal(dir, files, message) {
+  const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8', windowsHide: true });
+  for (const [rel, content] of Object.entries(files)) {
+    const full = join(dir, rel);
+    mkdirSync(join(full, '..'), { recursive: true });
+    writeFileSync(full, content, 'utf8');
+  }
+  git('add', '-A');
+  git('-c', 'user.name=Coverage Test', '-c', 'user.email=coverage@example.invalid',
+    '-c', 'commit.gpgsign=false', 'commit', '--no-verify', '-q', '-m', message);
+  return git('rev-parse', 'HEAD').trim();
+}
+
+/**
+ * 以某个提交为基准跑区间模式。
+ *
+ * @param {string} dir 仓库。
+ * @param {string} base 基准提交。
+ * @returns {{ code: number, out: string }} 结果。
+ */
+function runSince(dir, base) {
+  const result = spawnSync(NODE, [SCRIPT, '--since', base], {
+    cwd: dir, encoding: 'utf8', windowsHide: true,
+    env: { ...process.env, NOTES_COVERAGE_SKIP: '', NOTES_COVERAGE_BASE: '' }
+  });
+  return { code: result.status ?? -1, out: `${result.stdout ?? ''}${result.stderr ?? ''}` };
+}
+
+test('Note-Ref：同一决定的后续提交可指向既有笔记，不必再写一篇', () => {
+  /* Owner 2026-10-25：「不要为了写笔记而写笔记」。机制上的施压点是覆盖门禁
+     **逐提交**要求笔记（一条不能替另一个提交顶账），于是同一个决定拆成
+     「实现 → 补测试 → 修 CI」三次提交就得写三篇近乎重复的笔记。
+     Note-Ref 给第三条路：声明这次属于已有那篇，且路径要能被核对。 */
+  const dir = makeRepo();
+  try {
+    const first = commitReal(dir, {
+      'lib/board.js': 'export const a = 1;\n',
+      '.agents/notes/implemented/feature/2026-01-01-one-decision.md':
+        '# Agent Note: 一个决定\n\nStatus: implemented\n\n## Problem\n\np\n'
+    }, 'feat: 一个决定（带笔记）');
+
+    commitReal(dir, { 'lib/board.js': 'export const a = 2;\n' },
+      'feat: 同一决定的后续（测试）\n\nNote-Ref: .agents/notes/implemented/feature/2026-01-01-one-decision.md');
+
+    const result = runSince(dir, first);
+    assert.equal(result.code, 0, `Note-Ref 指向存在的笔记应放行：${result.out}`);
+    assert.match(result.out, /关联既有笔记/, `应当说明它关联到了哪篇：${result.out}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Note-Ref：指向不存在的笔记必须判红（不许变成廉价后门）', () => {
+  const dir = makeRepo();
+  try {
+    const first = commitReal(dir, { 'lib/board.js': 'export const a = 1;\n' }, 'chore: 起始');
+    commitReal(dir, { 'lib/board.js': 'export const a = 2;\n' },
+      'feat: 改行为\n\nNote-Ref: .agents/notes/implemented/feature/2026-01-01-nope.md');
+    const r = runSince(dir, first);
+    assert.notEqual(r.code, 0, `指向不存在的笔记必须判红：${r.out}`);
+    assert.match(r.out, /Note-Ref 无效/, `要说明是 Note-Ref 无效：${r.out}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Note-Ref：指向笔记树之外的路径必须判红', () => {
+  const dir = makeRepo();
+  try {
+    const first = commitReal(dir, { 'lib/board.js': 'export const a = 1;\n' }, 'chore: 起始');
+    commitReal(dir, { 'lib/board.js': 'export const a = 2;\n', 'README.md': '# readme\n' },
+      'feat: 改行为\n\nNote-Ref: README.md');
+    const r = runSince(dir, first);
+    assert.notEqual(r.code, 0, `指向笔记树之外必须判红：${r.out}`);
+    assert.match(r.out, /Note-Ref 无效/, r.out);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('反证：同一决定的后续提交若既不写笔记也不 Note-Ref，仍然判红', () => {
+  /* 对照组：证明 Note-Ref 不是把门禁整体放宽了。 */
+  const dir = makeRepo();
+  try {
+    const first = commitReal(dir, {
+      'lib/board.js': 'export const a = 1;\n',
+      '.agents/notes/implemented/feature/2026-01-01-one-decision.md':
+        '# Agent Note: 一个决定\n\nStatus: implemented\n\n## Problem\n\np\n'
+    }, 'feat: 一个决定（带笔记）');
+    commitReal(dir, { 'lib/board.js': 'export const a = 2;\n' }, 'feat: 同一决定的后续');
+    const r = runSince(dir, first);
+    assert.notEqual(r.code, 0, `没声明关系就必须红：${r.out}`);
+    assert.match(r.out, /没带决策笔记/, r.out);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
