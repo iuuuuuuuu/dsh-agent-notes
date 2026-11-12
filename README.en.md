@@ -8,7 +8,7 @@
 Turn "why we changed it this way and what we gave up" into **mechanically checked** decision notes inside a repository, delivered as a DeepSeek Harness plugin.
 
 > The method is distilled from [czm15053/write-notes-like-deepseek](https://github.com/czm15053/write-notes-like-deepseek), which in turn distills the `.agents/notes/` practice of [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
-> This plugin packages that method as a native DSH plugin: a skill, session switches, real gates, and upstream merging.
+> This plugin packages that method as a native DSH plugin: a skill, on by default, real gates, and upstream merging.
 
 ## What it solves
 
@@ -82,17 +82,23 @@ or set `enabled: true` in the plugin config (only for the profile that carries i
 A session override wins over the global default: once you turn a session off, later
 global changes won't affect it.
 
-### Status indicator in the UI
+### On by default, no toggle button
 
-You don't have to type a command to see whether the policy is on for the current
-session: a green chip "● Agent notes" sits **left of the composer tool row**, next
-to the permission selector ("Full access" / "Workspace write"), and **clicking it
-toggles**. It greys out while off.
+**Installed means on**: the plugin ships the note skill and the session policy
+enabled, with nothing to click first.
 
-It reads the **session projection** (`agentNotes`), so it stays correct across
-reloads, reconnects, and session switches. Clicking submits the official slash
-command (`/agent-notes on|off`), so it is exactly equivalent to typing it, and
-costs zero tokens.
+> As of 2026-11-12 the "● Agent notes" chip in the composer is **gone**. It turned
+> "does this repo use notes?" into a per-session chore, when most of the time that
+> is a fact about the repository, not a choice the user makes each session. You can
+> still turn it off: plugin config `enabled: false`, or `/agent-notes off` in a
+> session.
+
+**The board tab appears on its own**: when the session's working directory actually
+uses decision notes (it has `.agents/notes`, or the project skill copy
+`.agents/skills/agent-notes`), the "Notes" tab shows up; a repo that never adopted
+notes does not get an empty tab. The Host decides by reading the disk (the browser
+has no filesystem and must not guess a repo); the client asks
+`GET agent-notes/status` once.
 
 > Design note: the projection only folds the host's own `command/run` events —
 > **this plugin never writes to the session log**. It cannot: it has zero
@@ -347,7 +353,7 @@ behind a config flag).
 ### Sidebar (dsh-better-sidebar)
 
 When [dsh-better-sidebar](https://github.com/dhicoc/dsh-better-sidebar) is installed, the board
-also appears in its right sidebar — **driven by the same switch**: it is absent while note
+also appears in its right sidebar — **driven by the same rule**: it shows up when the repo is
 discipline is off and appears once you turn it on.
 
 Integration uses that plugin's public client service `ctx.betterSidebar.registerTab(...)`, not a

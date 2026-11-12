@@ -177,32 +177,29 @@ if (existsSync(clientBundled)) {
   check(rebuilt === bundle, 'lib/client.js 与 src/client.js 不同步（请跑 npm run build）');
 }
 
-// 3c. 宿主与客户端的投影键必须一致
-// 两边一旦漂移，浏览器读不到状态，开关与 tag 会永远显示「未知」——
-// 而**所有本地测试仍然全绿**（各测各的常量）。这是最该被门禁拦住的一类错。
+// 3c. 客户端问的状态端点必须与路由前缀一致
+// 2026-11-12：输入区那个「笔记规范」开关被删除，看板改为「仓库在用笔记时
+// 自动出现」。于是客户端与宿主之间唯一的契约从「投影键 + 命令名」变成了
+// 「status 端点」。两边一旦漂移，表现是**看板永远不出现**，而所有单测
+// 各测各的常量、照样全绿 —— 正是最该被门禁拦住的那类错。
 {
-  const projectionSource = readFileSync(join(PACKAGE_ROOT, 'lib', 'projection.js'), 'utf8');
-  const declared = /export\s+const\s+PROJECTION_KEY\s*=\s*'([^']+)'/.exec(projectionSource);
-  check(declared !== null, 'lib/projection.js 必须导出 PROJECTION_KEY');
-  const commandDeclared = /export\s+const\s+COMMAND_NAME\s*=\s*'([^']+)'/.exec(projectionSource);
-  check(commandDeclared !== null, 'lib/projection.js 必须导出 COMMAND_NAME');
-  if (declared !== null && existsSync(clientBundled)) {
+  const routeSource = readFileSync(join(PACKAGE_ROOT, 'lib', 'board-route.js'), 'utf8');
+  const prefix = /export\s+const\s+ROUTE_PREFIX\s*=\s*'([^']+)'/.exec(routeSource);
+  check(prefix !== null, 'lib/board-route.js 必须导出 ROUTE_PREFIX');
+  check(
+    routeSource.includes('ROUTE_PREFIX}/status'),
+    'lib/board-route.js 必须处理 /status 端点（看板判据的来源）'
+  );
+  if (prefix !== null && existsSync(clientBundled)) {
     const bundle = readFileSync(clientBundled, 'utf8');
-    const key = declared[1];
-    check(bundle.includes(`'${key}'`), `客户端必须使用宿主侧声明投影键 "${key}"（两边漂移会让开关恒为未知）`);
-  }
-  if (commandDeclared !== null && existsSync(clientBundled)) {
-    const bundle = readFileSync(clientBundled, 'utf8');
+    const expected = `${prefix[1]}/status`;
     check(
-      bundle.includes(`/${commandDeclared[1]}`),
-      `客户端必须调用同名命令 "/${commandDeclared[1]}"（否则点了没反应）`
+      bundle.includes(expected.replace(/^\//, '')),
+      `客户端必须请求状态端点 "${expected}"（漂移会让看板永不出现）`
     );
-    // 宿主命令注册处也必须用同一个名字。
-    const commandsSource = readFileSync(join(PACKAGE_ROOT, 'lib', 'commands.js'), 'utf8');
-    check(
-      commandsSource.includes(`name: '${commandDeclared[1]}'`),
-      `lib/commands.js 必须以 name: '${commandDeclared[1]}' 注册命令`
-    );
+    /* 开关删除后不该留下写状态的通道：界面没有按钮、却还能改状态，
+       会让人怀疑「到底谁在改」。 */
+    check(!bundle.includes('.command('), '客户端不得再执行会话命令（开关已删除）');
   }
 }
 

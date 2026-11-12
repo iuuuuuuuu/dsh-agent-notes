@@ -158,12 +158,14 @@ test('客户端 bundle：移除 tag 后不得留下孤儿引用', () => {
   }
 });
 
-test('客户端 bundle：用官方命令通道写状态，不自己写日志', () => {
+test('客户端 bundle：不再发命令、不再读投影，改问 status 端点', () => {
+  /* 2026-11-12：输入区那个「笔记规范」开关被移除，看板改为自动出现。
+     于是客户端**不该**再有任何写状态的通道 —— 否则会出现「界面没有按钮，
+     但某处还能悄悄改开关」这种事实。这条用例钉住删除的彻底性。 */
   const bundle = readFileSync(join(ROOT, 'lib', 'client.js'), 'utf8');
-  assert.ok(bundle.includes('.command('), '必须通过 SessionFace.command 提交斜杠命令');
-  assert.ok(bundle.includes('/agent-notes'), '提交的应是 /agent-notes 命令');
-  // 投影键必须与宿主侧一致，否则读不到状态、徽标恒为「未知」。
-  assert.ok(bundle.includes(`'${PROJECTION_KEY}'`), `客户端必须读投影键 ${PROJECTION_KEY}`);
+  assert.ok(!bundle.includes('.command('), '客户端不得执行会话命令（开关已删除）');
+  assert.ok(!bundle.includes(`'${PROJECTION_KEY}'`), '客户端不得再读会话投影');
+  assert.ok(bundle.includes('agent-notes/status'), '看板判据必须来自 status 端点');
 });
 
 test('客户端 bundle：看板同时接入 dsh-better-sidebar 的右侧栏', () => {
@@ -261,7 +263,8 @@ test('客户端 bundle：看板同时接入 dsh-better-sidebar 的右侧栏', ()
      从 src 取能直接观察状态机，且不污染生产代码表面。 */
   const src = readFileSync(join(ROOT, 'src', 'client.js'), 'utf8');
   const start = src.indexOf('var hosts = {');
-  const end = src.indexOf('/* 与 lib/projection.js 的 PROJECTION_KEY 必须一致。 */');
+  const end = src.indexOf('/* 看板可用性的判据来源');
+  assert.ok(end > start, '常量区必须还在 hosts 之后（它标记这个块的边界）');
   assert.ok(start > 0 && end > start, '应能从源码定位 hosts 与 syncHost');
   const block = src.slice(start, end);
   const build = new Function(`${block}; return { hosts, syncHost, syncBoardTab };`);
@@ -305,7 +308,7 @@ test('客户端 bundle：看板要认两种宿主的会话字段', () => {
   assert.match(bundle, /scope\.sessionId/, '必须从 scope 里取 sessionId');
 });
 
-test('侧边栏宿主：component 必须把宿主 props 转交给看板，iframe src 带真实会话 id', () => {
+test('侧边栏宿主：component 必须把宿主 props 转交给看板，iframe src 带真实会话 id', async () => {
   /* 这条测试的存在理由（实测踩过）：
      上一版把 descriptor 写成 `component: function () { return h(Board, null); }`
      —— 零参函数，宿主传进来的 {scope, tab, …} 整个被丢掉。而 better-sidebar
@@ -344,11 +347,14 @@ test('侧边栏宿主：component 必须把宿主 props 转交给看板，iframe
     useMemo: (fn) => fn(),
     useSyncExternalStore: (sub, get) => get()
   };
-  const factoryFn = new Function('window', 'document', 'module', 'exports', 'require', bundle);
+  /* fetch 用形参遮蔽全局：闸门问的是 `agent-notes/status`，测试里不该真发请求
+     （那会把用例变成依赖网络的假红）。 */
+  const fetchStub = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ available: true }) });
+  const factoryFn = new Function('window', 'document', 'module', 'exports', 'require', 'fetch', bundle);
   factoryFn(fakeWindow, { createElement: () => null, documentElement: {} }, {}, {}, (name) => {
     if (name === 'react') return reactStub;
     return {};
-  });
+  }, fetchStub);
   assert.ok(captured !== null, '应能捕获到客户端模块工厂');
 
   let descriptor = null;
@@ -358,15 +364,15 @@ test('侧边栏宿主：component 必须把宿主 props 转交给看板，iframe
       return () => {};
     }
   };
-  /* 走真实路径驱动开关：apply 把开关组件注册进 conversation.input.left，
-     这里捕获该组件、用「投影说已开启」渲染它，开关的 useEffect 就会调
-     syncBoardTab(true) → hosts.sidebar.register() → registerTab。
+  /* 走真实路径驱动闸门：apply 把闸门组件注册进 conversation.input.left，
+     这里捕获它并渲染一次 —— 它的 useEffect 会问 status，回 available:true
+     后调 syncBoardTab(true) → hosts.sidebar.register() → registerTab。
      这样验的是模块自己那份 hosts，不是另建的一份。 */
-  let switchComponent = null;
+  let gateComponent = null;
   const fakeSlots = {
     inject(name, cb) { if (name === 'conversation.input.left') cb(); return () => {}; },
     register(options, component) {
-      if (options?.name === 'conversation.input.left') switchComponent = component;
+      if (options?.name === 'conversation.input.left') gateComponent = component;
       return () => {};
     }
   };
@@ -388,15 +394,13 @@ test('侧边栏宿主：component 必须把宿主 props 转交给看板，iframe
     ...fakeCtx,
     get(name) { return name === 'slots' ? fakeSlots : undefined; }
   });
-  assert.equal(typeof switchComponent, 'function', '开关组件应已注册进输入框工具行');
+  assert.equal(typeof gateComponent, 'function', '闸门组件应已注册进输入框工具行');
 
-  /* 渲染开关：投影说「已开启」，useEffect 立即执行（reactStub 里同步调）。 */
+  /* 渲染闸门并等异步判定跑完（fetch → json → then → syncBoardTab）。 */
   created.length = 0;
-  switchComponent({
-    sessionId: 'sess-sidebar-42',
-    useProjection: () => ({ enabled: true })
-  });
-  assert.ok(descriptor !== null, '开关打开后应真的调用 registerTab');
+  gateComponent({ sessionId: 'sess-sidebar-42' });
+  for (let i = 0; i < 6; i += 1) await Promise.resolve();
+  assert.ok(descriptor !== null, 'status 说可用后应真的调用 registerTab');
   assert.equal(typeof descriptor.component, 'function', 'descriptor.component 必须是可调用函数');
 
   /* 核心断言：模拟侧边栏宿主渲染 —— 传的 props 只有 scope.sessionId。 */

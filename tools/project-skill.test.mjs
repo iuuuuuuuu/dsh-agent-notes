@@ -17,7 +17,7 @@ import {
   buildDriftHint,
   inspectProjectSkillCopy,
   syncProjectSkillCopy
-} from '../lib/project-skill.js';
+, projectUsesNotes } from '../lib/project-skill.js';
 import { POLICY_MARKERS, buildPolicyText } from '../lib/policy.js';
 
 /** 造一个带项目副本的临时项目目录。 */
@@ -158,5 +158,29 @@ test('policy: 明确交代两份副本的关系，并禁止编造 README/升级�
   /* 原有判据一个字都不能丢。 */
   for (const marker of POLICY_MARKERS) {
     assert.ok(text.includes(marker), `规范必须含 ${marker}`);
+  }
+});
+
+test('projectUsesNotes: 笔记树或项目技能副本任一存在即为「在用」', () => {
+  /* 判据决定看板 tab 要不要出现（2026-11-12）。
+     两条都要认：只有笔记树时，「刚装好技能还没写第一篇」的仓库看不到看板 ——
+     而那正是最该提示「还没有笔记」的时刻；
+     只有技能副本时同理。两者皆无才不出现。 */
+  const base = mkdtempSync(join(tmpdir(), 'an-uses-'));
+  try {
+    assert.equal(projectUsesNotes(base), false, '空目录：没接入笔记');
+
+    mkdirSync(join(base, '.agents', 'skills', 'agent-notes'), { recursive: true });
+    assert.equal(projectUsesNotes(base), true, '只有项目技能副本也算在用');
+
+    rmSync(join(base, '.agents'), { recursive: true, force: true });
+    mkdirSync(join(base, '.agents', 'notes'), { recursive: true });
+    assert.equal(projectUsesNotes(base), true, '只有笔记树也算在用');
+
+    assert.equal(projectUsesNotes(undefined), false, 'undefined 不得当成在用');
+    assert.equal(projectUsesNotes(''), false, '空串不得当成在用');
+    assert.equal(projectUsesNotes(join(base, 'nope')), false, '不存在的目录不得当成在用');
+  } finally {
+    rmSync(base, { recursive: true, force: true });
   }
 });

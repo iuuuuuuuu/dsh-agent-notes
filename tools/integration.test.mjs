@@ -156,18 +156,33 @@ test('集成：能力缺失时优雅降级，不崩', async () => {
   }
 });
 
-test('集成：不配置 enabled 时默认关闭，新会话不挂规范段', () => {
+test('集成：不配置 enabled 时默认**开启**，新会话挂上规范段', () => {
   const { dir, file } = tempState();
   try {
     mkdirSync(dir, { recursive: true });
     // 关键：状态文件里连 global 字段都没有 —— 这正是「装上插件、什么都没设」
-    // 的真实形态。旧行为会兜底成开，导致插件悄悄改变既有会话。
+    // 的真实形态。2026-11-12 起默认**开**（Owner 要求默认提供笔记技能，
+    // 且输入区的开关按钮已删除）。
     writeFileSync(file, JSON.stringify({ version: 1, sessions: {} }), 'utf8');
 
     // 不传 enabled，走 apply 的默认值。
     const { registered } = mount({ stateFile: file, config: {} });
     emit(registered, 'agent/created', { agent: { id: 'sess-default', ctx: { systemPrompt: ctxPrompt(registered) } } });
-    assert.equal(registered.sections.length, 0, '不配置时必须默认关闭，不得注入规范段');
+    assert.equal(registered.sections.length, 1, '不配置时必须默认开启，要注入规范段');
+    assert.match(registered.sections[0].text, /非平凡/, '注入的必须是真规范段');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('集成：显式 enabled:false 时仍然关闭（默认开的唯一逃生口）', () => {
+  const { dir, file } = tempState();
+  try {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(file, JSON.stringify({ version: 1, sessions: {} }), 'utf8');
+    const { registered } = mount({ stateFile: file, config: { enabled: false } });
+    emit(registered, 'agent/created', { agent: { id: 'sess-off-explicit', ctx: { systemPrompt: ctxPrompt(registered) } } });
+    assert.equal(registered.sections.length, 0, '显式关掉时必须不挂 —— 否则没有逃生口');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
