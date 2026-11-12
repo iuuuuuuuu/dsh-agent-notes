@@ -7,25 +7,23 @@
  * `require` 函数**。这个签名本来是给 `build.mjs` 打包用的，但它同时是一个
  * 干净的注入点：在 Node 里喂桩 `require`，就能加载整份客户端逻辑。
  *
+ * ## 2026-11-12 的形态变化
+ *
+ * Owner 要求删掉对话输入区那个「笔记规范」开关，改为「仓库确实在用笔记时
+ * 看板 tab 自动出现」。于是：
+ *   - 组件从**按钮**变成**无渲染的闸门**（`AgentNotesBoardGate`）；
+ *   - 驱动信号从「会话投影 enabled」变成「服务端 `/agent-notes/status`
+ *     回答这个仓库有没有笔记体系」。
+ *
+ * 这组用例因此必须**真的让 fetch 走完**再断言 —— 闸门是异步的，
+ * 只渲染一次就断言等于什么都没测（那时 syncBoardTab 还没被调到）。
+ *
  * ## 什么必须真浏览器、什么不必
  *
- * 两类东西要分开：
- *
  *   - **纯逻辑**（本文件测）：`apply` 的注册/注销/降级、`syncHost` 的记账、
- *     描述符字段、props 转交。不碰真实 DOM，Node 里跑与浏览器里跑等价。
- *   - **真渲染**（CDP 探针测）：按钮是否真的出现在输入框左侧、看板 iframe
- *     是否真的加载出笔记、窄屏是否真的换行。这些必须亲眼所见。
- *
- * ## 测试怎么够到闭包里的东西
- *
- * `syncHost` / `AgentNotesSwitch` 都在 `createAgentNotesClient` 的闭包里，
- * 没有导出。但 `apply(ctx)` 会把组件**交给宿主注册**，所以让假的 `slots`
- * 把注册调用记下来，就能拿到组件本身 —— 这条路走的就是生产代码的真实路径，
- * 不是绕过它。
- *
- * 反过来，**不能**只断言「我在测试里造的那个数组还是空的」。那类断言在
- * `apply` 提前 return、或 `useEffect` 根本没执行时同样通过，等于什么都没测。
- * 每个用例都必须先让真代码跑起来，再断言它产生的副作用。
+ *     描述符字段、props 转交、状态请求的判据。
+ *   - **真渲染**（CDP 探针 + 截图测）：按钮是否真的消失、看板 tab 是否真的
+ *     出现、iframe 是否真的加载出笔记。这些必须亲眼所见。
  */
 import { strict as assert } from 'node:assert';
 import { readFileSync } from 'node:fs';
@@ -34,6 +32,7 @@ import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
 const SRC = fileURLToPath(new URL('../src/client.js', import.meta.url));
+const BOARD_ROUTE = fileURLToPath(new URL('../lib/board-route.js', import.meta.url));
 
 /**
  * 造一个 React 桩。
@@ -87,16 +86,40 @@ function makeReact() {
 }
 
 /**
+ * 造一个可编排的 `fetch` 桩。
+ *
+ * @param {object | 'throw' | 'http-error'} [reply] 应答。
+ *   `{ available: boolean }` → 200 + JSON；`'throw'` → 网络异常；
+ *   `'http-error'` → 500。
+ * @returns {{ fetch: Function, urls: string[] }} 桩与请求记录。
+ */
+function makeFetchStub(reply) {
+  const urls = [];
+  const fetch = (url) => {
+    urls.push(String(url));
+    if (reply === 'throw') return Promise.reject(new Error('网络炸了'));
+    if (reply === 'http-error') return Promise.resolve({ ok: false, json: () => Promise.resolve({}) });
+    return Promise.resolve({
+      ok: true,
+      json: () => Promise.resolve({ ok: true, available: reply?.available !== false })
+    });
+  };
+  return { fetch, urls };
+}
+
+/**
  * 加载客户端源码并取出入口。
  *
  * @param {object} [options] 选项。
  * @param {object} [options.react] 复用的 React 桩。
  * @param {string} [options.search] 模拟的 `location.search`。
- * @returns {{client: any, react: any, sandbox: any}} 客户端、React 桩与沙箱。
+ * @param {object | 'throw' | 'http-error'} [options.fetchReply] `fetch` 桩的应答。
+ * @returns {{client: any, react: any, sandbox: any, fetchLog: object}} 客户端、React 桩、沙箱与请求记录。
  */
 function loadClient(options = {}) {
   const react = options.react ?? makeReact();
   const source = readFileSync(SRC, 'utf8');
+  const fetchStub = makeFetchStub(options.fetchReply ?? { available: true });
   const sandbox = {
     React: react,
     location: { search: options.search ?? '' },
@@ -109,6 +132,7 @@ function loadClient(options = {}) {
       head: { appendChild() {} }
     },
     window: {},
+    fetch: fetchStub.fetch,
     console,
     setTimeout,
     clearTimeout,
@@ -122,15 +146,23 @@ function loadClient(options = {}) {
   assert.equal(typeof factory, 'function', '必须能从源码取到 createAgentNotesClient');
 
   const requireStub = (name) => (name === 'react' ? react : {});
-  return { client: factory(requireStub), react, sandbox };
+  return { client: factory(requireStub), react, sandbox, fetchLog: fetchStub };
+}
+
+/**
+ * 让挂起的微任务跑完（闸门是异步的：fetch → then → syncBoardTab）。
+ *
+ * @param {number} [rounds] 轮数；fetch + json + then 至少三轮。
+ * @returns {Promise<void>} 完成信号。
+ */
+async function flush(rounds = 6) {
+  for (let i = 0; i < rounds; i += 1) await Promise.resolve();
 }
 
 /**
  * 造假的 `slots` 服务，记录 register/inject 的每一次调用。
  *
- * @param {{failRegisterFor?: string}} [options] 选项。
- *   `failRegisterFor` 只让指定座位名注册失败 —— 全部失败会让开关组件本身
- *   拿不到，也就测不到「注册失败不影响开关」这条。
+ * @param {{failRegisterFor?: string, throwOnDisposeFor?: string}} [options] 选项。
  * @returns {object} 假服务与调用记录。
  */
 function makeSlots(options = {}) {
@@ -140,8 +172,6 @@ function makeSlots(options = {}) {
     injected: [],
     disposers: {},
     injectReturn: {},
-    /* 每一次 register 尝试都记，含失败的那次 ——
-       「失败的注册会不会被重试」只能靠它观察。 */
     attempts: []
   };
 
@@ -163,8 +193,6 @@ function makeSlots(options = {}) {
     },
     inject(name, callback) {
       log.injected.push(name);
-      /* 原样执行并保留返回值：conversation.view 的回调返回的是清理函数，
-         conversation.input.left 返回的是 register 的 disposer。 */
       log.injectReturn[name] = callback();
     }
   };
@@ -185,8 +213,6 @@ function makeCtx(slots, services = {}) {
     inject(name, callback) {
       const names = Array.isArray(name) ? name : [name];
       log.injected.push(names.join(','));
-      /* 造子上下文：把可注入服务都挂上去；缺的不设属性，
-         模拟「服务未就绪/未装」。 */
       const sub = {
         effect(fn) { log.effects.push(fn()); return () => {}; },
         on() { return () => {}; }
@@ -208,61 +234,12 @@ function boardRegistrations(log) {
   return log.registered.filter((item) => item.descriptor.id === 'agent-notes-board');
 }
 
-/* ── apply 的门槛与注册面 ───────────────────────────────────────────── */
-
-test('apply: slots 缺失时直接返回，不注册任何座位', () => {
-  /* 源码第 389 行：`if (slots === undefined || typeof slots.register !== 'function') return;`
-     「没装 better-sidebar / 宿主版本旧」都必须走到这里，而不是半注册之后崩掉。 */
-  const { client } = loadClient();
-  const { ctx, log } = makeCtx(undefined);
-
-  assert.doesNotThrow(() => client.apply(ctx));
-  assert.deepEqual(log.injected, [], 'slots 不可用时不该去 inject 任何座位');
-});
-
-test('apply: slots 有 register 时注册输入框座位与 view 座位', () => {
-  const { client } = loadClient();
-  const { slots, log } = makeSlots();
-  const { ctx, log: ctxLog } = makeCtx(slots);
-
-  client.apply(ctx);
-
-  /* slots 是 apply 的入参服务，不经 ctx.inject 取；但 betterSidebar 是
-     第三方可选服务，必须经 ctx.inject 等它 —— 这是设计，不是缺陷。 */
-  assert.deepEqual(ctxLog.injected, ['betterSidebar'],
-    '只会去等 betterSidebar 这一个可选服务');
-  assert.deepEqual(log.injected, ['conversation.input.left', 'conversation.view'],
-    '两个座位都要 inject');
-
-  const inputSeat = log.registered.find((item) => item.descriptor.name === 'conversation.input.left');
-  assert.ok(inputSeat !== undefined, '输入框座位必须真的注册');
-  assert.equal(inputSeat.descriptor.id, 'agent-notes');
-  assert.equal(typeof inputSeat.component, 'function', '座位必须带组件');
-  /* 座位注入面：组件靠它拿 bindingOf，缺了按钮点了只会「切换失败」。 */
-  const injected = inputSeat.descriptor.inject();
-  assert.equal(typeof injected.bindingOf, 'function', '座位必须注入 bindingOf');
-});
-
-test('apply: view 座位只登记注册函数，不立即注册（依赖开关状态）', () => {
-  /* 源码注释说明了原因：apply 阶段没有会话、读不到投影，
-     所以真正注册由常驻的开关组件按投影状态驱动。 */
-  const { client } = loadClient();
-  const { slots, log } = makeSlots();
-  const { ctx } = makeCtx(slots);
-
-  client.apply(ctx);
-
-  assert.deepEqual(boardRegistrations(log), [],
-    'apply 阶段不该直接注册看板 tab（那时还没有会话投影）');
-});
-
-/* ── 开关组件驱动看板 tab：真跑组件，不是造数组 ────────────────────── */
-
 /**
- * 取得 AgentNotesSwitch 组件 —— 走 `apply` 的真实注册路径。
+ * 取得闸门组件 —— 走 `apply` 的真实注册路径。
  *
  * @param {object} [slotsOptions] 传给假 slots 的选项。
  * @param {Record<string, any>} [services] 其它可注入服务。
+ * @param {object} [clientOptions] 传给 loadClient 的选项。
  * @returns {object} 组件、记录与作用域。
  */
 function harness(slotsOptions = {}, services = {}, clientOptions = {}) {
@@ -272,80 +249,138 @@ function harness(slotsOptions = {}, services = {}, clientOptions = {}) {
   loaded.client.apply(ctx);
 
   const seat = log.registered.find((item) => item.descriptor.name === 'conversation.input.left');
-  assert.ok(seat !== undefined, '必须能通过 apply 拿到开关组件');
-  return { Component: seat.component, log, ctxLog, react: loaded.react, slots, ctx };
+  assert.ok(seat !== undefined, '必须能通过 apply 拿到闸门组件');
+  return {
+    Component: seat.component,
+    log,
+    ctxLog,
+    react: loaded.react,
+    slots,
+    ctx,
+    fetchLog: loaded.fetchLog
+  };
 }
 
-test('组件: 投影为开时注册看板 tab，描述符字段与宿主约定一致', () => {
-  const { Component, log } = harness();
-  /* useProjection 由宿主注入；返回 enabled:true 表示本会话已启用。 */
-  Component({ sessionId: 's1', useProjection: () => ({ enabled: true }), bindingOf: () => null });
+/**
+ * 渲染一次闸门并把异步判定跑完。
+ *
+ * @param {Function} Component 闸门组件。
+ * @param {object} [props] 额外 props。
+ * @returns {Promise<void>} 完成信号。
+ */
+async function mount(Component, props = {}) {
+  Component({ sessionId: 's1', ...props });
+  await flush();
+}
+
+/* ── apply 的门槛与注册面 ───────────────────────────────────────────── */
+
+test('apply: slots 缺失时直接返回，不注册任何座位', () => {
+  const { client } = loadClient();
+  const { ctx, log } = makeCtx(undefined);
+
+  assert.doesNotThrow(() => client.apply(ctx));
+  assert.deepEqual(log.injected, [], 'slots 不可用时不该去 inject 任何座位');
+});
+
+test('apply: 注册输入框闸门座位与 view 座位，闸门不带任何可点元素', () => {
+  const { client } = loadClient();
+  const { slots, log } = makeSlots();
+  const { ctx, log: ctxLog } = makeCtx(slots);
+
+  client.apply(ctx);
+
+  assert.deepEqual(ctxLog.injected, ['betterSidebar'],
+    '只会去等 betterSidebar 这一个可选服务');
+  assert.deepEqual(log.injected, ['conversation.input.left', 'conversation.view'],
+    '两个座位都要 inject');
+
+  const inputSeat = log.registered.find((item) => item.descriptor.name === 'conversation.input.left');
+  assert.ok(inputSeat !== undefined, '输入框座位必须真的注册');
+  assert.equal(inputSeat.descriptor.id, 'agent-notes');
+  assert.equal(typeof inputSeat.component, 'function', '座位必须带组件');
+  /* 2026-11-12：原来这里断言「必须注入 bindingOf」（按钮靠它执行命令）。
+     按钮已删除，闸门不发命令、不渲染元素，所以**不该**再有 inject 面。 */
+  assert.equal(inputSeat.descriptor.inject, undefined,
+    '闸门不需要注入面：它不发命令、不画按钮');
+});
+
+test('apply: view 座位只登记注册函数，不立即注册（等闸门问出结果）', () => {
+  const { client } = loadClient();
+  const { slots, log } = makeSlots();
+  const { ctx } = makeCtx(slots);
+
+  client.apply(ctx);
+
+  assert.deepEqual(boardRegistrations(log), [],
+    'apply 阶段不该直接注册看板 tab（那时还没有会话，问不出结果）');
+});
+
+/* ── 闸门驱动看板 tab：真跑组件 + 真跑异步请求 ─────────────────────── */
+
+test('闸门: 服务端说「这个仓库在用笔记」时注册看板 tab，描述符与宿主约定一致', async () => {
+  const { Component, log } = harness({}, {}, { fetchReply: { available: true } });
+  await mount(Component);
 
   const boards = boardRegistrations(log);
-  assert.equal(boards.length, 1, '投影为开必须注册且只注册一次');
+  assert.equal(boards.length, 1, '开口时必须注册且只注册一次');
   assert.equal(boards[0].descriptor.name, 'conversation.view');
   assert.equal(boards[0].descriptor.order, 60, '排序在轨迹之后');
   assert.equal(typeof boards[0].descriptor.label, 'function', 'label 必须是函数（宿主惰性求值）');
   assert.equal(boards[0].descriptor.label(), '笔记');
 });
 
-test('组件: 投影为关时不注册看板 tab', () => {
-  const { Component, log } = harness();
-  Component({ sessionId: 's1', useProjection: () => ({ enabled: false }), bindingOf: () => null });
-  assert.deepEqual(boardRegistrations(log), [], '关闭状态不该有看板 tab');
+test('闸门: 服务端说「这个仓库没用笔记」时不注册看板 tab', async () => {
+  const { Component, log } = harness({}, {}, { fetchReply: { available: false } });
+  await mount(Component);
+  assert.deepEqual(boardRegistrations(log), [], 'available:false 时不该出现看板');
 });
 
-test('组件: 拿不到投影时按「关」处理，不注册', () => {
-  /* enabled === null（投影不可达）必须与插件默认关闭一致，
-     否则「服务还没就绪」会表现为 tab 闪一下再消失。 */
-  const { Component, log } = harness();
-  Component({ sessionId: 's1', useProjection: () => undefined, bindingOf: () => null });
-  assert.deepEqual(boardRegistrations(log), [], '投影不可达时不该注册');
+test('闸门: 请求失败时按「可用」处理（不许静默把功能藏起来）', async () => {
+  /* 这是刻意的失败方向：路由没挂上、网络抖动都可能让请求失败。
+     此时若按「不可用」处理，用户会以为插件坏了而界面**什么都不说** ——
+     那正是本仓库反复在治的「看起来正常、实际没生效」。
+     让看板出现，页面自己会说明状态。 */
+  const throwCase = harness({}, {}, { fetchReply: 'throw' });
+  await mount(throwCase.Component);
+  assert.equal(boardRegistrations(throwCase.log).length, 1, '网络异常时仍要挂出看板');
+
+  const errCase = harness({}, {}, { fetchReply: 'http-error' });
+  await mount(errCase.Component);
+  assert.equal(boardRegistrations(errCase.log).length, 1, 'HTTP 错误时仍要挂出看板');
 });
 
-test('组件: 开关从开到关会注销看板 tab', () => {
-  const { Component, log } = harness();
-  const props = { sessionId: 's1', useProjection: () => ({ enabled: true }), bindingOf: () => null };
-  Component(props);
+test('闸门: 只加不减 —— 另一个会话说不可用，也不注销已挂出的 tab', async () => {
+  /* 看板注册是**客户端全局**的，而多个会话可能同时开着。
+     一个没有笔记的会话不该把另一个会话需要的 tab 关掉。
+     代价：切到没笔记的仓库时 tab 仍在，页面自己会说「这个仓库还没有 .agents/notes」。 */
+  const { Component, log } = harness({}, {}, { fetchReply: { available: true } });
+  await mount(Component, { sessionId: 'with-notes' });
   assert.equal(boardRegistrations(log).length, 1, '先要真的注册上');
 
-  /* 再渲染一次，投影变关 —— 模拟用户点开关后宿主推回新值。 */
-  Component({ ...props, useProjection: () => ({ enabled: false }) });
-
-  assert.deepEqual(log.disposed, ['conversation.view:agent-notes-board'],
-    '关闭时必须注销已注册的看板 tab');
-  assert.equal(boardRegistrations(log).length, 1, '不该重复注册');
+  Component({ sessionId: 'without-notes' });
+  await flush();
+  assert.deepEqual(log.disposed, [], '不可用不该触发注销');
+  assert.equal(boardRegistrations(log).length, 1, '也不该重复注册');
 });
 
-test('组件: dispose 抛错时被吞掉，且状态复位后能重新注册', () => {
-  /* 注销也可能抛错（宿主内部状态已变、tab 已被别人移除等）。
-     不吞的话异常会冒进 React 渲染，把输入框整片打白；
-     复位 disposable 为 null 则保证「关掉再打开」还能真的回来。 */
-  const { Component, log } = harness({ throwOnDisposeFor: 'conversation.view' });
-  const on = { sessionId: 's1', useProjection: () => ({ enabled: true }), bindingOf: () => null };
-
-  Component(on);
-  assert.equal(boardRegistrations(log).length, 1, '先要真的注册上');
-
-  assert.doesNotThrow(() => {
-    Component({ ...on, useProjection: () => ({ enabled: false }) });
-  }, 'dispose 抛错必须被吞掉');
-  assert.deepEqual(log.disposed, ['conversation.view:agent-notes-board'],
-    '确实尝试过注销');
-
-  /* 复位后重新打开必须能再注册 —— 卡在「以为还注册着」的状态会更糟。 */
-  Component(on);
-  assert.equal(boardRegistrations(log).length, 2, '关掉再打开要能重新注册');
+test('闸门: 渲染结果是 null（输入区不出现任何按钮）', async () => {
+  const { Component } = harness({}, {}, { fetchReply: { available: true } });
+  assert.equal(Component({ sessionId: 's1' }), null, '闸门必须不渲染任何东西');
+  await flush();
 });
 
-test('组件: 注册失败后再次对齐会重试（瞬时故障不该变成永久故障）', () => {
-  /* `register` 抛错时 disposable 仍是 null。若此时记住「已经是对的」
-     而提前返回，一次瞬时故障就会让看板 tab 整场会话都不出现 ——
-     用户只能靠反复点开关才碰巧恢复。状态判断必须看**实际结果**，
-     而不是看「上次想让它怎样」。 */
+test('闸门: 重复渲染只注册一次', async () => {
+  const { Component, log } = harness({}, {}, { fetchReply: { available: true } });
+  await mount(Component);
+  await mount(Component);
+  await mount(Component);
+  assert.equal(boardRegistrations(log).length, 1, '重复渲染只注册一次');
+  assert.deepEqual(log.disposed, [], '重复渲染不该触发注销');
+});
+
+test('闸门: register 抛错时被吞掉，且下一次会重试（瞬时故障不该变成永久故障）', async () => {
   let fail = true;
-  /* 不传 failRegisterFor —— 那会让底层 register **永远**抛，
-     `fail = false` 之后也救不回来，用例就变成在自己造的坏桩上打转。 */
   const { slots, log } = makeSlots();
   const originalRegister = slots.register;
   slots.register = function (descriptor, component) {
@@ -356,63 +391,34 @@ test('组件: 注册失败后再次对齐会重试（瞬时故障不该变成永
     return originalRegister.call(this, descriptor, component);
   };
 
-  const { client } = loadClient();
+  const { client, fetchLog } = loadClient({ fetchReply: { available: true } });
   const { ctx } = makeCtx(slots);
   client.apply(ctx);
-
   const seat = log.registered.find((i) => i.descriptor.name === 'conversation.input.left');
-  const on = { sessionId: 's1', useProjection: () => ({ enabled: true }), bindingOf: () => null };
+  assert.ok(seat, '闸门座位必须注册上');
 
-  seat.component(on);
+  seat.component({ sessionId: 's1' });
+  await flush();
   assert.deepEqual(boardRegistrations(log), [], '第一次确实失败了');
 
-  /* 故障消失后再对齐一次 —— 必须补上。 */
   fail = false;
-  seat.component(on);
+  seat.component({ sessionId: 's1' });
+  await flush();
   assert.equal(boardRegistrations(log).length, 1,
     '瞬时故障恢复后必须重试注册，否则看板永久消失');
+  assert.equal(fetchLog.urls.length, 2, '两次渲染各问一次（每次渲染一条请求）');
 });
 
-test('组件: 关到开再开，不会注册两次', () => {
-  /* 宿主重复渲染很常见，每次渲染都注册会让标签页越点越多。
-     注意这里的幂等性**不是**靠 `host.enabled === enabled` 那条早退实现的 ——
-     那条的实际语义是「同状态不重试」。真正挡住重复注册的是
-     `host.dispose !== null` 这个结果判断。 */
-  const { Component, log } = harness();
-  const on = { sessionId: 's1', useProjection: () => ({ enabled: true }), bindingOf: () => null };
-  Component(on);
-  Component(on);
-  Component(on);
-  assert.equal(boardRegistrations(log).length, 1, '重复渲染只注册一次');
-  assert.deepEqual(log.disposed, [], '重复渲染不该触发注销');
-});
+test('闸门: 请求带上会话 id 与 cwd（服务端要靠 cwd 判仓库）', async () => {
+  const { Component, fetchLog } = harness({}, {}, { fetchReply: { available: true } });
+  Component({ sessionId: 's 1', scope: { sessionId: 's 1', cwd: '/repo with spaces/中文' } });
+  await flush();
 
-test('组件: register 抛错时不影响开关本身', () => {
-  /* 看板注册失败（宿主版本不认这个座位等）不能让输入框里的开关消失 ——
-     开关能切换笔记规范，比看板 tab 更重要。
-     只让 conversation.view 那一次注册失败：若全都失败，开关组件本身也拿不到，
-     这条用例就退化成「apply 没崩」，测不到真正想测的东西。 */
-  const { Component, log } = harness({ failRegisterFor: 'conversation.view' });
-  assert.doesNotThrow(() => {
-    Component({ sessionId: 's1', useProjection: () => ({ enabled: true }), bindingOf: () => null });
-  }, '注册失败必须被吞掉');
-  assert.deepEqual(boardRegistrations(log), [], '看板确实没注册成功');
-  assert.equal(log.registered.filter((i) => i.descriptor.name === 'conversation.input.left').length, 1,
-    '输入框座位不受影响 —— 开关仍然可用');
-});
-
-test('组件: 投影不可读时不渲染崩溃（useProjection 抛错）', () => {
-  /* 宿主的 useProjection 可能在极端情况下抛错；组件必须降级成「关」，
-     绝不能把输入框整片打白。 */
-  const { Component, log } = harness();
-  assert.doesNotThrow(() => {
-    Component({
-      sessionId: 's1',
-      useProjection: () => { throw new Error('投影炸了'); },
-      bindingOf: () => null
-    });
-  });
-  assert.deepEqual(boardRegistrations(log), [], '投影抛错时按关处理');
+  assert.equal(fetchLog.urls.length, 1);
+  const url = fetchLog.urls[0];
+  assert.match(url, /^agent-notes\/status\?/, '必须走相对地址，保留挂载前缀');
+  assert.match(url, /session=s%201/, '会话 id 必须编码');
+  assert.match(url, /cwd=%2Frepo%20with%20spaces%2F%E4%B8%AD%E6%96%87/, 'cwd 必须完整编码');
 });
 
 /* ── 两个宿主互相独立 ──────────────────────────────────────────────── */
@@ -434,20 +440,17 @@ function makeBetterSidebar() {
   return { service, log };
 }
 
-test('sidebar: 未装 better-sidebar 时静默跳过，不影响 slots 看板', () => {
-  /* 「没装那个第三方插件」是绝大多数用户的状态，不能因此让笔记功能不可用。 */
-  const { Component, log, ctxLog } = harness({}, {});
+test('sidebar: 未装 better-sidebar 时静默跳过，不影响 slots 看板', async () => {
+  const { Component, log, ctxLog } = harness({}, {}, { fetchReply: { available: true } });
   assert.deepEqual(ctxLog.injected, ['betterSidebar'], '会去等这个服务');
-
-  Component({ sessionId: 's1', useProjection: () => ({ enabled: true }), bindingOf: () => null });
+  await mount(Component);
   assert.equal(boardRegistrations(log).length, 1, 'slots 那道仍然要注册');
 });
 
-test('sidebar: 装了就把看板 tab 注册到侧边栏，且是单实例', () => {
+test('sidebar: 装了就把看板 tab 注册到侧边栏，且是单实例', async () => {
   const sidebar = makeBetterSidebar();
-  const { Component, log } = harness({}, { betterSidebar: sidebar.service });
-
-  Component({ sessionId: 's1', useProjection: () => ({ enabled: true }), bindingOf: () => null });
+  const { Component, log } = harness({}, { betterSidebar: sidebar.service }, { fetchReply: { available: true } });
+  await mount(Component);
 
   assert.equal(sidebar.log.registered.length, 1, '侧边栏也要注册一枚');
   const tab = sidebar.log.registered[0];
@@ -456,25 +459,20 @@ test('sidebar: 装了就把看板 tab 注册到侧边栏，且是单实例', () 
   assert.equal(tab.order, 60);
   assert.equal(tab.title(), '笔记');
   assert.equal(typeof tab.component, 'function');
-  /* 两个宿主各自独立：slots 那道不受影响。 */
-  assert.equal(boardRegistrations(log).length, 1);
+  assert.equal(boardRegistrations(log).length, 1, '两个宿主各自独立');
 });
 
-test('sidebar: 组件必须把宿主 props 原样转交下去', () => {
-  /* 这是踩过的真坑：写成零参 `function () { … }` 会把 props 整个丢掉，
-     表现为侧边栏 iframe 拼出 `?session=` 空串 → 路由回 409 → 一片空白。
-     当时单测断言的是「代码里读了 scope.sessionId」，那句话确实在，
-     但值根本传不到，测试照样全绿。这里改为断言值真的到达组件。 */
+test('sidebar: 组件必须把宿主 props 原样转交下去', async () => {
+  /* 踩过的真坑：写成零参 `function () { … }` 会把 props 整个丢掉，
+     表现为侧边栏 iframe 拼出 `?session=` 空串 → 路由回 409 → 一片空白。 */
   const sidebar = makeBetterSidebar();
-  const { Component, react } = harness({}, { betterSidebar: sidebar.service });
-
-  Component({ sessionId: 's1', useProjection: () => ({ enabled: true }), bindingOf: () => null });
+  const { Component, react } = harness({}, { betterSidebar: sidebar.service }, { fetchReply: { available: true } });
+  await mount(Component);
 
   const tab = sidebar.log.registered[0];
   const props = { scope: { sessionId: 's-42', cwd: '/repo' }, ctx: {}, visible: true };
   tab.component(props);
 
-  /* 找到最后产出的那个 iframe 元素，检查 src 里的会话号。 */
   const frame = react.created.filter((el) => el.type === 'iframe').pop();
   assert.ok(frame !== undefined, '看板组件必须真的渲染出 iframe');
   assert.match(frame.props.src, /session=s-42/,
@@ -482,11 +480,11 @@ test('sidebar: 组件必须把宿主 props 原样转交下去', () => {
   assert.match(frame.props.src, /cwd=%2Frepo/, '会话目录也要带上去');
 });
 
-test('sidebar: iframe 地址保留页面基址的挂载前缀', () => {
+test('sidebar: iframe 地址保留页面基址的挂载前缀', async () => {
   for (const baseURI of ['https://example.test/', 'https://example.test/dsh/', 'https://example.test/nested/dsh/']) {
     const sidebar = makeBetterSidebar();
-    const { Component, react } = harness({}, { betterSidebar: sidebar.service }, { baseURI });
-    Component({ sessionId: 's1', useProjection: () => ({ enabled: true }), bindingOf: () => null });
+    const { Component, react } = harness({}, { betterSidebar: sidebar.service }, { baseURI, fetchReply: { available: true } });
+    await mount(Component);
     const tab = sidebar.log.registered[0];
     assert.ok(tab, '必须先通过真实注册路径取得看板');
     tab.component({ scope: { sessionId: 's /?&中', cwd: '/repo with spaces/中文' }, ctx: {}, visible: true });
@@ -502,78 +500,71 @@ test('sidebar: iframe 地址保留页面基址的挂载前缀', () => {
   }
 });
 
-test('sidebar: 开关关闭时注销侧边栏 tab', () => {
+test('sidebar: 服务端说不可用时不注册侧边栏 tab', async () => {
   const sidebar = makeBetterSidebar();
-  const { Component } = harness({}, { betterSidebar: sidebar.service });
-  const props = { sessionId: 's1', useProjection: () => ({ enabled: true }), bindingOf: () => null };
-  Component(props);
-  assert.equal(sidebar.log.registered.length, 1, '先要真的注册上');
-
-  Component({ ...props, useProjection: () => ({ enabled: false }) });
-  assert.deepEqual(sidebar.log.disposed, ['agent-notes-board'],
-    '关闭时侧边栏 tab 必须被注销');
+  const { Component } = harness({}, { betterSidebar: sidebar.service }, { fetchReply: { available: false } });
+  await mount(Component);
+  assert.deepEqual(sidebar.log.registered, [], '不可用时侧边栏也不该出现看板');
 });
 
 /* ── 座位生命周期 ──────────────────────────────────────────────────── */
 
-test('座位: view 座位清理时注销看板 tab 并复位注册表', () => {
+test('座位: view 座位清理时注销看板 tab 并复位注册表', async () => {
   /* HMR / 会话切换会让座位重挂；不复位的话旧 disposer 会在新会话里
      关掉别人的 tab，或者 register 还指着已经失效的 slots。 */
-  const { Component, log, slots } = harness();
-  Component({ sessionId: 's1', useProjection: () => ({ enabled: true }), bindingOf: () => null });
+  const { Component, log } = harness({}, {}, { fetchReply: { available: true } });
+  await mount(Component);
   assert.equal(boardRegistrations(log).length, 1, '先要真的注册上');
 
-  /* apply 时 conversation.view 那个 inject 回调返回的就是清理函数。 */
-  const { ctx } = harness();
-  void ctx;
-  /* 直接从记录里取：makeSlots 保存了每个 inject 回调的返回值。 */
   const cleanup = log.injectReturn['conversation.view'];
   assert.equal(typeof cleanup, 'function', 'view 座位必须返回清理函数');
   cleanup();
 
   assert.deepEqual(log.disposed, ['conversation.view:agent-notes-board'],
     '座位销毁时要注销看板 tab');
-  /* 复位后重新注入能再次注册 —— 若 enabled 没被复位就会一直卡在「已注册」的错觉里。 */
-  void slots;
+});
+
+test('座位: dispose 抛错时被吞掉，座位清理仍然完成', async () => {
+  /* 注销也可能抛错（宿主内部状态已变、tab 已被别人移除等）。
+     不吞的话异常会冒进 React 渲染，把界面整片打白。 */
+  const { Component, log } = harness({ throwOnDisposeFor: 'conversation.view' }, {}, { fetchReply: { available: true } });
+  await mount(Component);
+  assert.equal(boardRegistrations(log).length, 1, '先要真的注册上');
+
+  const cleanup = log.injectReturn['conversation.view'];
+  assert.doesNotThrow(() => cleanup(), 'dispose 抛错必须被吞掉');
+  assert.deepEqual(log.disposed, ['conversation.view:agent-notes-board'], '确实尝试过注销');
 });
 
 /* ── 契约漂移 ──────────────────────────────────────────────────────── */
 
-test('契约: 客户端的投影键与 lib/projection.js 一致', () => {
+test('契约: 客户端问的状态端点与 lib/board-route.js 的前缀一致', () => {
+  /* 客户端写的是相对地址 `agent-notes/status`（为了保留挂载前缀），
+     服务端挂在 `${ROUTE_PREFIX}/status`。两边各写一份字面量就必须有门禁盯着，
+     否则改了一边只会表现为「看板永远不出现」，而没有任何报错。 */
   const source = readFileSync(SRC, 'utf8');
-  const match = /var PROJECTION_KEY = '([^']+)'/.exec(source);
-  assert.ok(match !== null, '源码里必须有 PROJECTION_KEY');
+  const match = /var STATUS_ENDPOINT = '([^']+)'/.exec(source);
+  assert.ok(match !== null, '源码里必须有 STATUS_ENDPOINT');
 
-  const projection = readFileSync(
-    fileURLToPath(new URL('../lib/projection.js', import.meta.url)), 'utf8'
-  );
-  const expected = /PROJECTION_KEY = '([^']+)'/.exec(projection);
-  assert.ok(expected !== null, 'projection.js 里必须有 PROJECTION_KEY');
-  assert.equal(match[1], expected[1],
-    `客户端投影键（${match[1]}）必须与投影层（${expected[1]}）一致`);
+  const route = readFileSync(BOARD_ROUTE, 'utf8');
+  const prefix = /export const ROUTE_PREFIX = '([^']+)'/.exec(route);
+  assert.ok(prefix !== null, 'board-route.js 里必须有 ROUTE_PREFIX');
+  assert.equal(`/${match[1]}`, `${prefix[1]}/status`,
+    `客户端端点（${match[1]}）必须等于路由前缀 + /status`);
+
+  assert.match(route, new RegExp(`ROUTE_PREFIX\\}/status`), '路由必须真的处理这个端点');
 });
 
-test('契约: 客户端提示的命令名与 lib/commands.js 注册的一致', () => {
+test('契约: 客户端不再通过会话命令写状态，也不再读投影', () => {
+  /* 开关删除后，客户端不该偷偷保留「命令通道」这条写入路径 ——
+     它会让「界面没有按钮，但某处还能改状态」变成事实。
+     也不该再读投影：看板判据已换成磁盘事实。 */
   const source = readFileSync(SRC, 'utf8');
-  const match = /var COMMAND = '([^']+)'/.exec(source);
-  assert.ok(match !== null, '源码里必须有 COMMAND');
-
-  const commands = readFileSync(
-    fileURLToPath(new URL('../lib/commands.js', import.meta.url)), 'utf8'
-  );
-  const registered = /name: '([^']+)',/.exec(commands);
-  assert.ok(registered !== null, 'commands.js 里必须注册了命令名');
-  assert.equal(match[1], `/${registered[1]}`,
-    `客户端提示的命令（${match[1]}）必须与注册的命令（${registered[1]}）一致`);
+  assert.doesNotMatch(source, /bindingOf|\.command\(/, '客户端不得执行会话命令');
+  assert.doesNotMatch(source, /useProjection/, '客户端不得依赖会话投影');
 });
 
 test('契约: DEBUG 默认关闭，只在 anDebug=1 时打开', () => {
-  /* 诊断开关是排查真机问题的必需品，但默认必须关 ——
-     开着会把内部状态画到用户界面上。 */
-  const off = loadClient({ search: '' });
-  off.react.created.length = 0;
-  /* 用 copy() 的中文回退来间接确认非 debug 分支：debug 时按钮文案变成 proj=…
-     这里直接看源码常量的初始化路径更可靠。 */
   const source = readFileSync(SRC, 'utf8');
   assert.match(source, /var DEBUG = false;/, '默认值必须是 false');
   assert.match(source, /indexOf\('anDebug=1'\) !== -1/, '只在 URL 带 anDebug=1 时打开');

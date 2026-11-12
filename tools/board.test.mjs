@@ -1107,3 +1107,65 @@ test('notes: resolveNotesRoots 在容器目录下真的排除别人的仓库', (
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('board-route: /status 回「这个仓库在用笔记吗」，且恒 200', async () => {
+  /* 2026-11-12 起，看板 tab 由这条端点决定要不要出现（开关按钮已删除）。
+     它必须**恒 200**：「这个仓库没用笔记」是正常答案，不是错误 ——
+     回 4xx 会让前端把「没笔记」显示成「读不到」。 */
+  const handlers = [];
+  const ctx = ctxWithWebServer((route) => { handlers.push(route); });
+
+  const call = (path, route = handlers[0]) => new Promise((settle) => {
+    const res = {
+      statusCode: 0,
+      body: '',
+      writeHead(code) { this.statusCode = code; },
+      end(body) { this.body = body ?? ''; settle(this); }
+    };
+    route.handler({ method: 'GET', url: path }, res);
+  });
+
+  try {
+    registerBoardRoutes(ctx, {
+      notesRootFor: () => undefined,
+      notesBoardAvailable: (input) => input.sessionId === 'has-notes'
+    });
+
+    const yes = await call('/agent-notes/status?session=has-notes');
+    assert.equal(yes.statusCode, 200, '可用时也是 200');
+    assert.equal(JSON.parse(yes.body).available, true);
+
+    const no = await call('/agent-notes/status?session=plain-repo');
+    assert.equal(no.statusCode, 200, '「没用笔记」不是错误，仍要 200');
+    assert.equal(JSON.parse(no.body).available, false);
+  } finally {
+    /* 判据抛错时按不可用处理：路由不能把异常漏给宿主 HTTP 栈。 */
+    const handlers2 = [];
+    const ctx2 = ctxWithWebServer((route) => { handlers2.push(route); });
+    registerBoardRoutes(ctx2, {
+      notesRootFor: () => undefined,
+      notesBoardAvailable: () => { throw new Error('判据炸了'); }
+    });
+    const boom = await call('/agent-notes/status', handlers2[0]);
+    assert.equal(boom.statusCode, 200);
+    assert.equal(JSON.parse(boom.body).available, false, '判据出错时不得报可用');
+  }
+});
+
+test('board-route: 没注入判据时 /status 安全地回 false', async () => {
+  /* Headless/最小组合里可能拿不到判据实现；那时不该让端点 500。 */
+  const handlers = [];
+  const ctx = ctxWithWebServer((route) => { handlers.push(route); });
+  registerBoardRoutes(ctx, { notesRootFor: () => undefined });
+  const res = await new Promise((settle) => {
+    const r = {
+      statusCode: 0,
+      body: '',
+      writeHead(code) { this.statusCode = code; },
+      end(body) { this.body = body ?? ''; settle(this); }
+    };
+    handlers[0].handler({ method: 'GET', url: '/agent-notes/status?cwd=C:/repo' }, r);
+  });
+  assert.equal(res.statusCode, 200);
+  assert.equal(JSON.parse(res.body).available, false);
+});

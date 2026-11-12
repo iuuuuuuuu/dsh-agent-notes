@@ -34,15 +34,18 @@ function tempDir() {
   return mkdtempSync(join(tmpdir(), 'an-config-'));
 }
 
-test('config: 不传任何配置时，默认关闭且其余四项为真', () => {
+test('config: 不传任何配置时，默认**开启**且其余四项为真', () => {
   /* 默认值不是随手写的，每一条都有理由：
-     - enabled:false —— 装上插件不该悄悄改变既有会话的行为（**最重要的一条**）；
-     - injectPolicy:true —— 打开开关时规范段要能用；
+     - enabled:true —— 2026-11-12 Owner 要求「默认提供笔记技能」。原来的
+       默认关是配合输入区那个开关按钮的；按钮已删除，再默认关就变成
+       「装上插件什么都不发生」，用户会以为没生效；
+     - injectPolicy:true —— 默认开启后规范段要真的挂上；
      - registerTools / registerCommands:true —— 核心功能，默认该有。
 
      只断言「provider/tools/commands 被注册了」验不到 enabled 的默认值 ——
      那三样与 enabled 无关。所以这里必须**通过行为**观察：让一个会话创建，
-     检查规范段有没有被挂上。默认关闭意味着不挂。 */
+     检查规范段有没有被挂上。默认开启意味着**必须挂上**。
+     对照组：显式传 enabled:false 时不挂（见下一条用例）。 */
   const dir = tempDir();
   try {
     const { registered } = mountHarness({ stateFile: join(dir, 'state.json'), config: {} });
@@ -70,8 +73,10 @@ test('config: 不传任何配置时，默认关闭且其余四项为真', () => 
     for (const listener of registered.listeners.get('agent/created') ?? []) {
       listener({ agent: { id: 'session-default', cwd: dir, ctx: agentCtx } });
     }
-    assert.deepEqual(registered.sections, [],
-      '不配 enabled 时必须默认关闭：新会话不得挂规范段');
+    assert.equal(registered.sections.length, 1,
+      '不配 enabled 时必须默认开启：新会话要挂上规范段');
+    assert.match(registered.sections[0].text, /非平凡/,
+      '挂上的必须是真正的规范段（不是空壳）');
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -8,7 +8,7 @@
 把「为什么这样改、放弃了什么」变成仓库里**可机械校验**的决策笔记，装进 DeepSeek Harness。
 
 > 方法提炼自 [czm15053/write-notes-like-deepseek](https://github.com/czm15053/write-notes-like-deepseek)（它又提炼自 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的 `.agents/notes/` 实践）。
-> 本插件把那套方法做成 DSH 原生插件：技能、会话开关、真门禁、上游合并。
+> 本插件把那套方法做成 DSH 原生插件：技能、默认生效、真门禁、上游合并。
 
 ## 它解决什么
 
@@ -78,20 +78,22 @@ dsh plugin add --profile <你的profile> github:iuuuuuuuu/dsh-agent-notes
 
 会话级开关优先级高于全局：单独关掉某个会话后，改全局也不会影响它。
 
-### 界面上的状态提示
+### 默认生效，无开关按钮
 
-不用敲命令也能一眼看到当前会话是否生效：**输入框工具行左侧**有一枚绿色胶囊
-「● 笔记规范」，就挨着「完全权限/工作区内修改」那一排，**点击即切换**；
-关闭时胶囊变灰。
+**装上就生效**：默认提供笔记技能与会话规范，不需要先点开关。
 
-它读的是**会话投影**（`agentNotes`），所以刷新、重连、切换会话都自动正确。
-点击开关走的是官方斜杠命令通道（`/agent-notes on|off`），因此和手敲命令
-**完全等价**，并且开关操作零 token。
+> 2026-11-12 起输入区那枚「● 笔记规范」胶囊**已移除** ——「这个仓库用不用笔记」
+> 是仓库的事实，不该每会话手动确认。要关仍有两条路：`enabled: false`，或
+> `/agent-notes off`。
 
-> 设计说明：投影只折叠宿主自己写的 `command/run` 事件，本插件**不写会话日志**。
-> 原因是插件零 `@deepseek-ai` 依赖，拿不到 `appendPluginRecord`；而退路
-> `session.append('plugin:…')` 实测会写出 `ignorable=undefined` 的残废记录
-> （`pluginRecordOf` 读不回），看着成功实则污染日志。走命令事件则完全绕开这个坑。
+**看板 tab 自动出现**：工作目录确实在用决策笔记时（有 `.agents/notes`，或装着
+项目技能副本 `.agents/skills/agent-notes`），「笔记」tab 自己出现；没接入的仓库不多出空 tab。
+判据由 Host 读磁盘得出（浏览器没有文件系统，也不能猜仓库），前端只问一次
+`GET agent-notes/status`。
+
+> 设计说明：插件**不写会话日志**（零 `@deepseek-ai` 依赖，拿不到
+> `appendPluginRecord`；退路 `session.append('plugin:…')` 会写出 `ignorable=undefined`
+> 的残废记录）。状态一律走「宿主自己写的命令事件」或磁盘事实。
 
 ### 笔记看板：对话区多一个「笔记」tab
 
@@ -290,7 +292,7 @@ ci.yml → npm run verify-notes → tsx .agents/skills/agent-notes/scripts/*.ts
 ### 侧边栏（dsh-better-sidebar）
 
 装了 [dsh-better-sidebar](https://github.com/dhicoc/dsh-better-sidebar) 时，看板也会出现在它的
-右侧栏里，**同一个开关控制**：笔记规范关着就不出现，打开才出现。
+右侧栏里，**同一套判据**：仓库在用笔记时出现。
 
 接入方式是该插件公开的客户端服务 `ctx.betterSidebar.registerTab(...)`，不是私有 API：
 
