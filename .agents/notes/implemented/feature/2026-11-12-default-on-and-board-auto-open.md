@@ -38,13 +38,15 @@ Status: implemented
 判据抽成 `projectUsesNotes(cwd)`（`lib/project-skill.js`）：
 
 ```
-.agents/notes 存在            → 在用（已经在记笔记）
-.agents/skills/agent-notes 存在 → 在用（装了项目技能副本，第一篇还没写）
-两者皆无                       → 不用，不出现看板 tab
+.agents/skills/<名字含 notes>/ 存在 → 在用（agent-notes 或上游旧名 write-notes-like-deepseek）
+仓库根的 skills/agent-notes/ 存在    → 在用（本插件仓库自己的包布局）
+其余                                 → 不用，不出现看板 tab
 ```
 
-把第二条也算进来，是因为「刚装好技能、还没写第一篇」正是最需要看板提示
-「还没有笔记」的时刻。
+**判据只认「装了这套技能」，不认笔记树。** 第一版额外把 `.agents/notes` 也算进去，
+理由是「刚建了树也说明在用」—— 当天就被 Owner 实测推翻：**没有装 skill 的目录也出现了
+看板 tab**。笔记树是技能的产出物，不是安装凭据；只要判据放宽到「磁盘上碰巧有个 notes
+目录」，任何曾跑过门禁留下 `.agents/notes` 的仓库都会冒出看板。
 
 ### 三、判据在 Host，浏览器只问一次
 
@@ -61,13 +63,14 @@ Status: implemented
 输入区座位仍在（`conversation.input.left`），但组件从**按钮**换成**无渲染闸门**：
 它只负责问一次 status，再驱动 tab 注册，返回 `null`。用户看不到任何按钮。
 
-`must`：**只加不减。** 看板注册是客户端全局的，而多个会话可能同时开着；
-一个没有笔记的会话不该关掉另一个会话需要的 tab。代价是切到没笔记的仓库时 tab
-仍在，页面自己会说「这个仓库还没有 `.agents/notes`」。
+`must`：**判定跟随仓库，允许收起。** 服务端回 `true` 就挂出 tab，
+回 `false` 就**注销**。第一版写成「只加不减」，理由是「多会话并存时别互相关掉」——
+当天被实测推翻：切到没装 skill 的仓库，tab 仍在，Owner 看到的正是这个。
+现在按最新一次判定执行；同一时刻只有一个活跃会话在驱动它。
 
-`must`：**请求失败按「可用」处理（失败开放）。** 路由没挂上、网络抖动都可能让
-请求失败；此时若按「不可用」处理，用户会以为插件坏了而界面**什么都不说** ——
-那正是本仓库反复在治的「看起来正常、实际没生效」。让看板出现，页面自己说明状态。
+`must`：**请求失败时不猜。** 路由未就绪、断网、HTTP 错误一律**保留上一次判定**，
+既不默认可用也不默认不可用。第一版「失败按可用处理」（失败开放）的后果是：
+启动瞬间一次请求失败，就把看板挂到了所有仓库上 —— 另一个被 Owner 抓到的假象。
 
 ## Alternatives considered
 
@@ -109,10 +112,10 @@ npm run check                                  # 全量门禁 + 测试 + 故障�
 |---|---|
 | 不传配置时**默认挂上**规范段（对照组：`enabled:false` 不挂） | `config.test.mjs` / `integration.test.mjs` |
 | 客户端**不再**出现 `.command(` 与投影键，改用 `agent-notes/status` | `client.test.mjs` / `projection.test.mjs` / `verify-plugin.mjs` |
-| `available:true` 才注册 tab；`false` 不注册；请求失败按可用处理 | `client.test.mjs` |
-| 只加不减：另一个会话说不可用，不注销已挂出的 tab | `client.test.mjs` |
+| `available:true` 才注册 tab；`false` **注销**；请求失败保留上次判定 | `client.test.mjs` |
+| 判定跟随仓库：先可用后不可用 ⇒ 必须注销 | `client.test.mjs` |
 | `/status` 恒 200，判据抛错时回 `available:false` | `board.test.mjs` |
-| `.agents/notes` 或 `.agents/skills/agent-notes` 任一存在即「在用」 | `project-skill.test.mjs` |
+| 只认技能副本（含上游旧名与本仓库包布局）；**只有笔记树不算** | `project-skill.test.mjs` |
 
 ### 真机取证的实况（不夸大）
 
