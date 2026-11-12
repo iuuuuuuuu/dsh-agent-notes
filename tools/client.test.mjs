@@ -97,11 +97,13 @@ function makeFetchStub(reply) {
   const urls = [];
   const fetch = (url) => {
     urls.push(String(url));
-    if (reply === 'throw') return Promise.reject(new Error('网络炸了'));
-    if (reply === 'http-error') return Promise.resolve({ ok: false, json: () => Promise.resolve({}) });
+    /* 允许传函数：同一个 harness 里模拟「切到另一个仓库」时每次应答不同。 */
+    const current = typeof reply === 'function' ? reply(url, urls.length - 1) : reply;
+    if (current === 'throw') return Promise.reject(new Error('网络炸了'));
+    if (current === 'http-error') return Promise.resolve({ ok: false, json: () => Promise.resolve({}) });
     return Promise.resolve({
       ok: true,
-      json: () => Promise.resolve({ ok: true, available: reply?.available !== false })
+      json: () => Promise.resolve({ ok: true, available: current?.available !== false })
     });
   };
   return { fetch, urls };
@@ -336,32 +338,36 @@ test('闸门: 服务端说「这个仓库没用笔记」时不注册看板 tab',
   assert.deepEqual(boardRegistrations(log), [], 'available:false 时不该出现看板');
 });
 
-test('闸门: 请求失败时按「可用」处理（不许静默把功能藏起来）', async () => {
-  /* 这是刻意的失败方向：路由没挂上、网络抖动都可能让请求失败。
-     此时若按「不可用」处理，用户会以为插件坏了而界面**什么都不说** ——
-     那正是本仓库反复在治的「看起来正常、实际没生效」。
-     让看板出现，页面自己会说明状态。 */
+test('闸门: 请求失败时不猜（保留上次判定，不新增 tab）', async () => {
+  /* 2026-11-12 实测修正：原来「失败按可用处理」（失败开放），结果是启动瞬间
+     一次请求失败就把看板挂到**所有**仓库上 —— Owner 看到的「没装 skill 也出现
+     tab」正是它。现在失败/无网/路由未就绪一律**保留上次判定**：
+     首次就失败 ⇒ 什么都没发生 ⇒ 不出现。 */
   const throwCase = harness({}, {}, { fetchReply: 'throw' });
   await mount(throwCase.Component);
-  assert.equal(boardRegistrations(throwCase.log).length, 1, '网络异常时仍要挂出看板');
+  assert.equal(boardRegistrations(throwCase.log).length, 0, '网络异常时不该凭空挂出看板');
 
   const errCase = harness({}, {}, { fetchReply: 'http-error' });
   await mount(errCase.Component);
-  assert.equal(boardRegistrations(errCase.log).length, 1, 'HTTP 错误时仍要挂出看板');
+  assert.equal(boardRegistrations(errCase.log).length, 0, 'HTTP 错误时不该凭空挂出看板');
 });
 
-test('闸门: 只加不减 —— 另一个会话说不可用，也不注销已挂出的 tab', async () => {
-  /* 看板注册是**客户端全局**的，而多个会话可能同时开着。
-     一个没有笔记的会话不该把另一个会话需要的 tab 关掉。
-     代价：切到没笔记的仓库时 tab 仍在，页面自己会说「这个仓库还没有 .agents/notes」。 */
-  const { Component, log } = harness({}, {}, { fetchReply: { available: true } });
-  await mount(Component, { sessionId: 'with-notes' });
-  assert.equal(boardRegistrations(log).length, 1, '先要真的注册上');
+test('闸门: 判定跟随仓库 —— 切到没装 skill 的仓库要收起 tab', async () => {
+  /* 2026-11-12 实测修正：原来「只加不减」，切到没装 skill 的目录 tab 仍在，
+     Owner 当场看到的就是这个。现在 true → 挂、false → 收。 */
+  const replies = [{ available: true }, { available: false }];
+  let call = 0;
+  const { Component, log } = harness({}, {}, {
+    fetchReply: () => replies[Math.min(call++, replies.length - 1)]
+  });
+  await mount(Component, { sessionId: 'with-skill' });
+  assert.equal(boardRegistrations(log).length, 1, '第一个仓库装了 skill：先挂上');
+  assert.deepEqual(log.disposed, [], '这一步不该有注销');
 
-  Component({ sessionId: 'without-notes' });
-  await flush();
-  assert.deepEqual(log.disposed, [], '不可用不该触发注销');
-  assert.equal(boardRegistrations(log).length, 1, '也不该重复注册');
+  /* 再渲染一次（模拟切到另一个仓库）：这次服务端说不可用。 */
+  await mount(Component, { sessionId: 'without-skill' });
+  assert.deepEqual(log.disposed, ['conversation.view:agent-notes-board'],
+    '不可用时必须注销 —— 不能只加不减');
 });
 
 test('闸门: 渲染结果是 null（输入区不出现任何按钮）', async () => {

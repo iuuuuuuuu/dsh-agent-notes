@@ -161,21 +161,31 @@ test('policy: 明确交代两份副本的关系，并禁止编造 README/升级�
   }
 });
 
-test('projectUsesNotes: 笔记树或项目技能副本任一存在即为「在用」', () => {
-  /* 判据决定看板 tab 要不要出现（2026-11-12）。
-     两条都要认：只有笔记树时，「刚装好技能还没写第一篇」的仓库看不到看板 ——
-     而那正是最该提示「还没有笔记」的时刻；
-     只有技能副本时同理。两者皆无才不出现。 */
+test('projectUsesNotes: 只认「装了技能副本」；笔记树不算', () => {
+  /* 判据决定看板 tab 要不要出现。
+     2026-11-12 实测修正：第一版把 `.agents/notes` 也当判据，结果**没装 skill
+     的目录也出现了看板**（Owner 当场指出）。笔记树是技能的产出物，不是安装凭据。 */
   const base = mkdtempSync(join(tmpdir(), 'an-uses-'));
   try {
-    assert.equal(projectUsesNotes(base), false, '空目录：没接入笔记');
+    assert.equal(projectUsesNotes(base), false, '空目录：没装技能');
 
     mkdirSync(join(base, '.agents', 'skills', 'agent-notes'), { recursive: true });
-    assert.equal(projectUsesNotes(base), true, '只有项目技能副本也算在用');
+    assert.equal(projectUsesNotes(base), true, '装了 agent-notes 副本即为在用');
 
+    /* 上游旧名同样是真实的项目副本形态。 */
+    rmSync(join(base, '.agents'), { recursive: true, force: true });
+    mkdirSync(join(base, '.agents', 'skills', 'write-notes-like-deepseek'), { recursive: true });
+    assert.equal(projectUsesNotes(base), true, '旧技能名也算装了');
+
+    /* 只有笔记树：不算（这正是被 Owner 抓到的那条）。 */
     rmSync(join(base, '.agents'), { recursive: true, force: true });
     mkdirSync(join(base, '.agents', 'notes'), { recursive: true });
-    assert.equal(projectUsesNotes(base), true, '只有笔记树也算在用');
+    assert.equal(projectUsesNotes(base), false, '只有笔记树不算 —— 产出物不是安装凭据');
+
+    /* 本插件仓库自己的包布局（根 skills/agent-notes）。 */
+    rmSync(join(base, '.agents'), { recursive: true, force: true });
+    mkdirSync(join(base, 'skills', 'agent-notes'), { recursive: true });
+    assert.equal(projectUsesNotes(base), true, '插件自身仓库的 skills/agent-notes 也算');
 
     assert.equal(projectUsesNotes(undefined), false, 'undefined 不得当成在用');
     assert.equal(projectUsesNotes(''), false, '空串不得当成在用');
