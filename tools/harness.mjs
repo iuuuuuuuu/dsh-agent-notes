@@ -111,6 +111,7 @@ function mount(options) {
     sections: [],
     sectionsDisposed: 0,
     effects: [],
+    routes: [],
     listeners: new Map()
   };
 
@@ -123,6 +124,13 @@ function mount(options) {
       }
     }
   };
+
+  if (options.sessions !== undefined) {
+    services.sessions = { get(id) { return options.sessions.get(id); } };
+  }
+  if (options.withWebServer === true) {
+    services.webServer = { register(route) { registered.routes.push(route); return () => {}; } };
+  }
 
   if (options.withTools !== false) {
     services.tools = {
@@ -202,6 +210,7 @@ function mount(options) {
 
   // 承接器模式：把服务直接挂到 ctx 上，并提供 inject / effect / on 的同语义实现。
   Object.assign(ctx, services);
+  ctx.get = (name) => services[name];
   ctx.inject = (deps, callback) => {
     if (deps.every((dep) => ctx[dep] !== undefined)) return callback(ctx);
     return () => {};

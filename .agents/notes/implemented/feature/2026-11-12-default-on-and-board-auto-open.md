@@ -2,6 +2,10 @@
 
 Status: implemented
 
+> 看板的「仅技能目录 + 只查一次」规则由
+> [已有笔记与持续会话判定](../bug-fix/2026-11-19-board-detects-existing-notes.md)
+> 部分取代。默认启用与删除按钮的决定保持；以下保留当时规则与理由。
+
 > Owner 2026-11-12 原话：「改为默认提供笔记 skill，当检测到工作目录存在 agent-notes 的
 > skill 的时候主动打开面板；删除掉对话区域的 笔记规范 的开关按钮」。
 > 与 [2026-10-19-network-down-reported-as-contract-broken.md](../bug-fix/2026-10-19-network-down-reported-as-contract-broken.md)

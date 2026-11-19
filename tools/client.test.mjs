@@ -99,11 +99,10 @@ function makeFetchStub(reply) {
     urls.push(String(url));
     /* 允许传函数：同一个 harness 里模拟「切到另一个仓库」时每次应答不同。 */
     const current = typeof reply === 'function' ? reply(url, urls.length - 1) : reply;
-    if (current === 'throw') return Promise.reject(new Error('网络炸了'));
-    if (current === 'http-error') return Promise.resolve({ ok: false, json: () => Promise.resolve({}) });
-    return Promise.resolve({
-      ok: true,
-      json: () => Promise.resolve({ ok: true, available: current?.available !== false })
+    return Promise.resolve(current).then((result) => {
+      if (result === 'throw') throw new Error('网络炸了');
+      if (result === 'http-error') return { ok: false };
+      return { ok: true, json: async () => ({ ok: true, ...result }) };
     });
   };
   return { fetch, urls };
@@ -122,6 +121,20 @@ function loadClient(options = {}) {
   const react = options.react ?? makeReact();
   const source = readFileSync(SRC, 'utf8');
   const fetchStub = makeFetchStub(options.fetchReply ?? { available: true });
+  /* 只替换时钟，不替换被测客户端逻辑；待触发任务由测试显式推进。 */
+  const scheduled = new Map();
+  let timerId = 0;
+  const timers = {
+    setTimeout(fn, ms) { const id = ++timerId; scheduled.set(id, { fn, ms }); return id; },
+    clearTimeout(id) { scheduled.delete(id); },
+    scheduled,
+    runNext() {
+      const [id, task] = scheduled.entries().next().value ?? [];
+      assert.ok(task, '应当有下一次真实查询待触发');
+      scheduled.delete(id);
+      task.fn();
+    }
+  };
   const sandbox = {
     React: react,
     location: { search: options.search ?? '' },
@@ -136,8 +149,8 @@ function loadClient(options = {}) {
     window: {},
     fetch: fetchStub.fetch,
     console,
-    setTimeout,
-    clearTimeout,
+    setTimeout: timers.setTimeout,
+    clearTimeout: timers.clearTimeout,
     encodeURIComponent
   };
   sandbox.globalThis = sandbox;
@@ -148,7 +161,7 @@ function loadClient(options = {}) {
   assert.equal(typeof factory, 'function', '必须能从源码取到 createAgentNotesClient');
 
   const requireStub = (name) => (name === 'react' ? react : {});
-  return { client: factory(requireStub), react, sandbox, fetchLog: fetchStub };
+  return { client: factory(requireStub), react, sandbox, fetchLog: fetchStub, timers };
 }
 
 /**
@@ -259,7 +272,8 @@ function harness(slotsOptions = {}, services = {}, clientOptions = {}) {
     react: loaded.react,
     slots,
     ctx,
-    fetchLog: loaded.fetchLog
+    fetchLog: loaded.fetchLog,
+    timers: loaded.timers
   };
 }
 
@@ -368,6 +382,73 @@ test('闸门: 判定跟随仓库 —— 切到没装 skill 的仓库要收起 ta
   await mount(Component, { sessionId: 'without-skill' });
   assert.deepEqual(log.disposed, ['conversation.view:agent-notes-board'],
     '不可用时必须注销 —— 不能只加不减');
+});
+
+test('闸门: 同会话写入首篇后复查并挂出 tab，卸载后停表', async () => {
+  let available = false;
+  const { Component, fetchLog, log, react, timers } = harness({}, {}, {
+    fetchReply: () => ({ available })
+  });
+  await mount(Component);
+  assert.equal(boardRegistrations(log).length, 0);
+  assert.equal(timers.scheduled.size, 1);
+  assert.equal(timers.scheduled.values().next().value.ms, 4000);
+
+  available = true;
+  timers.runNext();
+  await flush();
+  assert.equal(fetchLog.urls.length, 2);
+  assert.equal(boardRegistrations(log).length, 1, '不重挂组件也要发现首篇');
+  assert.equal(timers.scheduled.size, 1);
+
+  available = false;
+  timers.runNext();
+  await flush();
+  assert.deepEqual(log.disposed, ['conversation.view:agent-notes-board']);
+  react.effects[0]();
+  assert.equal(timers.scheduled.size, 0, '离开会话不能留下轮询');
+});
+
+test('闸门: 迟到的旧会话结果不能覆盖新会话，也不再续约', async () => {
+  const oldResponse = Promise.withResolvers();
+  const { Component, log, timers } = harness({}, {}, {
+    fetchReply: (url) => url.includes('session=old') ? oldResponse.promise : { available: false }
+  });
+  Component({ sessionId: 'old' });
+  await mount(Component, { sessionId: 'new' });
+  assert.equal(timers.scheduled.size, 1, '只为新目标续约');
+  oldResponse.resolve({ available: true });
+  await flush();
+  assert.equal(boardRegistrations(log).length, 0, '旧会话确有笔记但不再是当前目标');
+  assert.equal(timers.scheduled.size, 1);
+});
+
+test('闸门: 网络错误只保留同目标的结果，切换后不沿用旧 tab', async () => {
+  const { Component, log, timers } = harness({}, {}, {
+    fetchReply: (_url, index) => index === 0 ? { available: true } : 'http-error'
+  });
+  await mount(Component, { sessionId: 'old' });
+  assert.equal(boardRegistrations(log).length, 1);
+  timers.runNext();
+  await flush();
+  assert.deepEqual(log.disposed, [], '同一会话的瞬时 HTTP 错误不应收起看板');
+  await mount(Component, { sessionId: 'new' });
+  assert.deepEqual(log.disposed, ['conversation.view:agent-notes-board'],
+    '新目标不能借旧目标的可用性，即使新请求失败');
+});
+
+test('闸门: 从宿主清单取本会话 cwd，嵌入的子会话不驱动全局注册', async () => {
+  const { Component, fetchLog, log, timers } = harness();
+  const list = { byId: { root: { cwd: '/main-repo' }, child: { cwd: '/other-repo' } } };
+  const props = {
+    useSessions: (select) => select(list),
+    useSessionRetainInfo: (id) => ({ retainedBy: id === 'root' ? { mainView: 1 } : { embedded: 1 } })
+  };
+  await mount(Component, { ...props, sessionId: 'root' });
+  await mount(Component, { ...props, sessionId: 'child' });
+  assert.deepEqual(fetchLog.urls, ['agent-notes/status?session=root&cwd=%2Fmain-repo']);
+  assert.equal(boardRegistrations(log).length, 1);
+  assert.equal(timers.scheduled.size, 1);
 });
 
 test('闸门: 渲染结果是 null（输入区不出现任何按钮）', async () => {
@@ -484,6 +565,22 @@ test('sidebar: 组件必须把宿主 props 原样转交下去', async () => {
   assert.match(frame.props.src, /session=s-42/,
     'props 没转交下去的话这里会是空 session —— 正是 409 的成因');
   assert.match(frame.props.src, /cwd=%2Frepo/, '会话目录也要带上去');
+});
+
+test('board: 内置 view 从 useSessions 带入本会话 cwd，旧会话也能读看板', async () => {
+  const { Component, log, react } = harness({}, {}, { fetchReply: { available: true } });
+  await mount(Component, { sessionId: 'legacy-session' });
+  const board = boardRegistrations(log)[0];
+  board.component({
+    sessionId: 'legacy-session',
+    useSessions: (select) => select({ byId: {
+      'legacy-session': { cwd: '/real repo/中文' }, other: { cwd: '/other-repo' }
+    } })
+  });
+  const frame = react.created.findLast((el) => el.type === 'iframe');
+  const url = new URL(frame.props.src, 'http://localhost/');
+  assert.equal(url.searchParams.get('session'), 'legacy-session');
+  assert.equal(url.searchParams.get('cwd'), '/real repo/中文', '不能因没有顶层 cwd 就丢掉回退依据');
 });
 
 test('sidebar: iframe 地址保留页面基址的挂载前缀', async () => {

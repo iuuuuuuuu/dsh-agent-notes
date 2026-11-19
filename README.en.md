@@ -93,12 +93,9 @@ enabled, with nothing to click first.
 > still turn it off: plugin config `enabled: false`, or `/agent-notes off` in a
 > session.
 
-**The board tab appears on its own**: when the session's working directory actually
-uses decision notes (it has `.agents/notes`, or the project skill copy
-`.agents/skills/agent-notes`), the "Notes" tab shows up; a repo that never adopted
-notes does not get an empty tab. The Host decides by reading the disk (the browser
-has no filesystem and must not guess a repo); the client asks
-`GET agent-notes/status` once.
+**The Notes tab appears automatically** when the project has the matching skill or
+the board finds at least one standalone decision note. An empty `.agents/notes`
+directory does not count. Writing the first note makes the tab appear without a reload.
 
 > Design note: the projection only folds the host's own `command/run` events —
 > **this plugin never writes to the session log**. It cannot: it has zero
@@ -353,8 +350,7 @@ behind a config flag).
 ### Sidebar (dsh-better-sidebar)
 
 When [dsh-better-sidebar](https://github.com/dhicoc/dsh-better-sidebar) is installed, the board
-also appears in its right sidebar — **driven by the same rule**: it shows up when the repo is
-discipline is off and appears once you turn it on.
+is also available in its right sidebar under the same rule.
 
 Integration uses that plugin's public client service `ctx.betterSidebar.registerTab(...)`, not a
 private API:

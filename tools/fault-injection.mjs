@@ -91,6 +91,7 @@ const FAULT_SUITES = [
   ['笔记树布局（根层与生命周期目录）', 'notes-layout.test.mjs'],
   ['非 Node 项目 / 无 node 环境', 'non-node-project.test.mjs'],
   ['看板数据聚合', 'board.test.mjs'],
+  ['看板可见性与真实 HTTP 接线', 'board-status.test.mjs'],
   ['看板窄屏抽屉与归档卡补丁', 'board-responsive.test.mjs'],
   ['看板补丁源码语法体检（不 import 模块）', 'board-response-source.test.mjs'],
   ['看板补丁的选择器对齐', 'board-selector-alignment.test.mjs'],
