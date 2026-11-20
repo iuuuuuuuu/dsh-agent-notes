@@ -70,6 +70,12 @@ jobs:
           echo "version=$after" >> "$GITHUB_OUTPUT"
           echo "版本号：$before -> $after"
 
+      - name: 安装回归依赖与 Chromium
+        if: steps.sync.outputs.changed == 'true'
+        run: |
+          npm ci
+          npx --no-install playwright-core install --with-deps chromium
+
       # 只有真的合并了才需要跑门禁 —— 没改动时跑一遍纯属浪费。
       - name: 门禁（合并后必须通过才允许提交）
         if: steps.sync.outputs.changed == 'true'

@@ -860,7 +860,7 @@ test('board-responsive: 热更新脚本必须轮询 /data，并调用上游 inge
   assert.ok(i > 0, '补丁脚本必须存在');
   const js = out.slice(i, out.indexOf('</script>', i));
 
-  assert.match(js, /replace\(\/\[\^\/\]\*\$\/, 'data'\)/, '端点应从当前路径推导，不能直接拼 data');
+  assert.match(js, /new URL\('data' \+ new URL\(document\.baseURI\)\.search, document\.baseURI\)/, '正常文档和 srcdoc 都从真实 baseURI 保留会话参数');
   assert.match(js, /setInterval\(poll,/, '必须有轮询');
   assert.match(js, /window\.ingestDataset\(/, '必须调上游的 ingestDataset');
   assert.match(js, /document\.hidden/, '整页不可见时应跳过请求');

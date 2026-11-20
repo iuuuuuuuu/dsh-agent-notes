@@ -116,7 +116,7 @@ vendored 用 `relative(repoRoot, manifestPath)` 算仓库内路径，而
 `AGENT_NOTE_ROOT` 为 `…\<8.3 短名>\…` 形态）：
 
 ```
-DEBUG repoRoot=C:/Users/iuuuuuuuu/AppData/Local/Temp/f6c
+DEBUG repoRoot=C:/Users/<用户>/AppData/Local/Temp/f6c
 DEBUG manifestRel=../../../../../<8.3 短名>/AppData/Local/Temp/f6c/.agents/notes/archived/manifest.json
 DEBUG baselineRaw=NULL          ← git show 失败
 ok: 1 archived note(s) verified, 1 seal(s) in manifest   ← exit 0，没有任何 warning

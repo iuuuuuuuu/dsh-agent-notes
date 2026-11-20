@@ -7,8 +7,7 @@
  *
  * 数据链路（全部走官方通道，不自造）：
  *   读：`GET agent-notes/status?session=…&cwd=…` → `{ available }`
- *       服务端按会话 cwd 看磁盘（`.agents/notes` 或项目技能副本），
- *       浏览器端没有文件系统，也不能猜仓库。
+ *       服务端确认这个会话有实际决策笔记或项目技能；空目录不算。
  *   判：`available === true` 才把看板 tab 挂出来。
  *
  * 为什么不再用会话投影决定看板：投影只折叠 `/agent-notes` 命令日志，
@@ -28,13 +27,6 @@ function createAgentNotesClient(require) {
 
   var NS = 'agent-notes';
 
-  /**
-   * 看板 tab 的注册表：由 apply 填充，由常驻的开关组件驱动。
-   *
-   * 为什么要这层间接：宿主对 `conversation.view` 只读 id/label，没有条件
-   * 隐藏机制；而 apply 阶段还没有任何会话，读不到投影。开关组件挂在输入框
-   * 里、每个会话都在、且已经订阅同一个投影，因此由它当信使最自然。
-   */
   /**
    * 看板 tab 的注册状态，**每个宿主一份**。
    *
@@ -123,6 +115,7 @@ function createAgentNotesClient(require) {
       boardTitle: '笔记',
       boardLoading: '正在读取笔记…',
       boardError: '读不到笔记树',
+      boardRetry: '重试',
       boardEmpty: '笔记树存在，但还没有笔记',
       boardNoTree: '这个仓库还没有 .agents/notes',
       boardSearch: '搜索标题 / 分类…',
@@ -132,6 +125,7 @@ function createAgentNotesClient(require) {
       boardTitle: 'Notes',
       boardLoading: 'Reading notes…',
       boardError: 'Cannot read the notes tree',
+      boardRetry: 'Retry',
       boardEmpty: 'The notes tree exists but has no notes yet',
       boardNoTree: 'This repository has no .agents/notes yet',
       boardSearch: 'Search title / class…',
@@ -175,6 +169,8 @@ function createAgentNotesClient(require) {
   }
 
   /* ── 组件 ──────────────────────────────────────────────────────────── */
+  var boardGateGeneration = 0;
+  var boardGateKey = null;
   /**
    * 看板闸门（**不渲染任何东西**）。
    *
@@ -188,15 +184,10 @@ function createAgentNotesClient(require) {
    * 再驱动 tab 的注册。它返回 null，因此输入区看不到任何东西。
    *
    * 判据来自服务端 `/agent-notes/status`：浏览器端没有文件系统，
-   * 「这个仓库有没有装这套技能」只能由 Host 回答。
+   * 「这个仓库有没有实际笔记或装好技能」只能由 Host 回答。
    *
-   * 判定三态（2026-11-12 实测修正）：
-   *   - 回 `true`  → 挂出 tab；
-   *   - 回 `false` → **收起 tab**（切到没装 skill 的仓库必须消失）；
-   *   - 请求失败/没网/路由未就绪 → **保留上次判定**，不猜。
-   *
-   * 曾经写成「只加不减 + 失败按可用」，两处都错：前者让没装 skill 的仓库
-   * 继续显示看板，后者让启动时一次请求失败就把看板挂到所有仓库上。
+   * 状态以当前主会话为准；连续查询可发现同会话写入的首篇笔记。
+   * 网络失败不是磁盘事实：保留同一目标的判定，切换目标则先收起旧 tab。
    *
    * @param {object} props 槽位 props（会话 id 可能在 `sessionId` 或 `scope.sessionId`）。
    * @returns {null} 恒不渲染。
@@ -214,43 +205,46 @@ function createAgentNotesClient(require) {
       cwd = props.cwd;
     }
 
+    /* 宿主清单提供本会话 cwd；即使 server 尚未加载历史，也无需借别的会话猜。 */
+    var listedCwd = typeof props.useSessions === 'function'
+      ? props.useSessions(function (list) { return list?.byId?.[sessionId]?.cwd; })
+      : undefined;
+    if (cwd === null && typeof listedCwd === 'string') cwd = listedCwd;
+    /* 嵌入的子会话也可能有 composer；只有 mainView 的会话能改全局 tab 注册。 */
+    var main = typeof props.useSessionRetainInfo !== 'function'
+      || (props.useSessionRetainInfo(sessionId)?.retainedBy?.mainView ?? 0) > 0;
+
     React.useEffect(function () {
+      if (!main || (!sessionId && !cwd)) return undefined;
       var url = STATUS_ENDPOINT + '?session=' + encodeURIComponent(String(sessionId ?? ''));
       if (cwd !== null && cwd !== '') url += '&cwd=' + encodeURIComponent(cwd);
       var alive = true;
-      /**
-       * 应用到看板 tab 的判定。
-       *
-       * 三态，不能压成两态（2026-11-12 实测修正）：
-       *   true  → 挂出 tab
-       *   false → **收起 tab**（原来只加不减，于是切到没装 skill 的仓库，
-       *           tab 仍然在 —— Owner 当场看到的正是这个）
-       *   undefined（请求失败/没网/路由还没挂）→ **什么都不做**，
-       *           保留上一次的判定。原来按「可用」处理（失败开放），
-       *           结果是启动瞬间一次失败就让看板出现在所有仓库里。
-       */
-      var done = function (available) {
-        if (!alive) return;
-        if (available === true) syncBoardTab(true);
-        else if (available === false) syncBoardTab(false);
-      };
-      try {
-        if (typeof fetch !== 'function') { done(undefined); return undefined; }
-        fetch(url, { headers: { accept: 'application/json' } })
-          .then(function (res) { return res.ok ? res.json() : null; })
-          .then(function (data) {
-            if (data === null || data === undefined || typeof data.available !== 'boolean') {
-              done(undefined);
-              return;
-            }
-            done(data.available);
-          })
-          .catch(function () { done(undefined); });
-      } catch (e) {
-        done(undefined);
+      var generation = ++boardGateGeneration;
+      var timer = null;
+      if (boardGateKey !== url) { boardGateKey = url; syncBoardTab(false); }
+      if (typeof fetch !== 'function') return undefined;
+
+      function current() { return alive && generation === boardGateGeneration; }
+      function schedule() {
+        if (current()) timer = setTimeout(check, 4000);
       }
-      return function () { alive = false; };
-    }, [sessionId, cwd]);
+      async function check() {
+        if (!current()) return;
+        try {
+          var response = await fetch(url, { headers: { accept: 'application/json' } });
+          if (response.ok) {
+            var data = await response.json();
+            if (current() && typeof data?.available === 'boolean') syncBoardTab(data.available);
+          }
+        } catch (e) { /* 请求失败不改判定，下次再查。 */ }
+        schedule();
+      }
+      check();
+      return function () {
+        alive = false;
+        if (timer !== null) clearTimeout(timer);
+      };
+    }, [sessionId, cwd, main]);
 
     return null;
   }
@@ -278,6 +272,89 @@ function createAgentNotesClient(require) {
   /* ── 笔记看板（conversation.view 的一个 tab）────────────────────────── */
 
   /**
+   * 内嵌导航可能结束在正文为空的 about:blank；load 事件不能当作渲染成功。
+   * 正常导航保持不变；空文档由父页读取同一只读地址，以 srcdoc 恢复。
+   */
+  function watchBoardFrame(frame, src, setPhase) {
+    if (!frame) return function () {};
+    var stopped = false;
+    var recovering = false;
+    var fallback = false;
+    var timer = null;
+    var loadingUntil = Date.now() + 15000;
+    var abort = new AbortController();
+    setPhase('loading');
+    frame.removeAttribute('srcdoc');
+
+    function finish(phase) {
+      if (stopped) return;
+      clearTimeout(timer);
+      if (phase === 'error') abort.abort();
+      setPhase(phase);
+    }
+    async function recover() {
+      if (stopped || recovering) return;
+      if (fallback) { finish('error'); return; }
+      recovering = true;
+      fallback = true;
+      clearTimeout(timer);
+      timer = setTimeout(function () { finish('error'); }, 10000);
+      try {
+        var response = await fetch(src, { cache: 'no-store', headers: { accept: 'text/html' }, signal: abort.signal });
+        if (!response.ok || !(response.headers.get('content-type') || '').includes('text/html')) throw new Error('Invalid board response');
+        var html = await response.text();
+        var doc = new DOMParser().parseFromString(html, 'text/html');
+        if (!doc.body || (!doc.body.childElementCount && !doc.body.textContent.trim())) throw new Error('Empty board document');
+        var base = doc.querySelector('base') || doc.createElement('base');
+        base.href = new URL(src, frame.ownerDocument.baseURI).href;
+        doc.head.prepend(base);
+        var historyBridge = doc.createElement('script');
+        historyBridge.textContent = '(' + function () {
+          var replace = history.replaceState.bind(history);
+          history.replaceState = function (state, title, url) {
+            if (typeof url === 'string' && url.charAt(0) === '#') url = location.href.split('#')[0] + url;
+            return replace(state, title, url);
+          };
+        }.toString() + ')();';
+        base.after(historyBridge);
+        if (stopped || abort.signal.aborted) return;
+        clearTimeout(timer);
+        loadingUntil = Date.now() + 15000;
+        frame.srcdoc = '<!doctype html>\n' + doc.documentElement.outerHTML;
+        timer = setTimeout(inspect, 2500);
+      } catch (e) {
+        if (!stopped) finish('error');
+      } finally { recovering = false; }
+    }
+    function inspect() {
+      if (stopped) return;
+      if (recovering) return;
+      clearTimeout(timer);
+      try {
+        var doc = frame.contentDocument;
+        /* 外部字体/图片可能拖住 complete；正文解析并显示后不应继续遮挡。 */
+        if (doc && doc.URL !== 'about:blank' && doc.readyState !== 'loading' && doc.body
+          && (doc.body.childElementCount || doc.body.textContent.trim())) { finish('ready'); return; }
+        if (doc && doc.readyState !== 'complete') {
+          if (Date.now() < loadingUntil) { timer = setTimeout(inspect, 500); return; }
+          finish('error'); return;
+        }
+      } catch (e) { /* 不可读的空/错误帧同样走同源恢复。 */ }
+      recover();
+    }
+    frame.addEventListener('load', inspect);
+    frame.addEventListener('error', recover);
+    timer = setTimeout(inspect, 2500);
+    return function () {
+      stopped = true;
+      clearTimeout(timer);
+      abort.abort();
+      frame.removeEventListener('load', inspect);
+      frame.removeEventListener('error', recover);
+    };
+  }
+
+  /**
    * 看板视图：与「轨迹」并排的一个 tab。
    *
    * **不自绘 UI**：直接 iframe 加载官方成品看板
@@ -294,6 +371,10 @@ function createAgentNotesClient(require) {
     var frameState = useState('loading');
     var phase = frameState[0];
     var setPhase = frameState[1];
+    var frameRef = React.useRef(null);
+    var retryState = useState(0);
+    var retry = retryState[0];
+    var setRetry = retryState[1];
 
     /* 两个宿主传的会话信息形状不同，必须都认：
        - conversation.view（DSH 内置槽位）：顶层 `sessionId`
@@ -320,9 +401,14 @@ function createAgentNotesClient(require) {
     } else if (typeof props.cwd === 'string') {
       scopeCwd = props.cwd;
     }
+    var listedCwd = typeof props.useSessions === 'function'
+      ? props.useSessions(function (list) { return list?.byId?.[sessionId]?.cwd; })
+      : undefined;
+    if (scopeCwd === null && typeof listedCwd === 'string') scopeCwd = listedCwd;
     // 文档相对地址由浏览器按 document.baseURI 解析，保留子路径挂载前缀。
     var src = 'agent-notes/ui?session=' + encodeURIComponent(String(sessionId ?? ''));
     if (scopeCwd !== null && scopeCwd !== '') src += '&cwd=' + encodeURIComponent(scopeCwd);
+    React.useEffect(function () { return watchBoardFrame(frameRef.current, src, setPhase); }, [src, retry]);
 
     /* `data-conversation-composer-overlay` 是宿主认的「本视图自己占满整块」标记。
        带上它，宿主 CSS 会把 .viewArea 变成 flex:1 1 0 + min-height:0 +
@@ -334,18 +420,21 @@ function createAgentNotesClient(require) {
       className: 'an-board',
       'data-conversation-composer-overlay': ''
     },
-      phase === 'error'
-        ? h('div', { className: 'an-board-empty' }, copy('boardError'))
+      phase !== 'ready'
+        ? h('div', { className: 'an-board-empty', role: 'status' },
+          phase === 'error'
+            ? h('span', null, copy('boardError'), ' ',
+              h('button', { type: 'button', onClick: function () { setRetry(retry + 1); } }, copy('boardRetry')))
+            : copy('boardLoading'))
         : null,
       h('iframe', {
         className: 'an-board-frame',
+        ref: frameRef,
         src: src,
         title: copy('boardTitle'),
         /* 看板要跑脚本、读自己的内联数据；不放开则一片空白。
            same-origin 是必需的：它要和宿主同源才能被正确加载。 */
-        sandbox: 'allow-scripts allow-same-origin',
-        onLoad: function () { setPhase('ready'); },
-        onError: function () { setPhase('error'); }
+        sandbox: 'allow-scripts allow-same-origin'
       })
     );
   }
@@ -372,8 +461,7 @@ function createAgentNotesClient(require) {
        - list 类型 + session 作用域，与现有 tab 共存不冲突；
        - id 不能叫 'trajectory' —— 那是宿主内置轨迹视图的保留 id，且受
          developerTools 开关限制；换个 id 才能对所有用户可见；
-       - 这里只把「怎么注册」登记进 boardTab，真正注册/注销由开关组件按
-         投影状态驱动（原因见 boardTab 的注释）。 */
+       - 这里只登记注册方式，真正增删由当前主会话的可见性查询驱动。 */
     try {
       slots.inject('conversation.view', function () {
         hosts.slots.register = function () {

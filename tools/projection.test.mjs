@@ -350,11 +350,11 @@ test('侧边栏宿主：component 必须把宿主 props 转交给看板，iframe
   /* fetch 用形参遮蔽全局：闸门问的是 `agent-notes/status`，测试里不该真发请求
      （那会把用例变成依赖网络的假红）。 */
   const fetchStub = () => Promise.resolve({ ok: true, json: () => Promise.resolve({ available: true }) });
-  const factoryFn = new Function('window', 'document', 'module', 'exports', 'require', 'fetch', bundle);
+  const factoryFn = new Function('window', 'document', 'module', 'exports', 'require', 'fetch', 'setTimeout', 'clearTimeout', bundle);
   factoryFn(fakeWindow, { createElement: () => null, documentElement: {} }, {}, {}, (name) => {
     if (name === 'react') return reactStub;
     return {};
-  }, fetchStub);
+  }, fetchStub, () => 1, () => {});
   assert.ok(captured !== null, '应能捕获到客户端模块工厂');
 
   let descriptor = null;

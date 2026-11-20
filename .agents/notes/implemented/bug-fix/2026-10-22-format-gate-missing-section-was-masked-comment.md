@@ -11,7 +11,7 @@ Status: implemented
 
 ## Problem
 
-真实事故（2026-10-22，`D:\WishProject\sourin-flutter-spike`，一篇 implemented 笔记）：
+真实事故（2026-10-22，一个已有决策笔记的项目，一篇 implemented 笔记）：
 
 ```text
 format: implemented/bug-fix/2026-10-22-…md — missing one of ["## Consequences","## 后果",…]

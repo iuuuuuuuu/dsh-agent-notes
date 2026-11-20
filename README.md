@@ -86,10 +86,8 @@ dsh plugin add --profile <你的profile> github:iuuuuuuuu/dsh-agent-notes
 > 是仓库的事实，不该每会话手动确认。要关仍有两条路：`enabled: false`，或
 > `/agent-notes off`。
 
-**看板 tab 自动出现**：工作目录确实在用决策笔记时（有 `.agents/notes`，或装着
-项目技能副本 `.agents/skills/agent-notes`），「笔记」tab 自己出现；没接入的仓库不多出空 tab。
-判据由 Host 读磁盘得出（浏览器没有文件系统，也不能猜仓库），前端只问一次
-`GET agent-notes/status`。
+**「笔记」tab 自动出现**：项目装了对应技能，或看板能找到至少一篇独立决策笔记。
+空的 `.agents/notes` 不算；会话中写入首篇后，无需重载即可显示。
 
 > 设计说明：插件**不写会话日志**（零 `@deepseek-ai` 依赖，拿不到
 > `appendPluginRecord`；退路 `session.append('plugin:…')` 会写出 `ignorable=undefined`

@@ -16,8 +16,9 @@ import {
   PROJECT_SKILL_REL,
   buildDriftHint,
   inspectProjectSkillCopy,
-  syncProjectSkillCopy
-, projectUsesNotes } from '../lib/project-skill.js';
+  syncProjectSkillCopy,
+  projectUsesNotes
+} from '../lib/project-skill.js';
 import { POLICY_MARKERS, buildPolicyText } from '../lib/policy.js';
 
 /** 造一个带项目副本的临时项目目录。 */
@@ -161,36 +162,100 @@ test('policy: 明确交代两份副本的关系，并禁止编造 README/升级�
   }
 });
 
-test('projectUsesNotes: 只认「装了技能副本」；笔记树不算', () => {
-  /* 判据决定看板 tab 要不要出现。
-     2026-11-12 实测修正：第一版把 `.agents/notes` 也当判据，结果**没装 skill
-     的目录也出现了看板**（Owner 当场指出）。笔记树是技能的产出物，不是安装凭据。 */
-  const base = mkdtempSync(join(tmpdir(), 'an-uses-'));
+/** 建立真正的技能安装文件，而不是用空目录冒充安装。 */
+function writeNoteSkill(root, rel, name = 'agent-notes') {
+  const dir = join(root, ...rel.split('/'));
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, 'SKILL.md'), [
+    '---', 'name: ' + name, 'description: decision notes', '---', '', '# Notes', ''
+  ].join('\n'));
+}
+
+/** 只建旧项目的笔记与脚本配套，不安装项目技能。 */
+function writeExistingNote(root, rel = '.agents/notes') {
+  const dir = join(root, ...rel.split('/'), 'implemented', 'bug-fix');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, '2026-11-19-existing.md'), [
+    '# Agent Note: 既有项目的决定', '', 'Status: implemented', '',
+    '## Problem', '旧项目没有项目 skill。', '', '## Decision', '展示既有笔记。', '',
+    '## Alternatives considered', '无', '', '## Consequences', '不改写项目文件。', ''
+  ].join('\n'));
+}
+
+test('projectUsesNotes: 已有真实笔记的 notes-scripts 项目即使没有 skill 也显示', () => {
+  const root = mkdtempSync(join(tmpdir(), 'an-existing-'));
   try {
-    assert.equal(projectUsesNotes(base), false, '空目录：没装技能');
+    mkdirSync(join(root, '.agents', 'notes-scripts'), { recursive: true });
+    writeExistingNote(root);
+    assert.equal(existsSync(join(root, '.agents', 'skills')), false);
+    assert.equal(projectUsesNotes(root), true, '旧式配套不能因没有项目 skill 而丢掉看板');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
-    mkdirSync(join(base, '.agents', 'skills', 'agent-notes'), { recursive: true });
-    assert.equal(projectUsesNotes(base), true, '装了 agent-notes 副本即为在用');
+test('projectUsesNotes: 空目录、任意 Markdown 和翻译旁挂不能冒充真实笔记', () => {
+  const root = mkdtempSync(join(tmpdir(), 'an-empty-notes-'));
+  try {
+    const dir = join(root, '.agents', 'notes', 'implemented', 'bug-fix');
+    mkdirSync(dir, { recursive: true });
+    assert.equal(projectUsesNotes(root), false, '空笔记目录不是接入证据');
+    writeFileSync(join(dir, 'README.md'), '# 使用说明\n');
+    writeFileSync(join(dir, '2026-11-19-random.md'), '# 随手记录\n');
+    assert.equal(projectUsesNotes(root), false, '无关内容不会多出 tab');
+    writeFileSync(join(dir, '2026-11-19-sidecar.zh.md'), '# Agent Note: translation\n\nStatus: implemented\n');
+    assert.equal(projectUsesNotes(root), false, '翻译旁挂不算独立笔记');
+    assert.equal(projectUsesNotes(undefined), false);
+    assert.equal(projectUsesNotes(''), false);
+    assert.equal(projectUsesNotes('.'), false, '不能退回宿主进程目录');
+    assert.equal(projectUsesNotes(join(root, 'missing')), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
-    /* 上游旧名同样是真实的项目副本形态。 */
-    rmSync(join(base, '.agents'), { recursive: true, force: true });
-    mkdirSync(join(base, '.agents', 'skills', 'write-notes-like-deepseek'), { recursive: true });
-    assert.equal(projectUsesNotes(base), true, '旧技能名也算装了');
+test('projectUsesNotes: 技能身份来自 SKILL.md，不猜目录名的 notes 子串', () => {
+  const root = mkdtempSync(join(tmpdir(), 'an-skill-identity-'));
+  try {
+    mkdirSync(join(root, '.agents', 'skills', 'agent-notes'), { recursive: true });
+    assert.equal(projectUsesNotes(root), false, '空壳不能冒充技能');
+    writeNoteSkill(root, '.agents/skills/agent-notes', 'meeting-notes');
+    writeNoteSkill(root, '.agents/skills/meeting-notes', 'meeting-notes');
+    assert.equal(projectUsesNotes(root), false, '别的笔记技能不是决策笔记');
+    writeNoteSkill(root, '.agents/skills/agent-notes');
+    assert.equal(projectUsesNotes(root), true);
+    rmSync(join(root, '.agents'), { recursive: true, force: true });
+    writeNoteSkill(root, '.agents/skills/write-notes-like-deepseek', 'write-notes-like-deepseek');
+    assert.equal(projectUsesNotes(root), true, '上游旧名按身份识别');
+    rmSync(join(root, '.agents'), { recursive: true, force: true });
+    writeNoteSkill(root, '.claude/skills/agent-notes');
+    assert.equal(projectUsesNotes(root), true, '项目级 Claude 技能也支持');
+    rmSync(join(root, '.claude'), { recursive: true, force: true });
+    writeNoteSkill(root, 'skills/agent-notes', 'write-notes-like-deepseek');
+    assert.equal(projectUsesNotes(root), true, '本插件的包布局仍支持');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
-    /* 只有笔记树：不算（这正是被 Owner 抓到的那条）。 */
-    rmSync(join(base, '.agents'), { recursive: true, force: true });
-    mkdirSync(join(base, '.agents', 'notes'), { recursive: true });
-    assert.equal(projectUsesNotes(base), false, '只有笔记树不算 —— 产出物不是安装凭据');
+test('projectUsesNotes: 子目录继承所属仓库的笔记，但不越过嵌套仓库边界', () => {
+  const root = mkdtempSync(join(tmpdir(), 'an-adoption-root-'));
+  try {
+    mkdirSync(join(root, '.git'));
+    const child = join(root, 'src', 'ui');
+    mkdirSync(child, { recursive: true });
+    writeExistingNote(root);
+    assert.equal(projectUsesNotes(child), true);
+    const nested = join(root, 'vendor', 'other');
+    mkdirSync(join(nested, '.git'), { recursive: true });
+    assert.equal(projectUsesNotes(nested), false, '嵌套仓库不能借用父项目的笔记');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 
-    /* 本插件仓库自己的包布局（根 skills/agent-notes）。 */
-    rmSync(join(base, '.agents'), { recursive: true, force: true });
-    mkdirSync(join(base, 'skills', 'agent-notes'), { recursive: true });
-    assert.equal(projectUsesNotes(base), true, '插件自身仓库的 skills/agent-notes 也算');
-
-    assert.equal(projectUsesNotes(undefined), false, 'undefined 不得当成在用');
-    assert.equal(projectUsesNotes(''), false, '空串不得当成在用');
-    assert.equal(projectUsesNotes(join(base, 'nope')), false, '不存在的目录不得当成在用');
-  } finally {
-    rmSync(base, { recursive: true, force: true });
-  }
+test('projectUsesNotes: 复用看板的配置/工作树笔记根，不把单独 notesRoot 当成存在证据', () => {
+  const root = mkdtempSync(join(tmpdir(), 'an-custom-notes-'));
+  try {
+    const notesRoot = join(root, 'custom-notes');
+    const roots = () => [notesRoot];
+    assert.equal(projectUsesNotes(root, roots), false);
+    writeExistingNote(root, 'custom-notes');
+    assert.equal(projectUsesNotes(root), false, '没有扫描无关子目录');
+    assert.equal(projectUsesNotes(root, roots), true, '配置根里有真实笔记时展示');
+    writeExistingNote(root);
+    assert.equal(projectUsesNotes(root, () => []), false, '以看板实际读取的根为准，不另猜默认目录');
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
