@@ -93,6 +93,7 @@
     "docs:fix-links": "node tools/bilingual-links.mjs"
   },
   "devDependencies": {
+    "playwright-core": "1.65.1",
     "spdx-expression-parse": "^5.0.0"
   },
   "dependencies": {

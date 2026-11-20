@@ -115,6 +115,7 @@ function createAgentNotesClient(require) {
       boardTitle: '笔记',
       boardLoading: '正在读取笔记…',
       boardError: '读不到笔记树',
+      boardRetry: '重试',
       boardEmpty: '笔记树存在，但还没有笔记',
       boardNoTree: '这个仓库还没有 .agents/notes',
       boardSearch: '搜索标题 / 分类…',
@@ -124,6 +125,7 @@ function createAgentNotesClient(require) {
       boardTitle: 'Notes',
       boardLoading: 'Reading notes…',
       boardError: 'Cannot read the notes tree',
+      boardRetry: 'Retry',
       boardEmpty: 'The notes tree exists but has no notes yet',
       boardNoTree: 'This repository has no .agents/notes yet',
       boardSearch: 'Search title / class…',
@@ -270,6 +272,89 @@ function createAgentNotesClient(require) {
   /* ── 笔记看板（conversation.view 的一个 tab）────────────────────────── */
 
   /**
+   * 内嵌导航可能结束在正文为空的 about:blank；load 事件不能当作渲染成功。
+   * 正常导航保持不变；空文档由父页读取同一只读地址，以 srcdoc 恢复。
+   */
+  function watchBoardFrame(frame, src, setPhase) {
+    if (!frame) return function () {};
+    var stopped = false;
+    var recovering = false;
+    var fallback = false;
+    var timer = null;
+    var loadingUntil = Date.now() + 15000;
+    var abort = new AbortController();
+    setPhase('loading');
+    frame.removeAttribute('srcdoc');
+
+    function finish(phase) {
+      if (stopped) return;
+      clearTimeout(timer);
+      if (phase === 'error') abort.abort();
+      setPhase(phase);
+    }
+    async function recover() {
+      if (stopped || recovering) return;
+      if (fallback) { finish('error'); return; }
+      recovering = true;
+      fallback = true;
+      clearTimeout(timer);
+      timer = setTimeout(function () { finish('error'); }, 10000);
+      try {
+        var response = await fetch(src, { cache: 'no-store', headers: { accept: 'text/html' }, signal: abort.signal });
+        if (!response.ok || !(response.headers.get('content-type') || '').includes('text/html')) throw new Error('Invalid board response');
+        var html = await response.text();
+        var doc = new DOMParser().parseFromString(html, 'text/html');
+        if (!doc.body || (!doc.body.childElementCount && !doc.body.textContent.trim())) throw new Error('Empty board document');
+        var base = doc.querySelector('base') || doc.createElement('base');
+        base.href = new URL(src, frame.ownerDocument.baseURI).href;
+        doc.head.prepend(base);
+        var historyBridge = doc.createElement('script');
+        historyBridge.textContent = '(' + function () {
+          var replace = history.replaceState.bind(history);
+          history.replaceState = function (state, title, url) {
+            if (typeof url === 'string' && url.charAt(0) === '#') url = location.href.split('#')[0] + url;
+            return replace(state, title, url);
+          };
+        }.toString() + ')();';
+        base.after(historyBridge);
+        if (stopped || abort.signal.aborted) return;
+        clearTimeout(timer);
+        loadingUntil = Date.now() + 15000;
+        frame.srcdoc = '<!doctype html>\n' + doc.documentElement.outerHTML;
+        timer = setTimeout(inspect, 2500);
+      } catch (e) {
+        if (!stopped) finish('error');
+      } finally { recovering = false; }
+    }
+    function inspect() {
+      if (stopped) return;
+      if (recovering) return;
+      clearTimeout(timer);
+      try {
+        var doc = frame.contentDocument;
+        /* 外部字体/图片可能拖住 complete；正文解析并显示后不应继续遮挡。 */
+        if (doc && doc.URL !== 'about:blank' && doc.readyState !== 'loading' && doc.body
+          && (doc.body.childElementCount || doc.body.textContent.trim())) { finish('ready'); return; }
+        if (doc && doc.readyState !== 'complete') {
+          if (Date.now() < loadingUntil) { timer = setTimeout(inspect, 500); return; }
+          finish('error'); return;
+        }
+      } catch (e) { /* 不可读的空/错误帧同样走同源恢复。 */ }
+      recover();
+    }
+    frame.addEventListener('load', inspect);
+    frame.addEventListener('error', recover);
+    timer = setTimeout(inspect, 2500);
+    return function () {
+      stopped = true;
+      clearTimeout(timer);
+      abort.abort();
+      frame.removeEventListener('load', inspect);
+      frame.removeEventListener('error', recover);
+    };
+  }
+
+  /**
    * 看板视图：与「轨迹」并排的一个 tab。
    *
    * **不自绘 UI**：直接 iframe 加载官方成品看板
@@ -286,6 +371,10 @@ function createAgentNotesClient(require) {
     var frameState = useState('loading');
     var phase = frameState[0];
     var setPhase = frameState[1];
+    var frameRef = React.useRef(null);
+    var retryState = useState(0);
+    var retry = retryState[0];
+    var setRetry = retryState[1];
 
     /* 两个宿主传的会话信息形状不同，必须都认：
        - conversation.view（DSH 内置槽位）：顶层 `sessionId`
@@ -319,6 +408,7 @@ function createAgentNotesClient(require) {
     // 文档相对地址由浏览器按 document.baseURI 解析，保留子路径挂载前缀。
     var src = 'agent-notes/ui?session=' + encodeURIComponent(String(sessionId ?? ''));
     if (scopeCwd !== null && scopeCwd !== '') src += '&cwd=' + encodeURIComponent(scopeCwd);
+    React.useEffect(function () { return watchBoardFrame(frameRef.current, src, setPhase); }, [src, retry]);
 
     /* `data-conversation-composer-overlay` 是宿主认的「本视图自己占满整块」标记。
        带上它，宿主 CSS 会把 .viewArea 变成 flex:1 1 0 + min-height:0 +
@@ -330,18 +420,21 @@ function createAgentNotesClient(require) {
       className: 'an-board',
       'data-conversation-composer-overlay': ''
     },
-      phase === 'error'
-        ? h('div', { className: 'an-board-empty' }, copy('boardError'))
+      phase !== 'ready'
+        ? h('div', { className: 'an-board-empty', role: 'status' },
+          phase === 'error'
+            ? h('span', null, copy('boardError'), ' ',
+              h('button', { type: 'button', onClick: function () { setRetry(retry + 1); } }, copy('boardRetry')))
+            : copy('boardLoading'))
         : null,
       h('iframe', {
         className: 'an-board-frame',
+        ref: frameRef,
         src: src,
         title: copy('boardTitle'),
         /* 看板要跑脚本、读自己的内联数据；不放开则一片空白。
            same-origin 是必需的：它要和宿主同源才能被正确加载。 */
-        sandbox: 'allow-scripts allow-same-origin',
-        onLoad: function () { setPhase('ready'); },
-        onError: function () { setPhase('error'); }
+        sandbox: 'allow-scripts allow-same-origin'
       })
     );
   }

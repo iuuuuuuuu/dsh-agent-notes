@@ -78,6 +78,7 @@
 
 | 包 | 类型 | 版本 | 许可证 |
 |---|---|---|---|
+| `playwright-core` | 直接 | `1.65.1` | Apache-2.0 |
 | `spdx-expression-parse` | 直接 | `5.0.0` | MIT |
 | `spdx-exceptions` | 传递 | `2.5.0` | CC-BY-3.0 |
 | `spdx-license-ids` | 传递 | `3.0.24` | CC0-1.0 |

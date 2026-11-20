@@ -2,6 +2,9 @@
 
 Status: implemented
 
+> 空文档不能仅凭 iframe 的 load 判成功，恢复及桌面白屏处理见
+> [空 iframe 恢复](2026-11-20-board-recovers-empty-iframe.md)。本篇接入判据与 cwd 规则保持。
+
 ## Problem
 
 用户报告：工作区已经有决策笔记与 `notes-scripts` 配套，却没有「笔记」tab。

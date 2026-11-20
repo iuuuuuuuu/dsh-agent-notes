@@ -70,6 +70,9 @@ jobs:
       - name: 安装依赖
         run: npm ci
 
+      - name: 安装真实浏览器回归依赖
+        run: npx --no-install playwright-core install --with-deps chromium
+
       # 完整自检：包清单、patch 一致性、零依赖、双语文档、vendored 哈希、
       # 客户端 bundle 同步、投影与命令名一致性，然后跑测试与故障注入。
       # notes:gate 单独列出来：三条 vendored 脚本在空集合上 exit 0，
